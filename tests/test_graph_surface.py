@@ -27,7 +27,7 @@ from ozagia.integrations.mcp.server import DevMemoryServer, main
 # `tools/list` of the full surface before the graph surface was added, with
 # the seed adapter loaded (dev_seed, dev_rule and the adapter's tool).
 FULL_SURFACE_TOOLS = [
-    "dev_context", "dev_brief", "dev_repo_map", "dev_impact",
+    "dev_context", "dev_brief", "dev_overview", "dev_repo_map", "dev_impact",
     "dev_architecture", "dev_code_search", "dev_scip", "dev_search",
     "dev_file", "dev_symbol", "dev_outline", "dev_query", "dev_ast",
     "dev_edit",

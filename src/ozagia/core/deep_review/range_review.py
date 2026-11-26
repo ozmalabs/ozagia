@@ -51,6 +51,7 @@ _TYPE_SECTION = {
     "unhandled_error": "failure-modes",
     "architecture": "architecture",
     "breaking_change": "architecture",
+    "non_breaking_change": "architecture",
     "contract_mismatch": "architecture",
     "stale_reference": "architecture",
     "duplicate_logic": "architecture",

@@ -288,6 +288,101 @@ def _hint_repo(tmp_path: Path, text: str = HINT_RETRY) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 
 
+def test_deleted_binary_file_has_one_deletion_finding(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "assets").mkdir()
+    (repo / "assets" / "logo.bin").write_bytes(b"\x00\x01binary\n")
+    base = _commit(repo, "base")
+    (repo / "assets" / "logo.bin").unlink()
+    head = _commit(repo, "delete binary asset")
+
+    packet = R.review_range(repo, f"{base}..{head}")
+
+    deleted = _findings(packet, ftype="non_breaking_change",
+                        file="assets/logo.bin")
+    breaking = _findings(packet, ftype="breaking_change",
+                         file="assets/logo.bin")
+    binary = _findings(packet, ftype="unknown", file="assets/logo.bin")
+    assert len(deleted) == 1
+    assert deleted[0]["severity"] == "note"
+    assert breaking == []
+    assert binary == []
+
+
+def test_deleted_document_and_image_are_non_breaking(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "docs").mkdir()
+    (repo / "assets").mkdir()
+    (repo / "docs" / "guide.md").write_text("# guide\n", encoding="utf-8")
+    (repo / "assets" / "logo.png").write_bytes(b"\x89PNG\r\n")
+    base = _commit(repo, "base")
+    (repo / "docs" / "guide.md").unlink()
+    (repo / "assets" / "logo.png").unlink()
+    head = _commit(repo, "delete docs and image")
+
+    packet = R.review_range(repo, f"{base}..{head}")
+
+    for path in ("docs/guide.md", "assets/logo.png"):
+        deleted = _findings(packet, ftype="non_breaking_change", file=path)
+        assert len(deleted) == 1
+        assert deleted[0]["severity"] == "note"
+        assert _findings(packet, ftype="breaking_change", file=path) == []
+
+
+def test_deleted_source_config_and_executable_keep_breaking_classification(
+        tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "src").mkdir()
+    (repo / "config").mkdir()
+    (repo / "bin").mkdir()
+    (repo / "src" / "api.py").write_text("def public():\n    return 1\n",
+                                         encoding="utf-8")
+    (repo / "config" / "settings.toml").write_text(
+        "[service]\nenabled = true\n", encoding="utf-8")
+    script = repo / "bin" / "run"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    script.chmod(0o755)
+    base = _commit(repo, "base")
+    (repo / "src" / "api.py").unlink()
+    (repo / "config" / "settings.toml").unlink()
+    script.unlink()
+    head = _commit(repo, "delete source, config and executable")
+
+    packet = R.review_range(repo, f"{base}..{head}")
+
+    source = _findings(packet, ftype="breaking_change", file="src/api.py")
+    config = _findings(packet, ftype="breaking_change",
+                       file="config/settings.toml")
+    executable = _findings(packet, ftype="breaking_change", file="bin/run")
+    assert len(source) == 1 and source[0]["severity"] == "major"
+    assert len(config) == 1 and config[0]["severity"] == "note"
+    assert len(executable) == 1 and executable[0]["severity"] == "note"
+    for path in ("src/api.py", "config/settings.toml", "bin/run"):
+        assert _findings(packet, ftype="non_breaking_change", file=path) == []
+
+
+def test_missing_test_recognizes_javascript_and_cpp_test_names(
+        tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path / "repo")
+    (repo / "lib").mkdir()
+    (repo / "lib" / "utils.js").write_text(
+        "module.exports = function value() { return 1; };\n", encoding="utf-8")
+    (repo / "test").mkdir()
+    (repo / "test" / "utils.js").write_text(
+        "const utils = require('../lib/utils');\n", encoding="utf-8")
+    base = _commit(repo, "base")
+    (repo / "lib" / "utils.js").write_text(
+        "module.exports = function value() { return 2; };\n", encoding="utf-8")
+    (repo / "lib" / "other.js").write_text(
+        "module.exports = function other() { return 3; };\n", encoding="utf-8")
+    head = _commit(repo, "change js sources")
+
+    packet = R.review_range(repo, f"{base}..{head}")
+
+    assert not _findings(packet, ftype="missing_test", file="lib/utils.js")
+    assert _findings(packet, ftype="missing_test", file="lib/other.js")
+
+
 def test_packet_without_graph_uses_file_level_checks(review_repo):
     packet = R.review_range(
         review_repo["repo"], review_repo["range"], max_file_bytes=1024)

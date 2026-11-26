@@ -1,6 +1,33 @@
 # Session secret entry UI
 
-Status: design proposal (2026-11-17). No implementation in this document.
+Status: design proposal (2026-11-17; verified 2026-11-24; request slice
+2026-11-25; prompt-admission slice 2026-11-25). The reference broker,
+providers, redactor and in-memory session store are implemented in
+`src/ozagia/core/secrets.py` with `tests/test_secrets.py`
+and [`docs/secrets.md`](../secrets.md); runtime services, jobs and the daemon
+resolve refs only at their execution boundaries. The host-agnostic
+model-initiated **request** slice is implemented: a bounded metadata-only
+pending store, daemon `secrets` actions (`request`, `request_list`,
+`request_status`, `request_fulfill`, `request_decline`), the
+`ozagia-secrets request/requests/fulfill/decline` CLI with a `getpass`/stdin
+value path, and the OpenCode `ozagia_secret_request` tool returning a handle
+and local instructions. The value never enters tool output; a fulfilled
+request returns only its reference and fingerprint. MCP is deliberately
+unchanged because an MCP server cannot establish harness session identity
+without trusting model-supplied arguments.
+
+The **prompt-admission** slice is also implemented in the OpenCode plugin: at
+setup it registers the host's `prompt` hook, sends the prompt text to the
+daemon's `capture_text` action over the local socket, replaces captured values
+with session references, and remaps `prompt.files`/`agents`/`skills` mentions
+(shift after a replacement, remove an overlap). It fails open and never logs
+the text. This is verified against the plugin host fixture and the daemon
+protocol, **not** a live OpenCode session.
+
+Still not implemented: the native secret prompt and composer pill, the HTTP
+provider-request fallback, keychain/`pass`/`op`/`.env` persistence UI, revoke
+UI beyond the existing `forget`, and live-host verification of prompt-storage
+order and RPC logging.
 
 ## Problem
 
@@ -56,6 +83,10 @@ The desired flow is:
 
 ### A. Model-initiated request (primary)
 
+*Implemented in the host-agnostic slice (2026-11-25): the tool creates a
+metadata-only pending request and returns a handle plus the `ozagia-secrets
+fulfill` command. The native composer pill and dialog remain future work.*
+
 The model calls a tool:
 
 ```json
@@ -106,21 +137,36 @@ share with the model).
 
 ### C. Secret pasted into chat
 
-The plugin registers `session.prompt`:
+*Prompt-admission slice implemented (2026-11-25). The HTTP fallback and the
+native toast/pill remain future work.*
 
-1. detect common token/assignment shapes and high-entropy values;
-2. capture each value in the session store over the local-only path;
-3. replace it in the prompt with `secret://session/...`;
-4. show a toast: "Secret captured as secret://session/…; expires in 1h";
-5. retain a `secret://` ref in the prompt text so the model can use it.
+The plugin registers the host's `prompt` session hook at setup:
 
-If capture fails, **withhold** the value and replace it with
-`[ozagia: secret withheld; start the daemon and provide it via the Secrets
-panel]`. Never fall back to sending the raw value.
+1. it requires a string prompt text and a session id;
+2. it sends `{op: "secrets", action: "capture_text", text, harness, session}`
+   to the local daemon with a short (2 s) timeout;
+3. the daemon detects common token/assignment shapes, captures each value in
+   the session store, and returns the text with each captured value replaced
+   by `secret://session/...` (detections it cannot capture become
+   `[REDACTED]`);
+4. the hook replaces `event.prompt.text` with that text only when the reply
+   contains at least one captured `secrets` entry, so the model receives
+   refs, not values;
+5. it adjusts every mention in `prompt.files`, `prompt.agents` and
+   `prompt.skills` from the reply's `start`/`end` spans: a mention after a
+   replacement shifts by the length delta, and a mention overlapping a
+   replaced span is removed. Other prompt fields, `metadata`, `delivery` and
+   the ids are preserved.
 
-`http.request` repeats the check on the outbound provider body as a fallback
-for clients or paths where the prompt hook did not run. It must never log the
-body.
+If the daemon is absent, times out, returns an error or returns no captured
+secret, the hook leaves the prompt exactly as it was and does not throw. The
+text is never logged. This is protocol/host-fixture verification, not a live
+OpenCode session; prompt-storage order and RPC logging are still open
+questions.
+
+The HTTP provider-request check is still future work. If it is added, it must
+repeat the check on the outbound body as a fallback for clients or paths where
+the prompt hook did not run, and must never log the body.
 
 ### D. Secret needed by a running job
 
@@ -271,6 +317,11 @@ and revocable.
 
 ## Daemon/API contract (implementation sketch)
 
+*Implemented request slice (2026-11-25):* the daemon `secrets` actions are
+`request`, `request_list`, `request_status`, `request_fulfill` and
+`request_decline`; the CLI commands are `request`, `requests`, `fulfill` and
+`decline`. The sketch below keeps the original names for context.
+
 - `SessionSecretStore.capture(value, harness, session, label, ttl) -> CapturedSecret`
 - `SessionSecretStore.resolve(ref, harness, session) -> SecretValue`
 - `SessionSecretStore.list/forget/clear/prune`
@@ -300,6 +351,10 @@ and revocable.
 
 - A fake provider request body contains no secret after a user pastes one;
   only `secret://session/...`.
+- The OpenCode prompt hook rewrites a pasted canary to a session ref, shifts
+  mentions after it and removes an overlapping mention; the model-facing event
+  contains no raw value. No daemon, a timeout or a bad reply leaves the prompt
+  unchanged, and capture registration failure does not break setup.
 - A model tool call returns only ref/fingerprint; grep the full tool result,
   logs, daemon response and audit for the secret value.
 - The native secret prompt path is used; no custom password input in the
@@ -337,8 +392,10 @@ and revocable.
 
 ## Rollout
 
-1. **User-initiated + paste detection**: Secrets panel, native secret prompt,
-   session store, prompt hook, redaction. No model tool yet.
+1. **User-initiated + paste detection**: the in-memory session store, OpenCode
+   prompt hook and daemon-side redaction are implemented; the prompt hook is
+   verified against the plugin host fixture, not a live session. The Secrets
+   panel and native secret prompt remain. No model tool was part of this step.
 2. **Model-initiated request**: `secret_request` tool, pending pill, waiting
    status, result ref.
 3. **Persistence**: keyring, `.env`, `pass`, 1Password previews/applies; expiry

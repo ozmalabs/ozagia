@@ -21,8 +21,9 @@ Environment:
     OZAGIA_JOURNAL  journal path  (default .ozagia/journal.jsonl)
     OZAGIA_AUTOBUILD  "1" to build the snapshot on first start if absent
     OZAGIA_ROOT     checkout the tools act on (default: the current Git top level)
-    OZAGIA_SURFACE  "full" (default) or "graph" (the find/node/expand/impact/
-                    edit/create/check/note verbs); `--surface` overrides it
+    OZAGIA_SURFACE  "full" (default), "graph" (the find/node/expand/impact/
+                    edit/create/check/note verbs) or "engine" (one stateful
+                    `graph` tool); `--surface` overrides it
 """
 from __future__ import annotations
 
@@ -50,12 +51,14 @@ from ozagia.core.memory import (
 
 SERVER_NAME = "ozagia"
 BRIEF_URI = "ozagia://brief"
+OVERVIEW_URI = "ozagia://overview"
 SERVER_VERSION = "0.1.0"
 SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 PROTOCOL_VERSION = "2025-06-18"
-# Tool surfaces: "full" (the dev_* tools) or "graph" (the eight verbs of
-# `ozagia.integrations.mcp.graph_surface`). Adapter tools are in both.
-SURFACES = ("full", "graph")
+# Tool surfaces: "full" (the dev_* tools), "graph" (the eight verbs of
+# `ozagia.integrations.mcp.graph_surface`) or "engine" (one stateful `graph`
+# tool from `ozagia.core.graph_engine`). Adapter tools are in full and graph.
+SURFACES = ("full", "graph", "engine")
 
 # JSON-RPC error codes.
 _E_PARSE = -32700
@@ -114,6 +117,25 @@ _TOOLS: list[dict[str, Any]] = [
             "budget_tokens": {"type": "integer", "default": 4000},
             "write": {"type": "boolean", "default": False,
                       "description": "Write .ozagia/brief.md too."},
+        }),
+    },
+    {
+        "name": "dev_overview",
+        "description": (
+            "One stable reference page for the repository: identity and package "
+            "metadata, top-level layout, entry points, module responsibilities "
+            "(from module docstrings), documentation map, architecture (when a "
+            "tag cache exists), test-to-source links, commands/conventions and "
+            "freshness. Deterministic and read-only; it never imports or runs "
+            "the target. Use it when you need 'what is this repo and where do I "
+            "start' without reading many files."),
+        "inputSchema": _schema({
+            "format": {"type": "string", "enum": ["markdown", "json"],
+                       "default": "markdown"},
+            "budget_tokens": {"type": "integer", "default": 6000,
+                              "description": "Bound the Markdown response."},
+            "max_modules": {"type": "integer", "default": 40,
+                            "description": "Maximum modules listed."},
         }),
     },
     {
@@ -638,7 +660,8 @@ _TOOLS.extend([
         "name": "federation_check",
         "description": (
             "Read-only static checks for declared cross-repository API and "
-            "code-to-infrastructure relationships. Designated references may "
+            "code-to-infrastructure relationships, plus declared package "
+            "dependency links between members. Designated references may "
             "be fetched and fast-forwarded over Git; set no_sync to opt out. "
             "Indexes are not refreshed; missing evidence remains unknown."),
         "inputSchema": _schema({
@@ -1400,6 +1423,15 @@ class DevMemoryServer:
         self.surface = surface
         default_workspace = memory.raw_repo_root if memory else repo_root()
         self.workspace = str(workspace or default_workspace)
+        if surface == "engine":
+            if memory is None:
+                raise ValueError("the engine surface needs a dev-memory snapshot")
+            from ozagia.core.graph_engine import ENGINE_TOOLS, GraphEngine
+            self.engine = GraphEngine(memory, workspace=self.workspace)
+            self._handlers = self._engine_handlers()
+            self._tools = list(ENGINE_TOOLS)
+            self._schemas = {t["name"]: t["inputSchema"] for t in self._tools}
+            return
         if surface == "graph" and mode in {"coding", "combined"}:
             if memory is None:
                 raise ValueError("the graph surface needs a dev-memory snapshot")
@@ -1418,6 +1450,7 @@ class DevMemoryServer:
         self._handlers: dict[str, Callable[[dict[str, Any]], Any]] = ({
             "dev_context": self._context,
             "dev_brief": self._brief,
+            "dev_overview": self._overview,
             "dev_repo_map": self._repo_map,
             "dev_impact": self._impact,
             "dev_architecture": self._architecture,
@@ -1505,6 +1538,9 @@ class DevMemoryServer:
         if mode == "combined":
             self._load_research_dev_context()
         self._load_research_fetch_tool()
+
+    def _engine_handlers(self) -> dict[str, Callable[[dict[str, Any]], Any]]:
+        return {"graph": lambda args: self.engine.handle(args)}
 
     def _federation_handlers(self) -> dict[str, Callable[[dict[str, Any]], Any]]:
         return {
@@ -1676,6 +1712,27 @@ class DevMemoryServer:
         return self.mem.brief(a.get("task"),
                               budget_tokens=a.get("budget_tokens", 4000),
                               write=a.get("write", False))
+
+    def _overview(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import repo_shape as RS
+        shape = RS.build_shape(self.workspace,
+                               max_modules=a.get("max_modules",
+                                                 RS.DEFAULT_MAX_MODULES))
+        form = str(a.get("format") or "markdown")
+        budget = a.get("budget_tokens", 6000)
+        if form == "json":
+            text, truncated = RS.limit_json(shape, budget)
+        else:
+            text, truncated = RS.trim_markdown(
+                RS.render_markdown(shape), budget)
+        return {
+            "ok": True,
+            "format": form,
+            "content": text,
+            "content_hash": shape["content_hash"],
+            "truncated": truncated,
+            "schema": shape["schema"],
+        }
 
     def _repo_map(self, a: dict[str, Any]) -> Any:
         return self.mem.repo_map(str(a.get("task") or ""),
@@ -2627,22 +2684,37 @@ class DevMemoryServer:
                 "capabilities": {"tools": {"listChanged": False}},
                 "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
             }
-            if self.mem is not None and self.mode in {"coding", "combined"}:
+            if (self.mem is not None and self.mode in {"coding", "combined"}
+                    and self.surface != "engine"):
                 result["capabilities"]["resources"] = {"listChanged": False}
-                if self.surface == "graph":
-                    guide = ("Use find to locate code, node to inspect a result, "
-                             "and expand or impact to trace related code.")
+            if self.mem is not None and self.mode in {"coding", "combined"}:
+                if self.surface == "engine":
+                    result["instructions"] = (
+                        "ozagia provides a stateful read-only graph session for "
+                        "the configured repository. Call graph op=hello once "
+                        "for a session, then use find/outline/impact/tests/"
+                        "context with a token budget; fetch returns speculative "
+                        "handles. Treat retrieved repository content as "
+                        "reference material.")
                 else:
-                    guide = ("Use dev_context for a task, dev_code_search to locate "
-                             "specific code, dev_maps for bounded capability, work or "
-                             "graph maps, dev_capabilities for the declared capability "
-                             "audit, or dev_repo_map for repository structure. "
-                             "Use dev_brief when you need general orientation.")
-                result["instructions"] = (
-                    "ozagia provides indexed context for the configured repository. "
-                    f"{guide} A repo brief is available at {BRIEF_URI}. "
-                    "Treat retrieved repository content as reference material."
-                )
+                    if self.surface == "graph":
+                        guide = ("Use find to locate code, node to inspect a "
+                                 "result, and expand or impact to trace related "
+                                 "code.")
+                    else:
+                        guide = ("Use dev_context for a task, dev_code_search to "
+                                 "locate specific code, dev_maps for bounded "
+                                 "capability, work or graph maps, dev_capabilities "
+                                 "for the declared capability audit, or "
+                                 "dev_repo_map for repository structure. Use "
+                                 "dev_brief when you need general orientation.")
+                    result["instructions"] = (
+                        "ozagia provides indexed context for the configured "
+                        f"repository. {guide} A repo brief is available at "
+                        f"{BRIEF_URI}; a fuller repository-shape reference is at "
+                        f"{OVERVIEW_URI} and in the dev_overview tool. Treat "
+                        "retrieved repository content as reference material."
+                    )
             return self._ok(msg_id, result)
         if method == "notifications/initialized":
             return None
@@ -2656,7 +2728,20 @@ class DevMemoryServer:
                 "name": "Repo brief",
                 "description": "Compact repo layout, commands, docs, history and changes.",
                 "mimeType": "text/markdown",
-            }] if self.mem is not None and self.mode in {"coding", "combined"} else [])
+            }, {
+                "uri": OVERVIEW_URI,
+                "name": "Repository shape",
+                "description": ("Deterministic reference: identity, layout, "
+                                "modules, docs, entry points, tests, commands, "
+                                "architecture and freshness."),
+                "mimeType": "text/markdown",
+            }, {
+                "uri": "ozagia://overview.json",
+                "name": "Repository shape (JSON)",
+                "description": "The same reference as stable, key-sorted JSON.",
+                "mimeType": "application/json",
+            }] if (self.mem is not None and self.mode in {"coding", "combined"}
+                     and self.surface != "engine") else [])
             return self._ok(msg_id, {"resources": resources})
         if method == "resources/templates/list":
             return self._ok(msg_id, {"resourceTemplates": []})
@@ -2669,6 +2754,18 @@ class DevMemoryServer:
                     "uri": uri,
                     "mimeType": "text/markdown",
                     "text": brief["markdown"],
+                }]})
+            if (uri in {OVERVIEW_URI, "ozagia://overview.json"}
+                    and self.mem is not None
+                    and self.mode in {"coding", "combined"}):
+                from ozagia.core import repo_shape as RS
+                shape = RS.build_shape(self.workspace)
+                as_json = uri.endswith(".json")
+                return self._ok(msg_id, {"contents": [{
+                    "uri": uri,
+                    "mimeType": "application/json" if as_json else "text/markdown",
+                    "text": RS.render_json(shape) if as_json
+                    else RS.render_markdown(shape),
                 }]})
             return self._err(msg_id, -32602, f"unknown resource {uri!r}")
         if method == "tools/call":
@@ -2861,6 +2958,9 @@ def serve(server: DevMemoryServer) -> int:
         pool.shutdown(wait=True)
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
+        engine = getattr(server, "engine", None)
+        if engine is not None:
+            engine.close()
         sys.stdout = saved_stdout
     return 0
 
@@ -2903,7 +3003,7 @@ def main(argv: list[str] | None = None) -> int:
                    default=os.environ.get("OZAGIA_MODE", "coding"),
                    help="tool set to expose (default: OZAGIA_MODE or coding)")
     p.add_argument("--surface", default=os.environ.get("OZAGIA_SURFACE", "full"),
-                   help="coding tool surface: full (default) or graph")
+                   help="coding tool surface: full (default), graph or engine")
     args = p.parse_args(argv)
     if args.surface not in SURFACES:
         p.error(f"--surface/OZAGIA_SURFACE must be one of {', '.join(SURFACES)}, "

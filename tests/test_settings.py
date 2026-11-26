@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ozagia import cli, settings_cli
+from ozagia import config as project_config
 from ozagia.core import migrate as M
 from ozagia.core import settings as S
 
@@ -750,6 +751,93 @@ def _migrate_statuses(report: dict) -> dict[str, str]:
     return {item["legacy"]: item["status"] for item in report["entries"]}
 
 
+def test_project_model_section_keeps_registry_leaf_and_skips_named_entries(
+        tmp_path: Path) -> None:
+    data = {"environments": {
+        "trust_project_python": True,
+        "dev": {"paths": ["envs/dev"]},
+    }}
+    values, locations = S._parse_layer(data, Path("cfg.toml"), "user")
+    assert values == {"environments.trust_project_python": True}
+    assert locations["environments.trust_project_python"] == (
+        "environments", "trust_project_python")
+
+    with pytest.raises(S.SettingsError, match="user-only"):
+        S._parse_layer(data, Path("cfg.toml"), "repo")
+
+
+def test_trust_project_python_is_user_only_but_coexists_with_project_entries(
+        tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _write(S.user_config_path(),
+           "[environments]\ntrust_project_python = true\n")
+    target = _repo_config(root, """
+# keep this comment
+[index]
+test_dirs = ["spec"]
+
+[environments.dev]
+paths = ["envs/dev"]
+""")
+    record = S.get(root, "environments.trust_project_python")
+    assert record["value"] is True
+    assert record["source"] == "user"
+    assert S.layer_values(root)["index.test_dirs"] == ["spec"]
+
+    result = S.set_values(
+        root, {"index.source_dirs": ["src"]}, scope="repo", dry_run=False)
+    assert result["applied"] is True
+    text = target.read_text(encoding="utf-8")
+    assert "# keep this comment" in text
+    assert '[environments.dev]\npaths = ["envs/dev"]' in text
+    assert S.layer_values(root)["index.source_dirs"] == ["src"]
+    assert S.get(root, "environments.trust_project_python")["value"] is True
+
+    _repo_config(root, """
+[environments]
+trust_project_python = true
+
+[environments.dev]
+paths = ["envs/dev"]
+""")
+    with pytest.raises(S.SettingsError, match="user-only"):
+        S.layer_values(root)
+
+
+def test_migration_coexists_with_user_trust_and_versioned_project_entries(
+        tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    _write(S.user_config_path(),
+           "[environments]\ntrust_project_python = true\n")
+    legacy = _write(root / ".ozagia.toml",
+                    '[environments.staging]\npaths = ["envs/staging"]\n')
+    target = _repo_config(root, """
+# keep this comment
+[environments.dev]
+paths = ["envs/dev"]
+""")
+    preview = M.migrate(root)
+    assert _migrate_statuses(preview) == {"environments.staging": "move"}
+    applied = M.migrate(root, dry_run=False, confirm=preview["token"])
+    assert applied["applied"] is True
+    text = target.read_text(encoding="utf-8")
+    assert "# keep this comment" in text
+    assert '[environments.dev]\npaths = ["envs/dev"]' in text
+    assert '[environments.staging]\npaths = ["envs/staging"]' in text
+    assert S.get(root, "environments.trust_project_python")["value"] is True
+
+    project_config.clear_config_cache()
+    cfg = project_config.load_project_config(root)
+    assert [item.name for item in cfg.environments] == ["staging", "dev"]
+    assert legacy.exists()
+
+    legacy.unlink()
+    project_config.clear_config_cache()
+    cfg = project_config.load_project_config(root)
+    assert [item.name for item in cfg.environments] == ["dev", "staging"]
+    assert S.get(root, "environments.trust_project_python")["value"] is True
+
+
 def test_migrate_maps_supported_sections_and_is_idempotent(
         tmp_path: Path) -> None:
     root = _root(tmp_path)
@@ -801,6 +889,7 @@ exclude = ["vendor/**"]
 max_findings = 50
 block_secrets = true
 secret_allowlist = ["path:tests/fixtures/**", "sha256:0123abcd"]
+finding_allowlist = ["sha256:0123456789abcdef"]
 
 [hints]
 library = "strict"
@@ -835,9 +924,10 @@ paths = ["envs/dev"]
             "jobs.enabled", "lint.enabled", "security.block_secrets",
             "hints.library"):
         assert statuses[legacy_key] == "move", legacy_key
-    assert statuses["[environments]"] == "unmapped"
-    assert preview["counts"]["move"] >= 25
+    assert statuses["environments.dev"] == "move"
+    assert preview["counts"]["move"] >= 26
     assert 'library = "strict"' in preview["diff"]
+    assert '[environments.dev]' in preview["diff"]
 
     applied = M.migrate(root, dry_run=False, confirm=preview["token"])
     assert applied["applied"] is True
@@ -859,6 +949,8 @@ paths = ["envs/dev"]
     assert values["lint.timeout_s"] == 5.0
     assert values["security.secret_allowlist"] == [
         "path:tests/fixtures/**", "sha256:0123abcd"]
+    assert values["security.finding_allowlist"] == [
+        "sha256:0123456789abcdef"]
     assert values["hints.library"] == "strict"
     assert values["review.layers"] == ["src/core", "src/api"]
     assert values["iac.roots"] == ["infra"]
@@ -867,7 +959,7 @@ paths = ["envs/dev"]
     assert second["changed"] is False
     assert second["token"] is None
     assert second["diff"] == ""
-    assert set(_migrate_statuses(second).values()) == {"same", "unmapped"}
+    assert set(_migrate_statuses(second).values()) == {"same"}
 
     noop = M.migrate(root, dry_run=False)
     assert noop["applied"] is False

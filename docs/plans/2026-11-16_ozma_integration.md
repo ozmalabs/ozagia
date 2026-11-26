@@ -1,5 +1,11 @@
 # Ozma integration and API intelligence plan
 
+Status: third delivery implemented, verified 2026-11-24. The read-only
+context-provider bridge, OpenAPI mapping resolution, doctor/status diagnostics
+and multi-repository fixture are implemented; the HTTP surface, general
+filesystem watcher and live agent benchmark remain follow-on work. The three
+delivery-status sections below record the tranches.
+
 ## Analysis and boundaries
 
 Ozma-ai's Python backend has an OpenAI-compatible gateway, context assembly, task APIs and repository-group/contract APIs. Ozagia already exposes `DevMemory.context`, snapshot staleness, incremental reingest, MCP and adapters. A useful first integration can compose these without importing a target repository or adding dependencies to ozagia core. Existing context budgets are approximate, the snapshot check has limits, and API specifications do not prove runtime implementation or consumer links.

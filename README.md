@@ -6,8 +6,12 @@ imports, call edges), keep it current while the agent edits, and put it in the
 agent's path. MIT licensed.
 
 Status: alpha. The library, the MCP server, the OpenCode capture plugin and
-the agent harnesses work; the Claude Code hooks are untested against a live
-Claude Code. Measurements are in `docs/results/`; plans in `docs/plans/`.
+the agent harnesses work; the Claude Code, Codex and Kiro hooks are implemented
+but untested against a live host. Measurements are in `docs/results/`; plans in `docs/plans/`; release sequencing
+and the current plan audit in [`docs/roadmap.md`](docs/roadmap.md).
+A generated reference for this repository's own shape (layout, modules, docs,
+entry points and commands) is [`REPO_SHAPE.md`](REPO_SHAPE.md), produced by
+`ozagia overview` ([docs/repo_shape.md](docs/repo_shape.md)).
 
 The [Ozma protocol research](docs/research/ozma_protocol/README.md) is
 preserved here as a design basis for Ozagia's future model interfaces. Its
@@ -57,10 +61,11 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
   profile evidence. External scanners run only when named with `--security-tool`;
   `--security-network` is a separate opt-in, and per-tool provenance is
   recorded. Dependencies include local licence/version inventory, optional
-  exact-version matching or OSV-style introduced/fixed SemVer ranges against an
-  explicit local advisory file (range matching supports Node/Rust and
-  `v`-prefixed Go; Python, Ruby and Composer are exact-version only; Ruby
-  matches only Bundler `GEM` source pins, not Git/path pins), and `sbom.json` with CVE state
+  exact-version matching or OSV-style introduced/fixed ranges against an
+  explicit local advisory file (range matching supports Node/Rust strict
+  SemVer, `v`-prefixed Go and Python PEP 440; Ruby, Composer and Maven are
+  exact-version only; Ruby matches only Bundler `GEM` source pins, not
+  Git/path pins), and `sbom.json` with CVE state
   unknown. `ozagia-status` has a read-only `reviews`
   section. An optional `--model-pass` (requires `--live` and
   `OZAGIA_EVAL_LIVE=1`) writes advisory, unverified, role-mapped candidates to
@@ -82,6 +87,7 @@ glibc) and macOS (arm64, x64). `ozagia self check --tui` verifies the install;
 |---|---|---|
 | Library | `from ozagia.core.memory import DevMemory, build_index` | works |
 | MCP server | `ozagia mcp`: any MCP client (OpenCode, Claude Code, Cursor, ...) gets the graph tools next to its own | works |
+| Engine surface | `OZAGIA_SURFACE=engine`: one stateful `graph` tool with compact rows, token budgets, `known` deltas and bounded fork-isolated background speculation with a thread fallback ([docs/graph_engine.md](docs/graph_engine.md)) | new; no model-task gain measured |
 | External tools | `ozagia-toolchain`, the daemon `toolchain` op, MCP `dev_tools` and a session-brief block: capability readiness and missing-tool diagnosis for documents/PDF/OCR/office, media, browser/research, data, ops, design and communication work; optional `pdf`/`ocr`/`image`/`office`/`media`/`data` extras; install previews with approval, network and sudo gates ([docs/toolchain.md](docs/toolchain.md)) | discovery only; never installs |
 | OpenCode plugin | captures `read`/`grep`/`glob`/`edit`/`write`/`shell` and carries out their intent on the graph daemon; `ozagia install opencode` | works (OpenCode 2.3, live smoke runs) |
 | Claude Code hooks | partial capture: graph context after each tool, git ref refusal; `ozagia install claude` | implemented, untested live |

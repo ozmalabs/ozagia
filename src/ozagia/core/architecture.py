@@ -34,7 +34,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from ozagia.core.repo_map import build_reference_graph, update_tag_cache
+from ozagia.core.repo_map import (
+    _load_cache,
+    build_reference_graph,
+    update_tag_cache,
+)
 from ozagia.config import load_project_config, repo_root, state_path
 
 DEFAULT_TOP = 15
@@ -259,7 +263,8 @@ def _ratio(tests: int, source: int) -> float | None:
 
 
 def _summary(root: Path, cache_path: Path | None,
-             files: Iterable[str] | None, top: int) -> dict[str, Any]:
+             files: Iterable[str] | None, top: int,
+             update_cache: bool = True) -> dict[str, Any]:
     if cache_path is None:
         # Root-relative default: a report about a fixture should not read or
         # prune the canonical checkout's cache.
@@ -269,8 +274,20 @@ def _summary(root: Path, cache_path: Path | None,
         if isinstance(files, (str, Path)):
             files = [files]
         paths = sorted({str(path).replace("\\", "/") for path in files})
-    cache, _stats = update_tag_cache(root, cache_path=cache_path,
-                                     files=paths)
+    if update_cache:
+        cache, _stats = update_tag_cache(root, cache_path=cache_path,
+                                         files=paths)
+    else:
+        # Read-only callers (``ozagia overview``) must not create or refresh
+        # the state directory. The cache is a snapshot: a missing or stale
+        # file is the caller's fact to report, never something to repair here.
+        cache = _load_cache(Path(cache_path))
+        if paths is not None:
+            known = set(paths)
+            cache = {**cache,
+                     "files": {rel: entry
+                               for rel, entry in (cache.get("files") or {}).items()
+                               if rel in known}}
     nodes = sorted(cache.get("files") or {})
     graph = build_reference_graph(cache)
     edges = _clean_edges(graph, set(nodes))
@@ -523,7 +540,8 @@ def _render_markdown(summary: dict[str, Any], top: int) -> str:
 def architecture_report(root: str | Path = ".", *,
                         cache_path: str | Path | None = None,
                         files: Iterable[str] | None = None,
-                        top: int = DEFAULT_TOP) -> dict[str, Any]:
+                        top: int = DEFAULT_TOP,
+                        update_cache: bool = True) -> dict[str, Any]:
     """Deterministic architecture report for the checkout at ``root``.
 
     Parameters
@@ -542,6 +560,10 @@ def architecture_report(root: str | Path = ".", *,
         and markdown rows (clamped to 1..200). JSON keeps every cycle
         component and every dead-code candidate, but each component's member
         list is capped to ``top`` (``truncated`` marks that).
+    update_cache:
+        When true (the default) the tag cache is refreshed as before. When
+        false the existing cache is read as-is and never created or written,
+        for read-only callers such as :mod:`ozagia.core.repo_shape`.
 
     Returns
     -------
@@ -557,7 +579,8 @@ def architecture_report(root: str | Path = ".", *,
     root_path = Path(root).resolve()
     top = max(1, min(int(top), 200))
     cache = Path(cache_path) if cache_path is not None else None
-    summary = _summary(root_path, cache, files, top)
+    summary = _summary(root_path, cache, files, top,
+                       update_cache=update_cache)
     markdown = _render_markdown(summary, top)
     payload = json.dumps(summary, indent=2, sort_keys=True) + "\n"
     return {"ok": True, "summary": summary, "markdown": markdown,

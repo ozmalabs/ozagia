@@ -28,7 +28,9 @@ from ozagia.config import (
     ConfigError,
     config_path,
     load_project_config,
+    state_path,
 )
+from ozagia.core import owners as owners_module
 from ozagia.core.files import (
     FileLedgerError,
     ledger_path,
@@ -63,6 +65,37 @@ REVIEW_MANIFEST_SCHEMA = "ozagia.deep_review.manifest.v1"
 REVIEW_MANIFEST_MAX_BYTES = 1_000_000
 REVIEW_SCAN_LIMIT = 256
 REVIEW_SUBJECT_LIMIT = 32
+INTEGRATION_LIMIT = 16
+CAPABILITY_WARNING_LIMIT = 20
+JOB_LIMIT = 50
+PROVIDER_LIMIT = 20
+SESSION_PROFILE_LIMIT = 50
+SESSION_PROFILE_SCAN_LIMIT = 200
+SESSION_PROFILE_MAX_BYTES = 32_768
+SESSION_MODEL_LIMIT = 20
+SESSION_TOKEN_KEYS = ("input", "output", "reasoning", "cache_read",
+                      "cache_write")
+SESSION_TIMING_KEYS = ("first_token", "streamed", "completed", "model_turn")
+SESSION_COVERAGE_KEYS = (
+    "assistant_turns", "turns_with_tokens", "turns_without_tokens",
+    "turns_with_complete_timing", "turns_without_complete_timing",
+    "host_tool_calls", "host_tool_calls_with_timing",
+    "host_tool_calls_without_timing",
+)
+# Kept in sync with `session_profile_cli._CAPTURE_DIAGNOSTIC_COUNTERS`; the
+# status section only copies these metadata counters, never an event body.
+SESSION_CAPTURE_KEYS = (
+    "events_received", "step_events", "content_events", "tool_parts_seen",
+    "tool_parts_accepted", "tool_lifecycle_started", "tool_lifecycle_called",
+    "tool_lifecycle_terminal", "tool_lifecycle_events_accepted",
+    "profile_events_accepted", "store_attempts",
+    "store_successes_observed_lower_bound",
+    "store_failures_observed_lower_bound",
+)
+OWNERSHIP_EDIT_SCAN = 2000
+OWNERSHIP_FILE_LIMIT = 16
+OWNERSHIP_ROW_LIMIT = 32
+OWNERSHIP_SESSION_LIMIT = 16
 
 
 def _now() -> str:
@@ -288,6 +321,737 @@ def _daemon_status(
     return _section("running", report)
 
 
+def _bounded_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if number < 0:
+        return None
+    return min(2**53 - 1, number)
+
+
+def _bounded_text(value: Any, limit: int = 200) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return value[:limit]
+
+
+def _session_label(harness: Any, session: Any) -> str | None:
+    if not isinstance(session, str) or not session:
+        return None
+    return owners_module.label(
+        harness if isinstance(harness, str) and harness else "opencode",
+        session)
+
+
+def _job_row(job: Any) -> dict[str, Any] | None:
+    """One bounded, content-free job row.
+
+    Command text, argv values, paths, environment values and log contents are
+    deliberately not copied: a command line can carry a secret that was never
+    resolved through the daemon broker. Only counts and process facts remain.
+    """
+    if not isinstance(job, Mapping):
+        return None
+    harness = job.get("harness")
+    session = job.get("session")
+    argv = job.get("argv")
+    row: dict[str, Any] = {
+        "id": _bounded_text(job.get("id"), 40),
+        "state": _bounded_text(job.get("status"), 40),
+        "pid": _bounded_int(job.get("pid")),
+        "started": _bounded_text(job.get("started"), 60),
+        "ended": _bounded_text(job.get("ended"), 60),
+        "exit_code": _bounded_int(job.get("exit_code")),
+        "signal": _bounded_text(job.get("signal"), 40),
+        "detach": job.get("detach") is True,
+        "harness": _bounded_text(harness, 80),
+        "label": _session_label(harness, session),
+        "enforcement": _bounded_text(job.get("enforcement"), 40),
+        "peak_memory_mb": _bounded_int(job.get("peak_memory_mb")),
+        "peak_disk_write_mb": _bounded_int(job.get("peak_disk_write_mb")),
+        "log_bytes": _bounded_int(job.get("log_bytes")),
+        "elapsed_s": _bounded_int(job.get("elapsed_s")),
+        "argv_count": len(argv) if isinstance(argv, list) else None,
+        "has_command": isinstance(job.get("command"), str),
+        "leader_exited": job.get("leader_exited") is True,
+        "group_alive": job.get("group_alive") is True,
+        "stopped_on_load": job.get("stopped_on_load") is True,
+    }
+    return row
+
+
+def _jobs_status(
+    daemon: Mapping[str, Any], *, timeout: float,
+    degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Read the job table of an already-running daemon; never start one."""
+    limit = _timeout(timeout)
+    daemon_report = daemon.get("report")
+    daemon_report = daemon_report if isinstance(daemon_report, Mapping) else {}
+    sock = daemon_report.get("socket")
+    report: dict[str, Any] = {
+        "socket": sock,
+        "timeout_s": limit,
+        "source": "daemon",
+        "jobs": [],
+        "counts": {"known": None, "running": None, "shown": 0},
+        "truncated": False,
+    }
+    state = daemon.get("state")
+    if state == "absent":
+        return _section("absent", report)
+    if state != "running" or not sock:
+        return _section(
+            "unknown", report,
+            error=str(daemon.get("error") or "daemon state is unknown"))
+    try:
+        with DaemonClient(sock, timeout=limit) as client:
+            reply = client.job_list()
+    except DaemonUnavailable as exc:
+        return _section("absent", report, error=str(exc))
+    except DaemonTimeout as exc:
+        degraded.append(_issue(
+            "jobs", "jobs.unknown",
+            f"job table did not answer within {limit:g}s: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    except DaemonError as exc:
+        degraded.append(_issue(
+            "jobs", "jobs.unknown", f"job table could not be read: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    if reply.get("ok") is False:
+        error = str(reply.get("error") or "job list failed")
+        degraded.append(_issue(
+            "jobs", "jobs.unknown", f"job table could not be read: {error}"))
+        return _section("unknown", report, error=error)
+    jobs = reply.get("jobs")
+    if not isinstance(jobs, list):
+        degraded.append(_issue(
+            "jobs", "jobs.unknown", "job reply has no jobs list"))
+        return _section("unknown", report, error="job reply has no jobs list")
+    rows = [row for row in (_job_row(job) for job in jobs[:JOB_LIMIT])
+            if row is not None]
+    running = sum(1 for job in jobs
+                  if isinstance(job, Mapping)
+                  and job.get("status") in ("running", "detached"))
+    report["jobs"] = rows
+    report["counts"] = {
+        "known": len(jobs),
+        "running": running,
+        "shown": len(rows),
+    }
+    report["truncated"] = len(jobs) > JOB_LIMIT
+    return _section("ok", report)
+
+
+def _admissions_status(daemon: Mapping[str, Any]) -> dict[str, Any]:
+    """Job admission and resource refusals from the running daemon's stats."""
+    report: dict[str, Any] = {
+        "source": "daemon_jobs",
+        "counts": {key: None for key in (
+            "jobs_refused", "resource_refusals", "jobs_resource_killed",
+            "resource_events", "cgroup_oom_kills", "stopped_on_load",
+            "resource_peak_mb", "resource_peak_disk_write_mb")},
+    }
+    state = daemon.get("state")
+    if state == "absent":
+        return _section("absent", report)
+    if state != "running":
+        return _section(
+            "unknown", report,
+            error=str(daemon.get("error") or "daemon state is unknown"))
+    daemon_report = daemon.get("report")
+    daemon_report = daemon_report if isinstance(daemon_report, Mapping) else {}
+    stats = daemon_report.get("stats")
+    if not isinstance(stats, Mapping):
+        return _section(
+            "unknown", report,
+            error=str(daemon_report.get("stats_error")
+                      or "daemon stats were not read"))
+    jobs = stats.get("jobs")
+    if not isinstance(jobs, Mapping):
+        return _section(
+            "unknown", report,
+            error="daemon stats did not report job counters")
+    report["counts"] = {
+        key: _bounded_int(jobs.get(key)) for key in report["counts"]}
+    return _section("ok", report)
+
+
+def _providers_status(
+    daemon: Mapping[str, Any], *, timeout: float,
+    degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Secret-provider availability from the running daemon.
+
+    This is not a model or network connection state, and an entry is never
+    inferred from configuration by the status process itself.
+    """
+    limit = _timeout(timeout)
+    daemon_report = daemon.get("report")
+    daemon_report = daemon_report if isinstance(daemon_report, Mapping) else {}
+    sock = daemon_report.get("socket")
+    report: dict[str, Any] = {
+        "socket": sock,
+        "timeout_s": limit,
+        "source": "daemon_secrets",
+        "kind": "secret_providers",
+        "note": ("provider availability/readiness reported by the running "
+                 "daemon; configuration alone is not a connection"),
+        "providers": [],
+        "counts": {"known": None, "ready": None, "shown": 0},
+        "truncated": False,
+    }
+    state = daemon.get("state")
+    if state == "absent":
+        return _section("absent", report)
+    if state != "running" or not sock:
+        return _section(
+            "unknown", report,
+            error=str(daemon.get("error") or "daemon state is unknown"))
+    try:
+        with DaemonClient(sock, timeout=limit) as client:
+            reply = client.secret_providers()
+    except DaemonUnavailable as exc:
+        return _section("absent", report, error=str(exc))
+    except DaemonTimeout as exc:
+        degraded.append(_issue(
+            "providers", "providers.unknown",
+            f"secret providers did not answer within {limit:g}s: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    except DaemonError as exc:
+        degraded.append(_issue(
+            "providers", "providers.unknown",
+            f"secret providers could not be read: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    if reply.get("ok") is False:
+        error = str(reply.get("error") or "provider status failed")
+        degraded.append(_issue(
+            "providers", "providers.unknown",
+            f"secret providers could not be read: {error}"))
+        return _section("unknown", report, error=error)
+    providers = reply.get("providers")
+    if not isinstance(providers, list):
+        degraded.append(_issue(
+            "providers", "providers.unknown",
+            "provider reply has no providers list"))
+        return _section("unknown", report,
+                        error="provider reply has no providers list")
+    rows: list[dict[str, Any]] = []
+    for item in providers[:PROVIDER_LIMIT]:
+        if not isinstance(item, Mapping):
+            continue
+        requires = item.get("requires")
+        rows.append({
+            "name": _bounded_text(item.get("name"), 40),
+            "enabled": item.get("enabled") is True,
+            "available": item.get("available") is True,
+            "ready": item.get("ready") is True,
+            "requires": [str(value)[:120] for value in (requires or [])
+                         if isinstance(value, str)][:8],
+            "notes": _bounded_text(item.get("notes"), 200),
+        })
+    report["providers"] = rows
+    report["counts"] = {
+        "known": len(providers),
+        "ready": sum(1 for item in providers
+                     if isinstance(item, Mapping)
+                     and item.get("ready") is True),
+        "shown": len(rows),
+    }
+    report["truncated"] = len(providers) > PROVIDER_LIMIT
+    return _section("ok", report)
+
+
+def _snapshot_metrics_status(
+    doctor: Mapping[str, Any], degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Snapshot size, freshness and counts already loaded by `doctor`.
+
+    The counts come from doctor's existing snapshot load; status never builds,
+    refreshes or rewrites the graph.
+    """
+    report: dict[str, Any] = {
+        "path": None, "freshness": None, "size_bytes": None, "mtime": None,
+        "age_s": None, "nodes": None, "edges": None, "counts_read": False,
+        "counts_note": None,
+    }
+    doctor_report = doctor.get("report")
+    snapshot = (doctor_report.get("snapshot")
+                if isinstance(doctor_report, Mapping) else None)
+    if not isinstance(snapshot, Mapping):
+        return _section(
+            "unknown", report,
+            error=str(doctor.get("error")
+                      or "diagnostics did not report a snapshot"))
+    path = snapshot.get("path")
+    report["path"] = str(path) if isinstance(path, str) else None
+    freshness = snapshot.get("state")
+    report["freshness"] = freshness if isinstance(freshness, str) else None
+    report["nodes"] = _bounded_int(snapshot.get("nodes"))
+    report["edges"] = _bounded_int(snapshot.get("edges"))
+    if freshness == "missing":
+        return _section("absent", report)
+    if report["path"]:
+        try:
+            info = Path(report["path"]).lstat()
+        except FileNotFoundError:
+            return _section("absent", report)
+        except OSError as exc:
+            degraded.append(_issue(
+                "snapshot", "snapshot.unreadable",
+                f"snapshot could not be read: {exc}"))
+            return _section("unknown", report, error=str(exc))
+        if not stat.S_ISREG(info.st_mode):
+            degraded.append(_issue(
+                "snapshot", "snapshot.unreadable",
+                f"snapshot is not a regular file: {report['path']}"))
+            return _section(
+                "unknown", report,
+                error=f"snapshot is not a regular file: {report['path']}")
+        report["size_bytes"] = info.st_size
+        report["mtime"] = datetime.fromtimestamp(
+            info.st_mtime, timezone.utc).isoformat(timespec="seconds")
+        report["age_s"] = max(0.0, round(time.time() - info.st_mtime, 1))
+    report["counts_read"] = (report["nodes"] is not None
+                             and report["edges"] is not None)
+    if not report["counts_read"]:
+        report["counts_note"] = (
+            "node/edge counts were not reported by the cheap snapshot load; "
+            "size, mtime and freshness are still reported")
+    if freshness not in ("fresh", "stale"):
+        return _section(
+            "unknown", report,
+            error=str(snapshot.get("error") or
+                      "snapshot freshness is unknown"))
+    if freshness == "stale":
+        return _section("degraded", report)
+    return _section("ok", report)
+
+
+def _profile_age(observed_at: Any, mtime: float) -> float:
+    if isinstance(observed_at, str):
+        try:
+            stamp = datetime.fromisoformat(
+                observed_at.replace("Z", "+00:00"))
+        except ValueError:
+            stamp = None
+        if stamp is not None:
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=timezone.utc)
+            return max(0.0, round(
+                time.time() - stamp.timestamp(), 1))
+    return max(0.0, round(time.time() - mtime, 1))
+
+
+def _read_profile(path: Path, limit: int) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    with os.fdopen(fd, "rb") as handle:
+        return handle.read(limit + 1)
+
+
+def _empty_session_totals() -> dict[str, Any]:
+    return {
+        "model_calls": 0,
+        "tokens": {key: None for key in SESSION_TOKEN_KEYS},
+        "timing_ms": {key: None for key in SESSION_TIMING_KEYS},
+        "coverage": {key: 0 for key in SESSION_COVERAGE_KEYS},
+        "tool_calls": 0,
+    }
+
+
+def _sessions_status(
+    root: Path, degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Bounded metadata summary of `.ozagia/session_profiles/`."""
+    profile_dir = state_path(root, "session_profiles")
+    report: dict[str, Any] = {
+        "dir": str(profile_dir),
+        "profiles": None,
+        "profiles_read": 0,
+        "malformed": 0,
+        "unreadable": 0,
+        "truncated": False,
+        "newest_age_s": None,
+        "models": [],
+        "totals": _empty_session_totals(),
+        "capture_diagnostics": {"captures": 0, "counters": {}},
+        "sessions": [],
+        "note": ("metadata only: no prompt, path, tool input/output, source "
+                 "content or full session id is copied"),
+    }
+    try:
+        info = profile_dir.lstat()
+    except FileNotFoundError:
+        return _section("absent", report)
+    except OSError as exc:
+        degraded.append(_issue(
+            "sessions", "sessions.unreadable",
+            f"session profile directory could not be read: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    if stat.S_ISLNK(info.st_mode):
+        degraded.append(_issue(
+            "sessions", "sessions.unreadable",
+            f"session profile directory is a symlink: {profile_dir}"))
+        return _section(
+            "unknown", report,
+            error=f"session profile directory is a symlink: {profile_dir}")
+    if not stat.S_ISDIR(info.st_mode):
+        degraded.append(_issue(
+            "sessions", "sessions.unreadable",
+            f"session profile path is not a directory: {profile_dir}"))
+        return _section(
+            "unknown", report,
+            error=f"session profile path is not a directory: {profile_dir}")
+    entries: list[tuple[Path, os.stat_result]] = []
+    scanned = 0
+    try:
+        with os.scandir(profile_dir) as listing:
+            for entry in listing:
+                if not entry.name.endswith(".json"):
+                    continue
+                scanned += 1
+                if scanned > SESSION_PROFILE_SCAN_LIMIT:
+                    report["truncated"] = True
+                    break
+                try:
+                    entry_info = entry.stat(follow_symlinks=False)
+                except OSError:
+                    report["unreadable"] += 1
+                    continue
+                if stat.S_ISLNK(entry_info.st_mode) or not stat.S_ISREG(
+                        entry_info.st_mode):
+                    report["malformed"] += 1
+                    continue
+                if entry_info.st_size > SESSION_PROFILE_MAX_BYTES:
+                    report["malformed"] += 1
+                    continue
+                entries.append((Path(entry.path), entry_info))
+    except OSError as exc:
+        degraded.append(_issue(
+            "sessions", "sessions.unreadable",
+            f"session profiles could not be listed: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    report["profiles"] = scanned if not report["truncated"] else (
+        SESSION_PROFILE_SCAN_LIMIT)
+    entries.sort(key=lambda item: item[1].st_mtime, reverse=True)
+    for path, entry_info in entries[:SESSION_PROFILE_LIMIT]:
+        try:
+            raw = _read_profile(path, SESSION_PROFILE_MAX_BYTES)
+        except OSError:
+            report["unreadable"] += 1
+            continue
+        if len(raw) > SESSION_PROFILE_MAX_BYTES:
+            report["malformed"] += 1
+            continue
+        try:
+            envelope = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            report["malformed"] += 1
+            continue
+        if not isinstance(envelope, Mapping):
+            report["malformed"] += 1
+            continue
+        host = envelope.get("host_profile")
+        host = host if isinstance(host, Mapping) else {}
+        daemon = envelope.get("daemon_profile")
+        daemon = daemon if isinstance(daemon, Mapping) else {}
+        harness = envelope.get("harness") or host.get("harness")
+        session = envelope.get("session_id") or host.get("session_id")
+        observed_at = envelope.get("observed_at") or host.get("observed_at")
+        age = _profile_age(observed_at, entry_info.st_mtime)
+        if report["newest_age_s"] is None or age < report["newest_age_s"]:
+            report["newest_age_s"] = age
+        models = [name for name in (host.get("models") or [])
+                  if isinstance(name, str) and name]
+        for model in models[:SESSION_MODEL_LIMIT]:
+            if model not in report["models"]:
+                report["models"].append(model)
+                if len(report["models"]) >= SESSION_MODEL_LIMIT:
+                    break
+        tokens = host.get("tokens") if isinstance(host.get("tokens"),
+                                                  Mapping) else {}
+        timing = host.get("timing_ms") if isinstance(host.get("timing_ms"),
+                                                     Mapping) else {}
+        coverage = host.get("coverage") if isinstance(host.get("coverage"),
+                                                      Mapping) else {}
+        totals = report["totals"]
+        totals["model_calls"] += _bounded_int(
+            host.get("model_calls")) or 0
+        for key in SESSION_TOKEN_KEYS:
+            amount = _bounded_int(tokens.get(key))
+            if amount is not None:
+                totals["tokens"][key] = (totals["tokens"][key] or 0) + amount
+        for key in SESSION_TIMING_KEYS:
+            amount = _bounded_int(timing.get(key))
+            if amount is not None:
+                totals["timing_ms"][key] = (
+                    totals["timing_ms"][key] or 0) + amount
+        for key in SESSION_COVERAGE_KEYS:
+            totals["coverage"][key] += _bounded_int(coverage.get(key)) or 0
+        tool_calls = _bounded_int(coverage.get("host_tool_calls"))
+        if tool_calls is None:
+            tool_calls = _bounded_int(daemon.get("tool_calls_observed")) or 0
+        totals["tool_calls"] += tool_calls
+        captures: list[dict[str, Any]] = []
+        for record in host.get("capture_diagnostics") or []:
+            if not isinstance(record, Mapping):
+                continue
+            capture_id = record.get("capture_id")
+            counters = record.get("counters")
+            counters = counters if isinstance(counters, Mapping) else {}
+            clean = {
+                key: _bounded_int(counters.get(key))
+                for key in SESSION_CAPTURE_KEYS
+                if _bounded_int(counters.get(key)) is not None
+            }
+            if not isinstance(capture_id, str) or not clean:
+                continue
+            captures.append({"capture_id": capture_id, "counters": clean})
+        report["sessions"].append({
+            "harness": _bounded_text(harness, 80),
+            "label": _session_label(harness, session),
+            "observed_at": _bounded_text(observed_at, 60),
+            "age_s": age,
+            "source": _bounded_text(
+                host.get("source") or (
+                    "daemon_events" if daemon else "unknown"), 80),
+            "model_calls": _bounded_int(host.get("model_calls")) or 0,
+            "models": models[:SESSION_MODEL_LIMIT],
+            "tokens": {key: _bounded_int(tokens.get(key))
+                       for key in SESSION_TOKEN_KEYS},
+            "timing_ms": {key: _bounded_int(timing.get(key))
+                          for key in SESSION_TIMING_KEYS},
+            "tool_calls": tool_calls,
+            "coverage": {key: _bounded_int(coverage.get(key))
+                         for key in SESSION_COVERAGE_KEYS},
+            "capture_diagnostics": captures,
+        })
+    report["profiles_read"] = len(report["sessions"])
+    if len(entries) > SESSION_PROFILE_LIMIT:
+        report["truncated"] = True
+    # Deduplicate capture snapshots by id, keeping the largest counters.
+    captures_by_id: dict[str, dict[str, int]] = {}
+    for row in report["sessions"]:
+        for capture in row["capture_diagnostics"]:
+            capture_id = capture["capture_id"]
+            merged = captures_by_id.setdefault(capture_id, {})
+            for key, value in capture["counters"].items():
+                merged[key] = max(merged.get(key, 0), value)
+    aggregate = {key: 0 for key in SESSION_CAPTURE_KEYS}
+    for counters in captures_by_id.values():
+        for key, value in counters.items():
+            aggregate[key] += value
+    report["capture_diagnostics"] = {
+        "captures": len(captures_by_id),
+        "counters": aggregate,
+    }
+    problems = report["malformed"] + report["unreadable"]
+    if problems:
+        message = (f"{report['malformed']} malformed and "
+                   f"{report['unreadable']} unreadable session profile(s)")
+        degraded.append(_issue("sessions", "sessions.malformed", message))
+        return _section("unknown", report, error=message)
+    return _section("ok", report)
+
+
+def _ownership_status(
+    root: Path, degraded: list[dict[str, str]],
+) -> dict[str, Any]:
+    """Bounded dirty-file ownership from the edit and daemon journals."""
+    journal = state_path(root, "journal.jsonl")
+    report: dict[str, Any] = {
+        "journal": str(journal),
+        "files_scanned": 0,
+        "counts": {"files": 0, "sessions": 0, "rows": 0},
+        "rows": [],
+        "truncated": False,
+        "note": ("only journaled edits by a session are considered; a file "
+                 "with no journal entry is not attributed"),
+    }
+    try:
+        info = journal.lstat()
+    except FileNotFoundError:
+        return _section("absent", report)
+    except OSError as exc:
+        degraded.append(_issue(
+            "ownership", "ownership.unreadable",
+            f"edit journal could not be read: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        degraded.append(_issue(
+            "ownership", "ownership.unreadable",
+            f"edit journal is not a regular file: {journal}"))
+        return _section(
+            "unknown", report,
+            error=f"edit journal is not a regular file: {journal}")
+    try:
+        with journal.open("rb") as handle:
+            handle.read(1)
+    except OSError as exc:
+        degraded.append(_issue(
+            "ownership", "ownership.unreadable",
+            f"edit journal could not be read: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    try:
+        edit_rows = owners_module.edits(journal)
+    except OSError as exc:
+        degraded.append(_issue(
+            "ownership", "ownership.unreadable",
+            f"edit journal could not be read: {exc}"))
+        return _section("unknown", report, error=str(exc))
+    if not edit_rows:
+        return _section("ok", report)
+    latest: dict[str, float] = {}
+    for edit in edit_rows[-OWNERSHIP_EDIT_SCAN:]:
+        stamp = edit.get("epoch")
+        if not isinstance(stamp, (int, float)):
+            continue
+        for rel in edit.get("files") or []:
+            if not isinstance(rel, str) or not rel:
+                continue
+            latest[rel] = max(latest.get(rel, 0.0), float(stamp))
+    files = sorted(latest, key=lambda rel: latest[rel],
+                   reverse=True)[:OWNERSHIP_FILE_LIMIT]
+    report["files_scanned"] = len(files)
+    report["truncated"] = len(latest) > OWNERSHIP_FILE_LIMIT
+    daemon_journal = state_path(root, "daemon_journal.jsonl")
+    tracker = owners_module.Owners(root, daemon_journal=daemon_journal)
+    rows: list[dict[str, Any]] = []
+    dirty_files: set[str] = set()
+    sessions: set[tuple[str, str]] = set()
+    for rel in files:
+        try:
+            who = owners_module.who(root, rel, journal, live=tracker.live)
+        except (OSError, ValueError):
+            continue
+        if who.get("dirty") is not True:
+            continue
+        for item in who.get("sessions") or []:
+            if not isinstance(item, Mapping) or item.get(
+                    "committed") is not False:
+                continue
+            harness = _bounded_text(item.get("harness"), 80)
+            session = item.get("session")
+            if not isinstance(harness, str) or not isinstance(session, str):
+                continue
+            dirty_files.add(rel)
+            sessions.add((harness, session))
+            if len(rows) < OWNERSHIP_ROW_LIMIT:
+                rows.append({
+                    "path": rel,
+                    "harness": harness,
+                    "label": _session_label(harness, session),
+                    "edits": _bounded_int(item.get("edits")) or 0,
+                    "last": _bounded_text(item.get("last"), 40),
+                    "last_age": _bounded_text(item.get("last_age"), 40),
+                    "live": item.get("live") is True,
+                    "committed": False,
+                })
+    report["rows"] = rows
+    report["counts"] = {
+        "files": len(dirty_files),
+        "sessions": len(sessions),
+        "rows": len(rows),
+    }
+    report["truncated"] = (
+        report["truncated"] or len(rows) >= OWNERSHIP_ROW_LIMIT)
+    return _section("ok", report)
+
+
+def _integrations_summary(report: Mapping[str, Any]) -> dict[str, Any] | None:
+    section = report.get("integrations")
+    if not isinstance(section, Mapping):
+        return None
+    hosts = section.get("hosts")
+    hosts = hosts if isinstance(hosts, Mapping) else {}
+    summary_hosts: dict[str, Any] = {}
+    for key, row in list(hosts.items())[:INTEGRATION_LIMIT]:
+        if not isinstance(row, Mapping):
+            continue
+        summary_hosts[key] = {
+            "label": row.get("label"),
+            "state": row.get("state"),
+            "installed": row.get("installed"),
+            "version": row.get("version"),
+            "path": row.get("path"),
+            "tested_range": row.get("tested_range"),
+            "verification": row.get("verification"),
+            "error": row.get("error"),
+        }
+    config = section.get("config")
+    config = config if isinstance(config, Mapping) else {}
+    summary_config: dict[str, Any] = {}
+    from ozagia.integrations.versions import CONFIG_KEYS
+    for key in CONFIG_KEYS:
+        item = config.get(key)
+        if not isinstance(item, Mapping):
+            continue
+        summary_config[key] = {
+            "state": item.get("state"),
+            "found": list(item.get("found") or [])[:INTEGRATION_LIMIT],
+            "errors": list(item.get("errors") or [])[:INTEGRATION_LIMIT],
+        }
+    return {
+        "note": section.get("note"),
+        "hosts": summary_hosts,
+        "config": summary_config,
+        "warnings": list(section.get("warnings") or [])[:INTEGRATION_LIMIT],
+    }
+
+
+def _capabilities_summary(report: Mapping[str, Any]) -> dict[str, Any] | None:
+    section = report.get("capabilities")
+    if not isinstance(section, Mapping):
+        return None
+    catalogue = section.get("catalogue")
+    catalogue = catalogue if isinstance(catalogue, Mapping) else {}
+    audit = section.get("audit")
+    audit = audit if isinstance(audit, Mapping) else {}
+    counts = audit.get("counts")
+    counts = counts if isinstance(counts, Mapping) else {}
+    keys = (
+        "capabilities", "capabilities_without_surfaces", "declared_surfaces",
+        "present_surfaces", "observed_surfaces", "covered_surfaces",
+        "undeclared_surfaces", "duplicate_declarations", "findings",
+    )
+    return {
+        "state": section.get("state"),
+        "catalogue": {
+            "version": catalogue.get("version"),
+            "hash": catalogue.get("hash"),
+            "capabilities": catalogue.get("capabilities"),
+            "domains": dict(catalogue.get("domains") or {}),
+            "surfaces": catalogue.get("surfaces"),
+        },
+        "audit": {
+            "state": audit.get("state"),
+            "counts": {key: counts.get(key) for key in keys},
+            "findings_by_kind": dict(audit.get("findings_by_kind") or {}),
+            "findings_by_severity": dict(
+                audit.get("findings_by_severity") or {}),
+        },
+        "error": section.get("error"),
+        "warnings": list(section.get("warnings") or [])[
+            :CAPABILITY_WARNING_LIMIT],
+    }
+
+
+def _summary_section(
+    doctor: Mapping[str, Any], key: str,
+) -> dict[str, Any]:
+    summary = doctor.get(key)
+    if isinstance(summary, Mapping):
+        return _section("ok", summary)
+    state = "unavailable" if doctor.get("state") == "unavailable" else "unknown"
+    return _section(
+        state, None, error=f"diagnostics did not report the {key} summary")
+
+
 def _doctor_status(
     root: Path, degraded: list[dict[str, str]],
 ) -> dict[str, Any]:
@@ -298,11 +1062,14 @@ def _doctor_status(
             "doctor", "doctor.unavailable",
             f"diagnostics could not run: {exc}"))
         return _section("unavailable", error=str(exc))
+    integrations = _integrations_summary(report)
+    capabilities = _capabilities_summary(report)
     snapshot = report.get("snapshot")
     snapshot = snapshot if isinstance(snapshot, Mapping) else {}
     snapshot_state = snapshot.get("state")
     if snapshot_state == "fresh":
-        return _section("ok", report)
+        return _section("ok", report, integrations=integrations,
+                        capabilities=capabilities)
     if snapshot_state not in SNAPSHOT_STATES:
         snapshot_state = "unknown"
     messages = {
@@ -313,7 +1080,8 @@ def _doctor_status(
     }
     degraded.append(_issue(
         "doctor", f"snapshot.{snapshot_state}", messages[snapshot_state]))
-    return _section("degraded", report)
+    return _section("degraded", report, integrations=integrations,
+                    capabilities=capabilities)
 
 
 def _read_review_manifest(path: Path, limit: int) -> bytes:
@@ -575,7 +1343,16 @@ def status(
     files = _files_status(root_path, degraded)
     runtime = _runtime_status(root_path, project, degraded)
     daemon = _daemon_status(root_path, timeout=timeout, degraded=degraded)
+    jobs = _jobs_status(daemon, timeout=timeout, degraded=degraded)
+    admissions = _admissions_status(daemon)
+    providers = _providers_status(daemon, timeout=timeout,
+                                  degraded=degraded)
     doctor = _doctor_status(root_path, degraded)
+    integrations = _summary_section(doctor, "integrations")
+    capabilities = _summary_section(doctor, "capabilities")
+    snapshot = _snapshot_metrics_status(doctor, degraded)
+    sessions = _sessions_status(root_path, degraded)
+    ownership = _ownership_status(root_path, degraded)
     reviews = _reviews_status(root_path, degraded)
 
     return {
@@ -590,7 +1367,15 @@ def status(
         "files": files,
         "runtime": runtime,
         "daemon": daemon,
+        "jobs": jobs,
+        "admissions": admissions,
+        "providers": providers,
         "doctor": doctor,
+        "integrations": integrations,
+        "capabilities": capabilities,
+        "snapshot": snapshot,
+        "sessions": sessions,
+        "ownership": ownership,
         "reviews": reviews,
         "config": config,
     }
@@ -705,6 +1490,58 @@ def format_status(report: Mapping[str, Any]) -> str:
             f"daemon: {daemon.get('state')} socket={_text(socket)} "
             f"({_text(daemon.get('error'))})")
 
+    jobs = report.get("jobs") or {}
+    jobs_report = jobs.get("report")
+    if isinstance(jobs_report, Mapping):
+        counts = jobs_report.get("counts") or {}
+        if jobs.get("state") == "absent":
+            lines.append("jobs: absent (no daemon)")
+        else:
+            lines.append(
+                f"jobs: {jobs.get('state')} "
+                f"known={_text(counts.get('known'))} "
+                f"running={_text(counts.get('running'))} "
+                f"shown={_text(counts.get('shown'))}"
+                + (" (truncated)" if jobs_report.get("truncated") else ""))
+            for row in (jobs_report.get("jobs") or [])[:TEXT_RUNTIME_LIMIT]:
+                if not isinstance(row, Mapping):
+                    continue
+                lines.append(
+                    f"  {_text(row.get('id'))} {_text(row.get('state'))} "
+                    f"pid={_text(row.get('pid'))} "
+                    f"elapsed={_text(row.get('elapsed_s'), 's')} "
+                    f"mem={_text(row.get('peak_memory_mb'), 'MB')} "
+                    f"disk={_text(row.get('peak_disk_write_mb'), 'MB')}")
+    else:
+        lines.append(f"jobs: {jobs.get('state')} "
+                     f"({_text(jobs.get('error'))})")
+
+    admissions = report.get("admissions") or {}
+    admissions_report = admissions.get("report")
+    if isinstance(admissions_report, Mapping):
+        counts = admissions_report.get("counts") or {}
+        lines.append(
+            f"admissions: {admissions.get('state')} "
+            f"job_refusals={_text(counts.get('jobs_refused'))} "
+            f"resource_refusals={_text(counts.get('resource_refusals'))} "
+            f"resource_kills={_text(counts.get('jobs_resource_killed'))}")
+    else:
+        lines.append(f"admissions: {admissions.get('state')} "
+                     f"({_text(admissions.get('error'))})")
+
+    providers = report.get("providers") or {}
+    providers_report = providers.get("report")
+    if isinstance(providers_report, Mapping):
+        counts = providers_report.get("counts") or {}
+        lines.append(
+            f"providers: {providers.get('state')} "
+            f"known={_text(counts.get('known'))} "
+            f"ready={_text(counts.get('ready'))} "
+            f"shown={_text(counts.get('shown'))}")
+    else:
+        lines.append(f"providers: {providers.get('state')} "
+                     f"({_text(providers.get('error'))})")
+
     runtime = report.get("runtime") or {}
     runtime_report = runtime.get("report")
     if isinstance(runtime_report, Mapping):
@@ -730,6 +1567,114 @@ def format_status(report: Mapping[str, Any]) -> str:
     else:
         lines.append(f"doctor: {doctor.get('state')} "
                      f"({_text(doctor.get('error'))})")
+
+    snapshot = report.get("snapshot") or {}
+    snapshot_report = snapshot.get("report")
+    if isinstance(snapshot_report, Mapping):
+        lines.append(
+            f"snapshot metrics: {snapshot.get('state')} "
+            f"freshness={_text(snapshot_report.get('freshness'))} "
+            f"size={_text(snapshot_report.get('size_bytes'), 'B')} "
+            f"age={_text(snapshot_report.get('age_s'), 's')} "
+            f"nodes={_text(snapshot_report.get('nodes'))} "
+            f"edges={_text(snapshot_report.get('edges'))}"
+            + ("" if snapshot_report.get("counts_read")
+               else " (counts not read)"))
+    else:
+        lines.append(f"snapshot metrics: {snapshot.get('state')} "
+                     f"({_text(snapshot.get('error'))})")
+
+    sessions = report.get("sessions") or {}
+    sessions_report = sessions.get("report")
+    if isinstance(sessions_report, Mapping):
+        totals = sessions_report.get("totals") or {}
+        if sessions.get("state") == "absent":
+            lines.append("sessions: absent (no session profiles)")
+        else:
+            lines.append(
+                f"sessions: {sessions.get('state')} "
+                f"profiles={_text(sessions_report.get('profiles'))} "
+                f"newest={_text(sessions_report.get('newest_age_s'), 's')} "
+                f"models={len(sessions_report.get('models') or [])} "
+                f"model_calls={_text(totals.get('model_calls'))} "
+                f"tool_calls={_text(totals.get('tool_calls'))}"
+                + (" (truncated)" if sessions_report.get("truncated")
+                   else ""))
+    else:
+        lines.append(f"sessions: {sessions.get('state')} "
+                     f"({_text(sessions.get('error'))})")
+
+    ownership = report.get("ownership") or {}
+    ownership_report = ownership.get("report")
+    if isinstance(ownership_report, Mapping):
+        if ownership.get("state") == "absent":
+            lines.append("ownership: absent (no edit journal)")
+        else:
+            counts = ownership_report.get("counts") or {}
+            lines.append(
+                f"ownership: {ownership.get('state')} "
+                f"dirty_files={_text(counts.get('files'))} "
+                f"sessions={_text(counts.get('sessions'))}")
+            for row in (ownership_report.get("rows") or [])[:TEXT_FINDING_LIMIT]:
+                if not isinstance(row, Mapping):
+                    continue
+                lines.append(
+                    f"  {row.get('path')}: {_text(row.get('label'))} "
+                    f"(live={_text(row.get('live'))}, "
+                    f"{_text(row.get('edits'))} edit(s), "
+                    f"{_text(row.get('last_age'))})")
+    else:
+        lines.append(f"ownership: {ownership.get('state')} "
+                     f"({_text(ownership.get('error'))})")
+
+    integrations = report.get("integrations") or {}
+    integrations_report = integrations.get("report")
+    if isinstance(integrations_report, Mapping):
+        hosts = integrations_report.get("hosts") or {}
+        rows = []
+        for key, item in list(hosts.items())[:INTEGRATION_LIMIT]:
+            if not isinstance(item, Mapping):
+                continue
+            version = item.get("version") or (
+                "unknown" if item.get("installed") else "")
+            suffix = f" {version}" if version else ""
+            rows.append(f"{key}={_text(item.get('state'))}{suffix}")
+        lines.append("integrations: " + (", ".join(rows) or "none reported"))
+        config = integrations_report.get("config") or {}
+        config_rows = [
+            f"{key}={_text(item.get('state'))}"
+            for key, item in config.items()
+            if isinstance(item, Mapping)
+        ]
+        lines.append("integration config: "
+                     + (", ".join(config_rows) or "none reported"))
+    else:
+        lines.append(f"integrations: {integrations.get('state')} "
+                     f"({_text(integrations.get('error'))})")
+
+    capabilities = report.get("capabilities") or {}
+    capabilities_report = capabilities.get("report")
+    if isinstance(capabilities_report, Mapping):
+        catalogue = capabilities_report.get("catalogue") or {}
+        audit = capabilities_report.get("audit") or {}
+        counts = audit.get("counts") or {}
+        lines.append(
+            f"capabilities: {_text(capabilities_report.get('state'))} "
+            f"catalogue={_text(catalogue.get('version'))} "
+            f"capabilities={_text(counts.get('capabilities'))} "
+            f"surfaces={_text(counts.get('declared_surfaces'))} "
+            f"findings={_text(counts.get('findings'))}")
+        warnings = capabilities_report.get("warnings") or []
+        for warning in warnings[:TEXT_FINDING_LIMIT]:
+            if isinstance(warning, Mapping):
+                lines.append(f"  capability warning: {warning.get('message')}")
+        if len(warnings) > TEXT_FINDING_LIMIT:
+            lines.append(
+                f"  ... {len(warnings) - TEXT_FINDING_LIMIT} more capability "
+                f"warning(s)")
+    else:
+        lines.append(f"capabilities: {capabilities.get('state')} "
+                     f"({_text(capabilities.get('error'))})")
 
     reviews = report.get("reviews") or {}
     reviews_report = reviews.get("report")

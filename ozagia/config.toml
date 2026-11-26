@@ -1,0 +1,43 @@
+# Reviewed intentional security findings for this repository.
+#
+# `finding_allowlist` is separate from the secret gate's `secret_allowlist`
+# and applies to `ozagia-security scan`. Each sha256 entry is the exact
+# finding fingerprint: rule + normalized repository path + normalized matched
+# line. Editing the matched line invalidates the entry, which then shows up as
+# a normal finding again. Prefer this exact form over broad path:/rule: entries
+# (see docs/security.md).
+[security]
+finding_allowlist = [
+  # addins/opencode/tests/runner.test.cjs: synthetic provider/URL values in
+  # the redaction test; not real credentials and not provider configuration.
+  "sha256:7f6a68d95fd6bf81",  # github_token canary, line 554
+  "sha256:8737b4a9deb1f1b4",  # openai_key canary, line 555
+  "sha256:c7bc8a792ce594c8",  # url_credentials canary, line 558
+
+  # src/ozagia/selfinstall.py: the documented installer/upgrade path builds
+  # `curl ... | bash` from the configured install URL. Reviewed intentional.
+  "sha256:1f9bfc4fab482cfc",
+
+  # scripts/release/notes.py: installer commands printed into release notes,
+  # not executed by the release script.
+  "sha256:108ebf0f1de597eb",  # printed instruction, line 36
+  "sha256:b278363ee98c5f97",  # printed instruction, line 38
+
+  # src/ozagia/core/deep_review/collect.py: bounded result received over a
+  # private multiprocessing pipe from ozagia's own isolated analyzer child.
+  "sha256:7553024ba0d2c480",
+
+  # src/ozagia/core/search.py: reads ozagia's own state-directory search
+  # cache; corruption is caught and the cache is rebuilt.
+  "sha256:5f4b84047cee4fa5",
+
+  # src/ozagia/edit/yaml_edit.py: ruamel.yaml YAML(typ="rt") round-trip
+  # parser. The loader is safe but is not visible as a `Loader=` argument on
+  # the matched line, so the static rule cannot prove it and the line is
+  # reviewed here instead.
+  "sha256:67a1ca5f3374ea9f",
+
+  # evaluation/deep_review_corpus/corpus.json: the word `verify=False` appears
+  # in a prose rationale for an httpx release range, not in executable code.
+  "sha256:ac41f10a825c48e3",
+]

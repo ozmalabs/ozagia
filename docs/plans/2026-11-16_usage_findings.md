@@ -1,5 +1,9 @@
 # What local agent sessions say ozagia should do next
 
+Status: historical input (2026-11-16). This is the source analysis for
+[`2026-11-16_usage_features_plan.md`](2026-11-16_usage_features_plan.md); its
+feature waves are implemented, but the claimed savings remain unmeasured.
+
 Date: 16 Nov 2026. Source: this machine's OpenCode, Kiro and Codex session
 history, mined with throwaway scripts (`/tmp/mine/`, not in the repository).
 Only aggregate counts are recorded here; no prompt text, file contents or

@@ -24,14 +24,21 @@ Requests (`op`):
           "meta": {...}}
 
     {"id": 3, "op": "profile_event", "harness": "opencode",
-     "session": "ses_...", "kind": "message"|"tool", "event_id": "...",
+     "session": "ses_...", "kind": "message"|"tool"|"session",
+     "event_id": "...", "source": "opencode_server_events"|"host_hooks",
      "metadata": {"model"?, "tokens"?, "timing_ms"?, "tool"?, "status"?,
-                  "duration_ms"?}}
+                  "duration_ms"?, "phase"?, "source"?}}
       -> {"id": 3, "ok": true, "stored": true}
       Persists an allowlisted aggregate in `.ozagia/session_profiles/`.
-      The OpenCode server plugin sends only final assistant-message and tool
-      outcome metadata; prompts, source, paths, and tool inputs/outputs are
-      never included.
+      The OpenCode server plugin sends final assistant-message and tool
+      outcome metadata; the Codex, Kiro and Claude Code command hooks send
+      session start/end/compact and tool lifecycle outcomes. Prompts, source,
+      paths, and tool inputs/outputs are never included. A tool event is
+      `started` (PreToolUse), `completed` (PostToolUse) or `error`; a session
+      event carries `start`, `end` or `compact` and the host's reason when it
+      supplies one (startup, resume, clear, compact). Token counts are only
+      recorded when the host payload has numeric ones; none of the command
+      hooks currently does, so they stay unknown rather than estimated.
       `meta` always has `intent` (a short name of what was done), `keys`
       (the node keys involved) and `ms` (handler time); `ozagia.intent`
       documents the intents and output formats. A handled answer also
@@ -192,12 +199,27 @@ Requests (`op`):
       Secret operations are scoped to the requesting `harness` (default
       `opencode`) and, where values are stored, its required `session`.
       `action` is one of `providers`, `capture`, `capture_text`, `list`,
-      `forget` or `check`. `capture` supplies `value` and optional `label` /
-      `ttl_s`; `capture_text` supplies `text` and returns references for
-      detected values; `list` returns metadata only; `forget` supplies `ref`;
-      `check` supplies a bounded non-empty `refs` list. Values are held in
-      memory for the session, and the daemon never returns captured values.
-      `session_event` with `event: "end"` clears that session's captures.
+      `forget`, `check`, `request`, `request_list`, `request_status`,
+      `request_fulfill` or `request_decline`. `capture` supplies `value` and
+      optional `label` / `ttl_s`; `capture_text` supplies `text` and returns
+      references for detected values; `list` returns metadata only; `forget`
+      supplies `ref`; `check` supplies a bounded non-empty `refs` list.
+      Values are held in memory for the session, and the daemon never returns
+      captured values. `session_event` with `event: "end"` clears that
+      session's captures and request records.
+
+      Model-initiated requests are metadata only. `request` supplies `label`,
+      optional `purpose`, `target` (only `session`) and `ttl_s`, and returns
+      `request_id`, `state` and `expires`; no value is accepted or returned.
+      `request_list` lists that session's records; `request_status`,
+      `request_fulfill` and `request_decline` supply `request_id` and require
+      the same `harness`/`session`. `request_fulfill` also supplies `value`
+      from the trusted local CLI (the daemon cannot verify which local client
+      sent it): it captures the value in the session store and returns only
+      the `secret://session/...` reference, fingerprint and expiry.
+      `request_decline` records a terminal decline. Pending requests expire
+      after 300 s by default (600 s at most), at most 16 are pending per
+      session, and declined/expired records carry no reference.
 
     {"id": 16, "op": "toolchain", "capabilities": [...], "paths": [...],
      "probe_versions": false, "probe_sudo": false}

@@ -5,9 +5,13 @@ report over the selected existing federation snapshots. It uses only
 explicit links in the anchor's `.ozagia/federation.json`; it does not match
 names or invent relationships. `roots` follows federation selection rules.
 Each result includes qualified endpoints, relation, source manifest and
-provenance. The report also includes each member's state and `member_errors`,
-even when there are no declared links. Invalid declarations become unknown
-checks. Any non-fresh member snapshot makes a comparison's `result` unknown;
+provenance. Endpoints use a member's declared stable id when the anchor
+manifest supplies one, otherwise the derived alias. Invalid, reserved or
+duplicate ids are reported in `member_errors`, and links that use an
+unresolved identity become unknown. The report also includes each member's
+state and `member_errors`, even when there are no declared links. Invalid
+declarations become unknown checks. Any non-fresh member snapshot makes a
+comparison's `result` unknown;
 `evaluated_result` retains the static comparison and `comparison_scope` says
 which attributes were compared. Current federation freshness is conservative
 and may be `unknown` when only Git HEAD was checked. `overall` is `no_checks`
@@ -51,3 +55,16 @@ claim. The check itself performs no target imports or indexing. Federation
 selection may fetch and fast-forward explicitly designated `reference_repos`;
 use CLI `--no-sync` to suppress that behavior. See
 [federation membership and reference synchronization](federation.md#discovery-and-membership).
+
+## Declared dependency links
+
+`cross_repo.check` also includes `dependency_links`, built by
+`ozagia.core.dependency_links` from each selected member's root manifests. It
+matches only explicit package declarations within one ecosystem and compares a
+consumer's declared requirement with a provider's declared version. Supported
+manifests, version semantics, status values and limits are documented under
+[declared dependency links](federation.md#declared-dependency-links). This is
+separate from the API/configuration checks: a dependency result does not make
+the API `overall` verdict pass or fail, and snapshot freshness is reported per
+member without changing a manifest-derived version verdict. No lockfile
+resolution, package manager, network call or member write occurs.

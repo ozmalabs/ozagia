@@ -19,7 +19,8 @@ import pytest
 from ozagia.harness import launch_status
 from ozagia.harness import opencode as hop
 from ozagia.harness import session as hs
-from ozagia.harness.opencode import AgentError, git_exclude, run_agent
+from ozagia.harness.opencode import (AgentError, git_exclude, load_provider_config,
+                                     run_agent)
 from ozagia.harness.session import GraphSession, SessionError
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -39,6 +40,12 @@ rec = {"argv": sys.argv, "cwd": os.getcwd(), "pid": os.getpid(),
        "env": {k: os.environ.get(k) for k in ("OZAGIA_DAEMON_SOCK", "PWD", "OPENCODE_CONFIG",
                                               "OZAGIA_LAUNCH_STATUS",
                                               "OZAGIA_REPO_MAP_TOKENS")}}
+# `opencode run` reads its message from stdin; the TUI path has none.
+if sys.argv[1:2] == ["run"]:
+    rec["stdin"] = sys.stdin.read()
+    rec["stdin_nlink"] = os.fstat(0).st_nlink
+else:
+    rec["stdin"] = rec["stdin_nlink"] = None
 cfg = os.environ.get("OPENCODE_CONFIG")
 rec["config"] = json.load(open(cfg)) if cfg and os.path.isfile(cfg) else None
 rec["plugin_present"] = os.path.isfile(os.path.join(os.getcwd(), ".opencode", "plugins", "ozagia.js"))
@@ -134,7 +141,9 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
     rec = _record(stub)
 
     assert rec["argv"][1:] == ["run", "--standalone", "--format", "json", "--auto",
-                               "--archived", "-m", "vllm/test-model", "fix the addition"]
+                               "--archived", "-m", "vllm/test-model"]
+    assert rec["stdin"] == "fix the addition"
+    assert "fix the addition" not in res["argv"]
     assert Path(rec["cwd"]) == repo
     assert rec["env"]["PWD"] == str(repo)
     assert rec["env"]["OZAGIA_DAEMON_SOCK"] == res["sock"]
@@ -157,6 +166,7 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
 
     cfg = rec["config"]
     assert Path(rec["env"]["OPENCODE_CONFIG"]).parent == Path(res["log_dir"])
+    assert set(cfg) == {"$schema"}  # no provider config was supplied
     assert "permission" not in cfg  # Preserve the host's own shell policy.
     assert "model" not in cfg  # passed with -m instead
 
@@ -175,6 +185,163 @@ def test_run_agent_end_to_end(repo, stub, tmp_path):
     assert _exclude_lines(repo).count(EXCLUDES[2]) == 1
     assert res["exclude_removed"] == [*EXCLUDES[:2], PROFILE_EXCLUDE]
     assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_prompt_travels_on_stdin_and_never_appears_in_argv_or_logs(repo, stub, tmp_path):
+    # OpenCode logs its full argv once, before the plugin hook runs, so a
+    # secret-like prompt must reach it only on stdin.
+    secret = "OZAGIA-CANARY-7f3d9c: do not put this prompt in argv"
+    res = _run(repo, tmp_path, prompt=secret)
+    rec = _record(stub)
+
+    assert rec["stdin"] == secret
+    assert secret not in " ".join(rec["argv"])
+    assert secret not in " ".join(res["argv"])
+    assert res["argv"] == rec["argv"]
+    if os.name == "posix":
+        # TemporaryFile has no remaining link: nothing was left on disk.
+        assert rec["stdin_nlink"] == 0
+    # The configuration and logs the harness writes hold no prompt.
+    assert secret not in json.dumps(rec["config"])
+    logs = [p for p in Path(res["log_dir"]).rglob("*") if p.is_file()]
+    assert logs
+    for path in logs:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        assert secret not in text, path
+
+
+def test_prompt_file_content_goes_to_stdin_and_its_path_is_not_in_argv(
+        repo, stub, tmp_path, monkeypatch):
+    from ozagia import cli
+    monkeypatch.setenv("OZAGIA_LANGUAGE_AUTOINSTALL", "0")
+    prompt = tmp_path / "task.txt"
+    content = "make the failing retry test pass"
+    prompt.write_text(content, encoding="utf-8")
+    code = cli.main(["agent", "--workdir", str(repo), "--prompt-file", str(prompt),
+                     "--runs-dir", str(tmp_path / "runs")])
+    rec = _record(stub)
+    assert code == 0
+    assert rec["stdin"] == content
+    assert str(prompt) not in " ".join(rec["argv"])
+    assert content not in " ".join(rec["argv"])
+
+
+def test_empty_prompt_is_rejected_before_opencode_starts(repo, stub, tmp_path):
+    with pytest.raises(AgentError, match="needs a prompt"):
+        _run(repo, tmp_path, prompt="")
+    assert not stub["record"].exists()
+
+
+def test_host_opencode_config_is_not_read_implicitly(repo, stub, tmp_path, monkeypatch):
+    host = tmp_path / "host.json"
+    host.write_text(json.dumps({"provider": {"host": {}}, "mcp": {}}),
+                    encoding="utf-8")
+    monkeypatch.setenv("OPENCODE_CONFIG", str(host))
+    _run(repo, tmp_path)
+    rec = _record(stub)
+    assert set(rec["config"]) == {"$schema"}
+    assert rec["env"]["OPENCODE_CONFIG"] != str(host)
+
+
+def test_provider_config_is_layered_with_ozagia_mcp(repo, stub, tmp_path):
+    provider = tmp_path / "provider.json"
+    provider.write_text(json.dumps({
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {"vllm": {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "vLLM",
+            "options": {"baseURL": "http://127.0.0.1:8000/v1",
+                        "apiKey": "{env:VLLM_API_KEY}"},
+            "models": {"qwen3.8-27b": {"name": "Qwen 3.8 27B"}},
+        }},
+        "providers": {"local": {"vllm": {"enabled": True}}},
+        "model": "vllm/qwen3.8-27b",
+        "small_model": "vllm/qwen3.8-27b",
+    }), encoding="utf-8")
+    _run(repo, tmp_path, opencode_config=provider, mcp_mode="combined")
+    cfg = _record(stub)["config"]
+    assert cfg["provider"]["vllm"]["options"]["baseURL"] == "http://127.0.0.1:8000/v1"
+    # The placeholder is copied verbatim: never resolved or logged.
+    assert cfg["provider"]["vllm"]["options"]["apiKey"] == "{env:VLLM_API_KEY}"
+    assert cfg["providers"] == {"local": {"vllm": {"enabled": True}}}
+    assert cfg["model"] == "vllm/qwen3.8-27b"
+    assert cfg["small_model"] == "vllm/qwen3.8-27b"
+    # The harness's own MCP entry is still there, and nothing else was copied.
+    assert cfg["mcp"]["ozagia"]["type"] == "local"
+    assert set(cfg) == {"$schema", "provider", "providers", "model", "small_model", "mcp"}
+
+
+def test_model_option_wins_over_the_provider_config_model(repo, stub, tmp_path):
+    provider = tmp_path / "provider.json"
+    provider.write_text(json.dumps({"model": "vllm/from-config",
+                                    "provider": {"vllm": {}}}), encoding="utf-8")
+    _run(repo, tmp_path, model="vllm/from-cli", opencode_config=provider)
+    rec = _record(stub)
+    assert rec["argv"][-1] == "vllm/from-cli"
+    assert rec["stdin"] == "fix the addition"
+    # `opencode run` gets -m, so the config must not keep the file's model.
+    assert "model" not in rec["config"]
+    assert rec["config"]["provider"] == {"vllm": {}}
+
+    _run(repo, tmp_path, prompt=None, model="vllm/from-cli",
+         opencode_config=provider, background=False)
+    rec = _record(stub)
+    assert rec["argv"] == [str(stub["exe"]), "--standalone", str(repo)]
+    assert rec["config"]["model"] == "vllm/from-cli"
+
+
+@pytest.mark.parametrize("key", ["plugin", "plugins", "mcp", "permission",
+                                 "agent", "agents", "tools"])
+def test_unsupported_provider_config_keys_fail_before_launch(repo, stub, tmp_path, key):
+    provider = tmp_path / "provider.json"
+    provider.write_text(json.dumps({"provider": {"vllm": {}}, key: {}}),
+                        encoding="utf-8")
+    with pytest.raises(AgentError, match="unsupported key"):
+        _run(repo, tmp_path, opencode_config=provider)
+    assert not stub["record"].exists()
+
+
+def test_missing_invalid_and_wrong_shaped_provider_configs_fail_before_launch(
+        repo, stub, tmp_path):
+    missing = tmp_path / "missing.json"
+    with pytest.raises(AgentError, match="cannot read --opencode-config"):
+        _run(repo, tmp_path, opencode_config=missing)
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text('{"provider": {"vllm": {"apiKey": "super-secret"}},',
+                       encoding="utf-8")
+    with pytest.raises(AgentError, match="not valid JSON") as exc:
+        _run(repo, tmp_path, opencode_config=invalid)
+    assert "super-secret" not in str(exc.value)
+
+    not_object = tmp_path / "list.json"
+    not_object.write_text('["vllm"]', encoding="utf-8")
+    with pytest.raises(AgentError, match="must be a JSON object"):
+        _run(repo, tmp_path, opencode_config=not_object)
+
+    bad_provider = tmp_path / "bad-provider.json"
+    bad_provider.write_text('{"provider": ["vllm"]}', encoding="utf-8")
+    with pytest.raises(AgentError, match="provider must be an object"):
+        _run(repo, tmp_path, opencode_config=bad_provider)
+
+    bad_model = tmp_path / "bad-model.json"
+    bad_model.write_text('{"model": 7}', encoding="utf-8")
+    with pytest.raises(AgentError, match="model must be a string"):
+        _run(repo, tmp_path, opencode_config=bad_model)
+    assert not stub["record"].exists()
+
+
+def test_provider_config_error_does_not_echo_secrets(tmp_path):
+    provider = tmp_path / "provider.json"
+    provider.write_text(json.dumps({
+        "provider": {"vllm": {"options": {"apiKey": "super-secret"}}},
+        "plugin": ["some-plugin"],
+    }), encoding="utf-8")
+    with pytest.raises(AgentError) as exc:
+        load_provider_config(provider)
+    text = str(exc.value)
+    assert "super-secret" not in text
+    assert "unsupported key(s): plugin" in text
 
 
 def test_repo_map_budget_is_passed_to_opencode_and_reported(repo, stub, tmp_path):
@@ -298,6 +465,8 @@ def test_interactive_uses_standalone_tui(repo, stub, tmp_path):
                background=False)
     rec = _record(stub)
     assert rec["argv"][1:] == ["--standalone", str(repo)]
+    assert rec["stdin"] is None
+    assert "--prompt" not in rec["argv"]
     assert rec["config"]["model"] == "vllm/test-model"
     assert rec["env"]["OZAGIA_DAEMON_SOCK"] == res["sock"]
     assert res["interactive"] is True and res["exit_code"] == 0
@@ -429,7 +598,7 @@ def test_daemon_that_never_gets_ready_raises_and_cleans_up(repo, stub, tmp_path,
 def test_keyboard_interrupt_during_run_tears_down(repo, stub, tmp_path, monkeypatch):
     seen: dict = {}
 
-    def interrupted(argv, *, cwd, env, timeout_s, stdout, stderr):
+    def interrupted(argv, *, cwd, env, timeout_s, stdout, stderr, stdin):
         seen["sock"] = env["OZAGIA_DAEMON_SOCK"]
         seen["plugin"] = (Path(cwd) / PLUGIN_REL).is_file()
         raise KeyboardInterrupt

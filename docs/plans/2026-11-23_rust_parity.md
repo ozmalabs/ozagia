@@ -8,7 +8,10 @@ symbol-question layer, edits, LSP, tests and documentation, and adds the
 initial setup for a Python→Rust migration assistant built on the same graph.
 It respects the repository rules: the core stays standard-library only,
 tree-sitter and language servers stay optional extras, and no target project is
-imported or executed implicitly.
+imported or executed implicitly. Audited against the code and docs 2026-11-24:
+the implemented/absent split in Phase 7 matches `docs/rust.md`, `docs/scip.md`,
+`tests/test_scip.py` and the bench result; no normalized SCIP cache or Rust
+dataflow analyzer exists.
 
 ## Objective
 

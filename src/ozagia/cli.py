@@ -4,6 +4,7 @@
     ozagia index [--root R] [--rebuild]
     ozagia agent [--workdir W] [--prompt TEXT | --prompt-file F] [--model M]
                  [--mcp coding|research|combined | --research]
+                 [--opencode-config PATH]
                  [--repo-map [--repo-map-tokens N]]
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
                  [--python P] [--runs-dir D] [-- <extra opencode args>]
@@ -56,11 +57,18 @@
                                                   (read-only declared
                                                   capabilities and observed
                                                   surfaces, docs/capabilities.md)
+    ozagia engine serve|token [--root R] [--host H] [--port P] [--allow-remote]
+                                                  (local read-only graph HTTP
+                                                  transport; docs/graph_engine.md)
     ozagia task-preflight GOAL [--json] [--limit N] [--cursor C] [--root R]
                                [--checkout DIR ...] [--scope ENTRY ...]
                                [--base REV] [--timeout-s S]
                                                   (read-only goal/task
                                                   preflight; docs/task_preflight.md)
+    ozagia overview|shape [--root R] [--json | --markdown] [--out PATH]
+                    [--budget-s S] [--max-modules N] [--check PATH]
+                                                  (one deterministic reference
+                                                  page; docs/repo_shape.md)
     ozagia --version
 
 `daemon`, `bg`, `mcp`, `eval` and `check` pass every argument after their name to
@@ -307,6 +315,32 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             if not status["available"]:
                 print(f"Parser {language}: unavailable ({status['error']})")
         print(report["language_server_note"])
+        integrations = report.get("integrations") or {}
+        for key, item in (integrations.get("hosts") or {}).items():
+            version = item.get("version") or (
+                "unknown" if item.get("installed") else "")
+            suffix = f" {version}" if version else ""
+            location = item.get("path") or item.get("command")
+            print(f"Integration {key}: {item.get('state')}{suffix} "
+                  f"({location}); tested: {item.get('tested_range')}")
+        for key, item in (integrations.get("config") or {}).items():
+            if not isinstance(item, dict):
+                continue
+            paths = "; ".join(item.get("found") or []) or "none"
+            print(f"Integration config {key}: {item.get('state')} ({paths})")
+        capabilities = report.get("capabilities") or {}
+        if capabilities:
+            catalogue = capabilities.get("catalogue") or {}
+            counts = (capabilities.get("audit") or {}).get("counts") or {}
+            print(f"Capabilities: {capabilities.get('state')} "
+                  f"catalogue={catalogue.get('version')} "
+                  f"capabilities={counts.get('capabilities')} "
+                  f"surfaces={counts.get('declared_surfaces')} "
+                  f"findings={counts.get('findings')} "
+                  f"hash={catalogue.get('hash')}")
+        for warning in report.get("warnings") or []:
+            print(f"Warning: {warning.get('component')}: "
+                  f"{warning.get('message')}")
         for name, status in report.get("external_tools", {}).items():
             state = status["path"] if status["available"] else "unavailable"
             print(f"Relay tool {name}: {state}")
@@ -363,7 +397,8 @@ def _cmd_agent(args: argparse.Namespace) -> int:
                         timeout_s=args.timeout, extra_args=args.extra,
                         run_python=args.python, opencode=_opencode_exe(args.opencode),
                         runs_dir=args.runs_dir, mcp_mode=args.mcp, progress=progress,
-                        repo_map_tokens=args.repo_map_tokens)
+                        repo_map_tokens=args.repo_map_tokens,
+                        opencode_config=args.opencode_config)
     except (AgentError, SessionError) as exc:
         progress.close()
         print(f"error: {exc}", file=sys.stderr)
@@ -1429,9 +1464,19 @@ def build_parser() -> argparse.ArgumentParser:
     ag.add_argument("--workdir", "--root", dest="workdir", default=None,
                     help="repository (default: OZAGIA_ROOT or the git top level of the cwd)")
     pr = ag.add_mutually_exclusive_group()
-    pr.add_argument("--prompt", default=None, help="run non-interactively with this prompt")
-    pr.add_argument("--prompt-file", default=None, help="read the prompt from a file")
+    pr.add_argument("--prompt", default=None,
+                    help="run non-interactively with this prompt (sent on stdin, "
+                         "never in opencode's argv)")
+    pr.add_argument("--prompt-file", default=None,
+                    help="read the prompt from a file (its contents go to stdin; "
+                         "the path is not passed to opencode)")
     ag.add_argument("--model", "-m", default=None, help="provider/model, e.g. vllm/qwen3.8-27b")
+    ag.add_argument("--opencode-config", default=None, metavar="PATH",
+                    help="layer provider settings from this OpenCode JSON config "
+                         "(provider, providers, model, small_model only) into the "
+                         "generated harness config; --model wins. Plugins, MCP "
+                         "servers, permissions, agents and tools are never copied, "
+                         "and the global config is not read implicitly")
     ag.add_argument("--clone", action="store_true",
                     help="run in an isolated clone under the temp dir (kept)")
     ag.add_argument("--base", default=None, help="with --clone: commit to check out "
@@ -1829,8 +1874,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     from ozagia.capabilities_cli import add_parser as _capabilities_parser
     _capabilities_parser(sub)
+    from ozagia.engine_http import add_parser as _engine_parser
+    _engine_parser(sub)
     from ozagia.task_preflight_cli import add_parser as _task_preflight_parser
     _task_preflight_parser(sub)
+    from ozagia.overview_cli import add_parser as _overview_parser
+    _overview_parser(sub)
     from ozagia.languages_cli import add_parser as _languages_parser
     _languages_parser(sub)
     from ozagia.supply_chain_cli import add_parser as _supply_chain_parser
@@ -1860,14 +1909,14 @@ def _repo_map_budget(value: str) -> int:
 
 
 _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
-                       "review-repo", "goal", "capabilities", "profile-run",
-                       "task-preflight", "languages", "supply-chain",
-                       "migration",
+                       "review-repo", "goal", "capabilities", "engine",
+                       "profile-run", "task-preflight", "overview", "shape",
+                       "languages", "supply-chain", "migration",
                        *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
                           "--root", "--clone", "--prompt", "--prompt-file",
-                          "--repo-map", "--repo-map-tokens"})
+                          "--repo-map", "--repo-map-tokens", "--opencode-config"})
 
 
 def _default_agent(argv: list[str]) -> list[str]:
@@ -1954,9 +2003,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "capabilities":
         from ozagia.capabilities_cli import run as _capabilities_run
         return _capabilities_run(args)
+    if args.command == "engine":
+        from ozagia.engine_http import run as _engine_run
+        return _engine_run(args)
     if args.command == "task-preflight":
         from ozagia.task_preflight_cli import run as _task_preflight_run
         return _task_preflight_run(args)
+    if args.command in {"overview", "shape"}:
+        from ozagia.overview_cli import run as _overview_run
+        return _overview_run(args)
     if args.command == "languages":
         from ozagia.languages_cli import run as _languages_run
         return _languages_run(args)

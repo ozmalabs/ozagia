@@ -756,6 +756,164 @@ def test_session_store_repr_and_describe_have_no_values() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# model-initiated requests (metadata only)
+# --------------------------------------------------------------------------- #
+def test_secret_request_lifecycle_and_fulfillment() -> None:
+    now = [1000.0]
+    store = S.SessionSecretStore(clock=lambda: now[0])
+    value = "request-canary-value-1234"
+    request = store.request(
+        harness="opencode", session="s1", label="OpenAI API key",
+        purpose="The task calls the OpenAI API.", ttl_s=60)
+    assert request.id.startswith("req_")
+    assert request.state == S.SESSION_REQUEST_PENDING
+    assert request.ref is None and request.fingerprint is None
+    assert value not in repr(request)
+    assert value not in json.dumps(request.as_dict())
+    assert request.expires - request.created == 60
+
+    same = store.request(harness="opencode", session="s1",
+                         label="OpenAI API key",
+                         purpose="The task calls the OpenAI API.")
+    assert same.id == request.id
+    assert len(store.requests("opencode", "s1")) == 1
+
+    assert store.request_status(request.id, harness="opencode",
+                                session="s1").state == (
+                                    S.SESSION_REQUEST_PENDING)
+    with pytest.raises(S.SecretDenied) as excinfo:
+        store.request_status(request.id, harness="opencode", session="s2")
+    assert excinfo.value.code == "request_mismatch"
+    with pytest.raises(S.SecretDenied) as excinfo:
+        store.fulfill_request(request.id, value, harness="opencode",
+                              session="s2")
+    assert excinfo.value.code == "request_mismatch"
+    with pytest.raises(S.SecretNotFound) as excinfo:
+        store.request_status("req_does-not-exist", harness="opencode",
+                             session="s1")
+    assert excinfo.value.code == "request_not_found"
+
+    fulfilled = store.fulfill_request(request.id, value, harness="opencode",
+                                      session="s1", ttl_s=120)
+    assert fulfilled.state == S.SESSION_REQUEST_FULFILLED
+    assert fulfilled.ref.startswith("secret://session/")
+    assert fulfilled.fingerprint.startswith("sha256:")
+    assert value not in fulfilled.ref
+    assert value not in json.dumps(fulfilled.as_dict())
+    assert value not in repr(store)
+    assert value not in json.dumps(store.describe())
+    resolved = store.resolve(fulfilled.ref, harness="opencode", session="s1")
+    assert resolved.reveal() == value
+    assert len(store) == 1
+
+    # Idempotent: a second value is ignored, not captured.
+    again = store.fulfill_request(request.id, "another-value-5678",
+                                  harness="opencode", session="s1")
+    assert again.ref == fulfilled.ref
+    assert len(store) == 1
+    with pytest.raises(S.SecretDenied) as excinfo:
+        store.resolve(fulfilled.ref, harness="opencode", session="s2")
+    assert excinfo.value.code == "session_mismatch"
+
+    listed = store.requests("opencode", "s1")
+    assert [item.state for item in listed] == [S.SESSION_REQUEST_FULFILLED]
+    assert value not in json.dumps([item.as_dict() for item in listed])
+
+
+def test_secret_request_decline_is_terminal_and_idempotent() -> None:
+    store = S.SessionSecretStore()
+    request = store.request(harness="h", session="s", label="api token")
+    declined = store.decline_request(request.id, harness="h", session="s")
+    assert declined.state == S.SESSION_REQUEST_DECLINED
+    assert declined.ref is None and declined.fingerprint is None
+    again = store.decline_request(request.id, harness="h", session="s")
+    assert again.state == S.SESSION_REQUEST_DECLINED
+    with pytest.raises(S.SecretError) as excinfo:
+        store.fulfill_request(request.id, "hunter2hunter2",
+                              harness="h", session="s")
+    assert excinfo.value.code == "request_closed"
+    with pytest.raises(S.SecretError) as excinfo:
+        store.decline_request("req_unknown-request", harness="h", session="s")
+    assert excinfo.value.code == "request_not_found"
+    # A declined duplicate may ask again.
+    fresh = store.request(harness="h", session="s", label="api token")
+    assert fresh.id != request.id
+    assert fresh.state == S.SESSION_REQUEST_PENDING
+
+
+def test_secret_request_expiry_drops_references_and_bounded_pending() -> None:
+    now = [2000.0]
+    store = S.SessionSecretStore(clock=lambda: now[0],
+                                 max_pending_requests=2,
+                                 max_requests=3)
+    first = store.request(harness="h", session="s", label="one", ttl_s=10)
+    store.request(harness="h", session="s", label="two", ttl_s=60)
+    with pytest.raises(S.SecretError) as excinfo:
+        store.request(harness="h", session="s", label="three")
+    assert excinfo.value.code == "request_limit"
+
+    now[0] = 2011.0
+    expired = store.request_status(first.id, harness="h", session="s")
+    assert expired.state == S.SESSION_REQUEST_EXPIRED
+    assert expired.ref is None and expired.fingerprint is None
+    with pytest.raises(S.SecretError) as excinfo:
+        store.fulfill_request(first.id, "hunter2hunter2",
+                              harness="h", session="s")
+    assert excinfo.value.code == "request_closed"
+    # Expired records are terminal, so the pending slot is free again.
+    store.request(harness="h", session="s", label="one")
+
+
+def test_secret_request_fulfilled_capture_expiry_drops_the_ref() -> None:
+    now = [3000.0]
+    store = S.SessionSecretStore(clock=lambda: now[0])
+    request = store.request(harness="h", session="s", label="token")
+    fulfilled = store.fulfill_request(request.id, "hunter2hunter2",
+                                      harness="h", session="s", ttl_s=10)
+    assert fulfilled.ref
+    now[0] = 3011.0
+    expired = store.request_status(request.id, harness="h", session="s")
+    assert expired.state == S.SESSION_REQUEST_EXPIRED
+    assert expired.ref is None
+    assert "secret://session/" not in json.dumps(expired.as_dict())
+    # A fresh request is allowed now, and a new fulfill captures a new value.
+    fresh = store.request(harness="h", session="s", label="token")
+    assert fresh.id != request.id
+
+
+def test_secret_request_bounds_and_session_clear() -> None:
+    store = S.SessionSecretStore(max_requests=2)
+    first = store.request(harness="h", session="s", label="one")
+    store.decline_request(first.id, harness="h", session="s")
+    store.request(harness="h", session="s", label="two")
+    store.request(harness="h", session="s", label="three")
+    listed = store.requests("h", "s")
+    assert len(listed) == 2
+    assert "one" not in {item.label for item in listed}
+    assert store.clear_requests("h", "s") == 2
+    assert store.requests("h", "s") == []
+    assert store.clear_requests("h", "s") == 0
+
+
+def test_secret_request_validation_has_no_value() -> None:
+    store = S.SessionSecretStore()
+    for value in ("", "x" * (S.MAX_REQUEST_PURPOSE + 1), "bad\npurpose"):
+        with pytest.raises(S.SecretError):
+            store.request(harness="h", session="s", label="label",
+                          purpose=value)
+    with pytest.raises(S.SecretError) as excinfo:
+        store.request(harness="h", session="s", label="label",
+                      target="file")
+    assert excinfo.value.code == "invalid_target"
+    with pytest.raises(S.SecretError) as excinfo:
+        store.request(harness="h", session="s")
+    assert excinfo.value.code == "invalid_label"
+    with pytest.raises(S.SecretError) as excinfo:
+        store.request_status("../../etc/passwd", harness="h", session="s")
+    assert excinfo.value.code == "invalid_request_id"
+
+
+# --------------------------------------------------------------------------- #
 # broker + session provider
 # --------------------------------------------------------------------------- #
 def test_broker_resolves_session_refs_with_context(tmp_path: Path) -> None:

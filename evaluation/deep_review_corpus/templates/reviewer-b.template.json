@@ -1,0 +1,23 @@
+{
+  "label_schema_version": 1,
+  "corpus_id": "<corpus-id>",
+  "repository_id": "<repository-id>",
+  "subject_key": "<whole-repo-or-change-range-slot-id>",
+  "kind": "reviewer",
+  "provenance": "human",
+  "reviewer": {
+    "id": "<reviewer-b-id>",
+    "role": "reviewer",
+    "independent_pass": true,
+    "started_at": null,
+    "completed_at": null
+  },
+  "declared_scope": {
+    "status": "unknown",
+    "description": "Describe exactly which files, subjects and change ranges this reviewer examined.",
+    "subjects": [],
+    "paths": []
+  },
+  "labels": [],
+  "label_file_sha256": null
+}

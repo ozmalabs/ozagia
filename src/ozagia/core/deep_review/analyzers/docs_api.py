@@ -28,12 +28,43 @@ _IMPORT = re.compile(r"^\s*from\s+([A-Za-z_][\w.]*)\s+import\s+(.+?)\s*(?:#.*)?$
 _IMPORT_MODULE = re.compile(
     r"^\s*import\s+([A-Za-z_][\w.]*)"
     r"(?:\s+as\s+[A-Za-z_]\w*)?\s*(?:#.*)?$")
+_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_INLINE_CODE = re.compile(r"(?<!`)(`+)(?!`)(.+?)(?<!`)\1(?!`)")
 _LIMITATIONS = [
-    "only single-line literal `from local.module import name` and `import local.module` statements are checked",
+    "only single-line literal `from local.module import name` and `import local.module` statements outside code examples are checked",
     "comma-separated imports, prose API mentions, and non-Markdown examples are not checked",
+    "fenced and indented code blocks and inline code spans are examples, not live imports",
     "runtime re-exports and versioned/removed API history are not assessed",
     "a documented name re-exported dynamically may appear missing",
 ]
+
+
+def _prose_lines(text: str) -> list[tuple[int, str]]:
+    """Lines outside Markdown code blocks, with inline code spans masked.
+
+    An import statement in a fenced or indented example is documentation of an
+    API, not a live import. Masking instead of dropping the line preserves line
+    numbers for findings that come from real prose.
+    """
+    lines: list[tuple[int, str]] = []
+    fence: tuple[str, int] | None = None
+    for number, line in enumerate(text.splitlines(), 1):
+        marker = _FENCE.match(line)
+        if marker:
+            token = marker.group(1)
+            key = (token[0], len(token))
+            if fence is None:
+                fence = key
+                continue
+            if token[0] == fence[0] and len(token) >= fence[1]:
+                fence = None
+                continue
+        if fence is not None or line.startswith(("    ", "\t")):
+            continue
+        masked = _INLINE_CODE.sub(
+            lambda match: " " * len(match.group(0)), line)
+        lines.append((number, masked))
+    return lines
 
 
 def _module_path(root: Path, module: str) -> Path | None:
@@ -188,7 +219,7 @@ def analyze_with_coverage(root: str | Path, *, budget_s: float = 10.0) -> dict[s
     for doc, text in docs:
         rel = doc.relative_to(root).as_posix()
         checked.append(rel)
-        for line_no, line in enumerate(text.splitlines(), 1):
+        for line_no, line in _prose_lines(text):
             module_match = _IMPORT_MODULE.match(line)
             if module_match:
                 module = module_match.group(1)

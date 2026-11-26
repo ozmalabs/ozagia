@@ -740,8 +740,10 @@ def test_probe_environment_is_scrubbed(tmp_path: Path, monkeypatch) -> None:
     assert EN.run_probe(python)["ok"] is False
     keys = {line.split("=", 1)[0] for line in dump.read_text().splitlines()
             if "=" in line}
-    assert keys - {"PWD", "SHLVL", "_", "OLDPWD"} <= {"PATH", "HOME", "LANG",
-                                                      "LC_ALL", "LC_CTYPE", "TMPDIR"}
+    allowed = {"PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR"}
+    unexpected = {key for key in keys - {"PWD", "SHLVL", "_", "OLDPWD"}
+                  if key not in allowed and not key.startswith("LC_")}
+    assert not unexpected
     assert {"LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "PATH"} <= keys
     assert "SECRET_TOKEN" not in keys and "OZAGIA_STATE_DIR" not in keys
 

@@ -489,3 +489,50 @@ PYTHONPATH=src .venv/bin/python -m pytest -q tests/test_testing.py \
   tests/test_affected_tests.py tests/test_failures.py
 .venv/bin/ruff check src tests
 ```
+
+## Running the repository suite
+
+The default release gate runs the whole suite. Locally:
+
+```bash
+uv venv --python 3.13 .venv
+uv pip install --python .venv/bin/python -e '.[dev]'
+PYTHONPATH=src .venv/bin/python -m pytest -q
+```
+
+CI and the release workflow shard the same suite by whole test files with
+`OZAGIA_TEST_SHARD=i/n` (1-based, for example `1/4`). Files are assigned
+largest-first to the least-loaded shard, so a module's fixtures stay together
+and the shards are roughly even by file size. Running one shard:
+
+```bash
+OZAGIA_TEST_SHARD=2/4 PYTHONPATH=src .venv/bin/python -m pytest -q
+```
+
+Leave the variable unset for the full suite. An invalid value is a pytest
+usage error. The shard is a plain pytest collection filter; it is not a
+selection policy and does not change what each test asserts.
+
+### Resource assumptions
+
+- The suite is offline: no model calls, provider requests or fixed ports. The
+  few local servers bind an ephemeral loopback port (`port=0`) or a Unix socket
+  under the test's temporary directory.
+- Job and admission tests use explicit small limits and zero floors/reserves
+  (`[resources.limits]`, `[resources.admission]`), so they do not depend on the
+  host's free disk or memory. Production admission defaults are unchanged and
+  are covered directly by `tests/test_resources.py`.
+- Temp files live under pytest's temporary base (usually `/tmp`), which must
+  allow Unix sockets and executable files. No test writes into a developer's
+  ozagia state directory.
+- Run the suite from the declared development environment. A few child
+  processes use an isolated interpreter (`python -I`) or a temporary `HOME`, so
+  they need ozagia (and pytest) installed in that interpreter; a bare system
+  Python with only `PYTHONPATH` is not sufficient. The editable `.venv`
+  install above is the supported setup.
+- Parsers and language servers are optional extras: tests that need
+  tree-sitter or pyright report or skip when they are missing. Live language
+  server tests additionally require `OZAGIA_LIVE_LSP=1`.
+- Some tests use `git`, `rg` and `jq`; CI installs ripgrep and jq. Tests that
+  compare against historical commits skip when the commit is not in the clone;
+  CI checks out with full history.

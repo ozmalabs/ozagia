@@ -1,0 +1,28 @@
+{
+  "findings": [
+    {
+      "id": "DR-5",
+      "type": "mutable_default",
+      "subject": "data-structures",
+      "severity": "minor",
+      "locations": [
+        {
+          "path": "src/partial.py",
+          "line": 1
+        }
+      ]
+    },
+    {
+      "id": "DR-6",
+      "type": "expensive_copy",
+      "subject": "performance",
+      "severity": "note",
+      "locations": [
+        {
+          "path": "src/partial_noise.py",
+          "line": 2
+        }
+      ]
+    }
+  ]
+}

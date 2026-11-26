@@ -428,14 +428,22 @@ def test_dev_who_mcp(repo, mem):
 class StubDaemon:
     def __init__(self, sock: Path, reply):
         self.sock, self.reply, self.requests = sock, reply, []
+        self.profile_requests: list[dict] = []
+        self.order: list[str] = []
         stub = self
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
                 for line in self.rfile:
                     req = json.loads(line)
-                    stub.requests.append(req)
-                    resp = {"id": req.get("id"), **stub.reply(req)}
+                    stub.order.append(str(req.get("op")))
+                    if req.get("op") == "profile_event":
+                        stub.profile_requests.append(req)
+                        body = {"ok": True, "stored": True}
+                    else:
+                        stub.requests.append(req)
+                        body = stub.reply(req)
+                    resp = {"id": req.get("id"), **body}
                     self.wfile.write((json.dumps(resp) + "\n").encode())
                     self.wfile.flush()
 
@@ -493,6 +501,9 @@ def test_claude_read_of_a_missing_path_is_denied_with_candidates(repo, sock):
         assert out["permissionDecision"] == "deny"
         assert "did you mean: GRAPH" in out["permissionDecisionReason"]
         assert stub.requests[0]["op"] == "path_check"
+        # Profile recording is optional and must follow the primary request.
+        assert stub.order[0] == "path_check"
+        assert "profile_event" in stub.order[1:]
         # An existing file: no path check, the Read runs.
         n = len(stub.requests)
         proc = _run("ozagia.integrations.claude_code",
@@ -529,6 +540,8 @@ def test_claude_edit_gets_ownership_warning_as_context(repo, sock):
         req = stub.requests[-1]
         assert req["op"] == "owner_check" and req["harness"] == "claude"
         assert req["paths"] == [str(repo / "pkg" / "mod.py")]
+        assert stub.order[0] == "owner_check"
+        assert "profile_event" in stub.order[1:]
     finally:
         stub.close()
 
@@ -540,6 +553,8 @@ def test_kiro_read_of_a_missing_path_blocks_with_candidates(repo, sock):
                     _pre(repo, "read_file", {"path": "pkg/mdo.py"}), sock, repo)
         assert proc.returncode == 2
         assert "[ozagia] no such file pkg/mdo.py; did you mean: GRAPH" in proc.stderr
+        assert stub.order[0] == "path_check"
+        assert "profile_event" in stub.order[1:]
         # Relative to the event's cwd: `mod.py` exists under pkg/.
         n = len(stub.requests)
         proc = _run("ozagia.integrations.kiro",
@@ -592,6 +607,8 @@ def test_codex_apply_patch_gets_ownership_warning(repo, sock):
         assert out == {"hookEventName": "PreToolUse", "additionalContext": WARNING}
         req = stub.requests[-1]
         assert req["op"] == "owner_check" and req["paths"] == ["pkg/mod.py"]
+        assert stub.order[0] == "owner_check"
+        assert "profile_event" in stub.order[1:]
     finally:
         stub.close()
 

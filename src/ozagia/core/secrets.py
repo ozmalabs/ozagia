@@ -52,7 +52,7 @@ import threading
 import time
 import tomllib
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import quote, unquote_to_bytes
@@ -104,6 +104,24 @@ SESSION_CAPTURE_MAX_SESSIONS = 64
 SESSION_TOKEN_BYTES = 24
 MIN_DETECTED_SECRET_LENGTH = 8
 
+#: Pending secret requests are metadata only: no value and no prompt text.
+#: A request expires after five minutes by default (ten minutes at most) and
+#: is bounded per session and across sessions.
+SESSION_REQUEST_PENDING = "pending"
+SESSION_REQUEST_FULFILLED = "fulfilled"
+SESSION_REQUEST_DECLINED = "declined"
+SESSION_REQUEST_EXPIRED = "expired"
+SESSION_REQUEST_TARGETS = ("session",)
+SESSION_REQUEST_MAX_PENDING = 16
+SESSION_REQUEST_MAX_ENTRIES = 64
+SESSION_REQUEST_TTL_S = 300.0
+SESSION_REQUEST_MAX_TTL_S = 600.0
+SESSION_REQUEST_MAX_SESSIONS = 64
+SESSION_REQUEST_TOKEN_BYTES = 18
+MAX_REQUEST_ID = 64
+MAX_REQUEST_LABEL = 128
+MAX_REQUEST_PURPOSE = 280
+
 
 #: Environment names that configure the broker (not secret values).
 ENV_PROVIDERS = "OZAGIA_SECRET_PROVIDERS"
@@ -136,6 +154,7 @@ _KEYRING_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@:+-]{0,127}\Z")
 _PASS_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,127}\Z")
 _OP_PART = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _SESSION_TOKEN = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
+_REQUEST_ID = re.compile(r"req_[A-Za-z0-9_-]{8,60}\Z")
 _PARAM_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}\Z")
 _SECRET_REF_SPAN = re.compile(r"secret://[A-Za-z0-9._~%/:@+-]+")
 _HEX = frozenset("0123456789abcdefABCDEF")
@@ -1050,6 +1069,63 @@ class CapturedSecret:
         return self.as_dict().get(key, default)
 
 
+@dataclass(frozen=True)
+class SecretRequest:
+    """Metadata for one model-initiated secret request.
+
+    A request never holds a value, prompt text or a source path. ``id`` is an
+    opaque handle safe to show the model; ``ref`` and ``fingerprint`` are
+    present only after a trusted CLI fulfils the request.
+    """
+
+    id: str
+    label: str | None
+    purpose: str | None
+    target: str
+    state: str
+    created: float
+    expires: float
+    ref: str | None = None
+    fingerprint: str | None = None
+
+    @property
+    def created_at(self) -> float:
+        return self.created
+
+    @property
+    def expires_at(self) -> float:
+        return self.expires
+
+    @property
+    def fulfilled_ref(self) -> str | None:
+        return self.ref if self.state == SESSION_REQUEST_FULFILLED else None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.id,
+            "label": self.label,
+            "purpose": self.purpose,
+            "target": self.target,
+            "state": self.state,
+            "created": self.created,
+            "expires": self.expires,
+            "ref": self.ref,
+            "fingerprint": self.fingerprint,
+        }
+
+    def __str__(self) -> str:
+        return self.id
+
+    def __getitem__(self, key: str) -> Any:
+        return self.as_dict()[key]
+
+    def keys(self):
+        return self.as_dict().keys()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self.as_dict().get(key, default)
+
+
 class SessionSecretStore:
     """A bounded, in-memory store for secrets pasted into one chat session.
 
@@ -1057,6 +1133,13 @@ class SessionSecretStore:
     expire after a TTL (default one hour, capped at 24 hours). A reference is
     an opaque random ``secret://session/<token>``; it is not derived from the
     value and is safe to keep in transcripts, job records and model messages.
+
+    The same store keeps model-initiated secret *requests*: metadata only,
+    bound to the same ``(harness, session)``. A request is created by the model
+    or a tool, fulfilled only through a trusted local CLI value path, and then
+    carries the captured reference and fingerprint. A request never holds a
+    value. Pending requests expire after five minutes by default (ten at most)
+    and there are at most 16 pending requests per session.
 
     Bounds: ``max_entries`` per session (default 32, oldest evicted first),
     ``max_value_bytes`` per value (default 16 KiB), and ``max_sessions``
@@ -1069,7 +1152,13 @@ class SessionSecretStore:
                  max_value_bytes: int = SESSION_CAPTURE_MAX_BYTES,
                  default_ttl_s: float = SESSION_CAPTURE_TTL_S,
                  max_ttl_s: float = SESSION_CAPTURE_MAX_TTL_S,
-                 max_sessions: int = SESSION_CAPTURE_MAX_SESSIONS) -> None:
+                 max_sessions: int = SESSION_CAPTURE_MAX_SESSIONS,
+                 request_ttl_s: float = SESSION_REQUEST_TTL_S,
+                 max_request_ttl_s: float = SESSION_REQUEST_MAX_TTL_S,
+                 max_pending_requests: int = SESSION_REQUEST_MAX_PENDING,
+                 max_requests: int = SESSION_REQUEST_MAX_ENTRIES,
+                 max_request_sessions: int = SESSION_REQUEST_MAX_SESSIONS,
+                 ) -> None:
         self._clock = clock or time.time
         self._max_entries = max(1, int(max_entries))
         self._max_value_bytes = max(1, int(max_value_bytes))
@@ -1077,8 +1166,17 @@ class SessionSecretStore:
                                     SESSION_CAPTURE_MAX_TTL_S))
         self._default_ttl = max(1.0, min(float(default_ttl_s), self._max_ttl))
         self._max_sessions = max(1, int(max_sessions))
+        self._request_max_ttl = max(
+            1.0, min(float(max_request_ttl_s), SESSION_REQUEST_MAX_TTL_S))
+        self._request_default_ttl = max(
+            1.0, min(float(request_ttl_s), self._request_max_ttl))
+        self._max_pending_requests = max(1, int(max_pending_requests))
+        self._max_requests = max(1, int(max_requests))
+        self._max_request_sessions = max(1, int(max_request_sessions))
         self._sessions: OrderedDict[
             tuple[str, str], OrderedDict[str, _SessionEntry]] = OrderedDict()
+        self._requests: OrderedDict[
+            tuple[str, str], OrderedDict[str, SecretRequest]] = OrderedDict()
         self._lock = threading.RLock()
 
     def __len__(self) -> int:
@@ -1088,7 +1186,8 @@ class SessionSecretStore:
     def __repr__(self) -> str:
         with self._lock:
             return (f"SessionSecretStore(sessions={len(self._sessions)}, "
-                    f"entries={sum(len(v) for v in self._sessions.values())})")
+                    f"entries={sum(len(v) for v in self._sessions.values())}, "
+                    f"requests={sum(len(v) for v in self._requests.values())})")
 
     def counts(self) -> dict[str, int]:
         with self._lock:
@@ -1098,6 +1197,13 @@ class SessionSecretStore:
                 "max_entries_per_session": self._max_entries,
                 "max_sessions": self._max_sessions,
                 "max_value_bytes": self._max_value_bytes,
+                "requests": sum(len(v) for v in self._requests.values()),
+                "pending_requests": sum(
+                    1 for entries in self._requests.values()
+                    for request in entries.values()
+                    if request.state == SESSION_REQUEST_PENDING),
+                "max_pending_requests_per_session":
+                    self._max_pending_requests,
             }
 
     def _ttl(self, ttl_s: float | None) -> float:
@@ -1119,10 +1225,82 @@ class SessionSecretStore:
     def _label(value: Any) -> str | None:
         if value is None:
             return None
-        if not isinstance(value, str) or len(value) > 128 \
+        if not isinstance(value, str) or len(value) > MAX_REQUEST_LABEL \
                 or any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise SecretError("label is invalid", code="invalid_label")
         return value
+
+    def _request_ttl(self, ttl_s: float | None) -> float:
+        if ttl_s is None:
+            return self._request_default_ttl
+        if isinstance(ttl_s, bool) or not isinstance(ttl_s, (int, float)):
+            raise SecretError("ttl must be a number of seconds",
+                              code="invalid_ttl")
+        if ttl_s <= 0:
+            raise SecretError("ttl must be positive", code="invalid_ttl")
+        return min(float(ttl_s), self._request_max_ttl)
+
+    @staticmethod
+    def _request_text(value: Any, what: str, limit: int) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value or len(value) > limit \
+                or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise SecretError(f"{what} is invalid", code=f"invalid_{what}")
+        return value
+
+    @staticmethod
+    def _request_target(value: Any) -> str:
+        if value is None:
+            return SESSION_REQUEST_TARGETS[0]
+        if value not in SESSION_REQUEST_TARGETS:
+            raise SecretError("target must be one of "
+                              + ", ".join(SESSION_REQUEST_TARGETS),
+                              code="invalid_target")
+        return value
+
+    @staticmethod
+    def _request_id(value: Any) -> str:
+        if (not isinstance(value, str) or len(value) > MAX_REQUEST_ID
+                or not _REQUEST_ID.fullmatch(value)):
+            raise SecretError("request id is invalid",
+                              code="invalid_request_id")
+        return value
+
+    def _find_request(self, request_id: str
+                      ) -> tuple[tuple[str, str],
+                                 OrderedDict[str, SecretRequest],
+                                 SecretRequest] | None:
+        for key, entries in self._requests.items():
+            request = entries.get(request_id)
+            if request is not None:
+                return key, entries, request
+        return None
+
+    def _expire_requests(self, entries: OrderedDict[str, SecretRequest],
+                         now: float, *, harness: str, session: str) -> int:
+        """Move pending/fulfilled requests whose window or ref ended to expired.
+
+        An expired request keeps no ``secret://session`` reference. The
+        fingerprint of a fulfilled request stays (it identifies rotation), but
+        a pending request never had one.
+        """
+        changed = 0
+        for request_id, request in list(entries.items()):
+            if request.state == SESSION_REQUEST_PENDING \
+                    and request.expires <= now:
+                entries[request_id] = replace(
+                    request, state=SESSION_REQUEST_EXPIRED, ref=None,
+                    fingerprint=None)
+                changed += 1
+            elif request.state == SESSION_REQUEST_FULFILLED and request.ref:
+                state, _entry, _token = self._lookup(
+                    request.ref, harness=harness, session=session)
+                if state != "found":
+                    entries[request_id] = replace(
+                        request, state=SESSION_REQUEST_EXPIRED, ref=None)
+                    changed += 1
+        return changed
 
     def capture(self, value: str, *, harness: str, session: str,
                 label: str | None = None, ttl_s: float | None = None
@@ -1185,7 +1363,12 @@ class SessionSecretStore:
         return len(expired)
 
     def prune(self) -> int:
-        """Drop every expired capture across sessions; return the count."""
+        """Drop every expired capture across sessions; return the count.
+
+        Expired pending requests, and fulfilled requests whose reference no
+        longer resolves, are marked ``expired`` and drop their reference. The
+        return value counts captures only, as before.
+        """
         now = float(self._clock())
         removed = 0
         with self._lock:
@@ -1193,6 +1376,13 @@ class SessionSecretStore:
                 removed += self._prune_session(entries, now)
                 if not entries:
                     self._sessions.pop(key, None)
+            for key, requests in list(self._requests.items()):
+                harness, session = key
+                self._expire_requests(requests, now, harness=harness,
+                                      session=session)
+                self._prune_requests(requests)
+                if not requests:
+                    self._requests.pop(key, None)
         return removed
 
     @staticmethod
@@ -1322,11 +1512,210 @@ class SessionSecretStore:
             entries = self._sessions.pop((harness, session), None)
             return len(entries) if entries is not None else 0
 
+    def clear_requests(self, harness: str, session: str) -> int:
+        """Drop every request record for one session; return the count."""
+        harness = _session_context(harness, "harness")
+        session = _session_context(session, "session")
+        with self._lock:
+            entries = self._requests.pop((harness, session), None)
+            return len(entries) if entries is not None else 0
+
+    # -- model-initiated requests (metadata only) --------------------------- #
+    def request(self, *, harness: str, session: str,
+                label: str | None = None, purpose: str | None = None,
+                target: str | None = None,
+                ttl_s: float | None = None) -> SecretRequest:
+        """Create or reuse a pending secret request; no value is accepted.
+
+        A duplicate (same session, label, purpose and target) returns the
+        existing pending request, or a fulfilled request whose reference still
+        resolves. A declined or expired duplicate creates a new request.
+        """
+        harness = _session_context(harness, "harness")
+        session = _session_context(session, "session")
+        label = self._label(label)
+        purpose = self._request_text(purpose, "purpose", MAX_REQUEST_PURPOSE)
+        target = self._request_target(target)
+        if label is None and purpose is None:
+            raise SecretError("a request needs a label or a purpose",
+                              code="invalid_label")
+        ttl = self._request_ttl(ttl_s)
+        now = float(self._clock())
+        with self._lock:
+            key = (harness, session)
+            entries = self._requests.get(key)
+            if entries is not None:
+                self._expire_requests(entries, now, harness=harness,
+                                      session=session)
+                for request in reversed(list(entries.values())):
+                    if (request.label != label
+                            or request.purpose != purpose
+                            or request.target != target):
+                        continue
+                    if request.state == SESSION_REQUEST_PENDING:
+                        return request
+                    if request.state == SESSION_REQUEST_FULFILLED \
+                            and request.ref:
+                        state, _entry, _token = self._lookup(
+                            request.ref, harness=harness, session=session)
+                        if state == "found":
+                            return request
+                pending = sum(
+                    1 for request in entries.values()
+                    if request.state == SESSION_REQUEST_PENDING)
+                if pending >= self._max_pending_requests:
+                    raise SecretError(
+                        "too many pending secret requests for this session",
+                        code="request_limit")
+            else:
+                entries = OrderedDict()
+                self._requests[key] = entries
+            self._requests.move_to_end(key)
+            request_id = ""
+            for _ in range(8):
+                candidate = "req_" + _stdlib_secrets.token_urlsafe(
+                    SESSION_REQUEST_TOKEN_BYTES)
+                if self._find_request(candidate) is None:
+                    request_id = candidate
+                    break
+            if not request_id:
+                raise SecretError("cannot allocate a request id",
+                                  code="token_error")
+            created = now
+            request = SecretRequest(
+                id=request_id, label=label, purpose=purpose, target=target,
+                state=SESSION_REQUEST_PENDING, created=created,
+                expires=created + ttl)
+            entries[request_id] = request
+            self._prune_requests(entries)
+            while len(self._requests) > self._max_request_sessions:
+                self._requests.popitem(last=False)
+            return request
+
+    def _prune_requests(self, entries: OrderedDict[str, SecretRequest]) -> int:
+        """Bound one session's request records, dropping terminal ones first."""
+        removed = 0
+        while len(entries) > self._max_requests:
+            victim = next((request_id for request_id, request
+                           in entries.items()
+                           if request.state != SESSION_REQUEST_PENDING), None)
+            if victim is None:
+                entries.popitem(last=False)
+            else:
+                entries.pop(victim, None)
+            removed += 1
+        return removed
+
+    def requests(self, harness: str, session: str) -> list[SecretRequest]:
+        """Every request record for one session, without any value."""
+        harness = _session_context(harness, "harness")
+        session = _session_context(session, "session")
+        now = float(self._clock())
+        with self._lock:
+            entries = self._requests.get((harness, session))
+            if entries is None:
+                return []
+            self._expire_requests(entries, now, harness=harness,
+                                  session=session)
+            return list(entries.values())
+
+    def request_status(self, request_id: str, *, harness: str,
+                       session: str) -> SecretRequest:
+        """One request's status for the matching session only."""
+        request_id = self._request_id(request_id)
+        harness = _session_context(harness, "harness")
+        session = _session_context(session, "session")
+        now = float(self._clock())
+        with self._lock:
+            found = self._find_request(request_id)
+            if found is None:
+                raise SecretNotFound("secret request not found",
+                                     code="request_not_found")
+            key, entries, _request = found
+            if key != (harness, session):
+                raise SecretDenied(
+                    "secret request belongs to another session",
+                    code="request_mismatch")
+            self._expire_requests(entries, now, harness=harness,
+                                  session=session)
+            return entries[request_id]
+
+    def fulfill_request(self, request_id: str, value: str, *, harness: str,
+                        session: str,
+                        ttl_s: float | None = None) -> SecretRequest:
+        """Capture a CLI-supplied value for a pending request.
+
+        The value is accepted here only so the trusted local CLI can pass it
+        to the daemon; it is stored in the session store and never copied into
+        the request, the return value or a log. Fulfilling an already
+        fulfilled request is idempotent: the new value is ignored.
+        """
+        request = self.request_status(request_id, harness=harness,
+                                      session=session)
+        if request.state == SESSION_REQUEST_FULFILLED:
+            return request
+        if request.state in (SESSION_REQUEST_DECLINED,
+                             SESSION_REQUEST_EXPIRED):
+            raise SecretError("secret request is " + request.state,
+                              code="request_closed")
+        captured = self.capture(value, harness=harness, session=session,
+                                label=request.label, ttl_s=ttl_s)
+        with self._lock:
+            entries = self._requests.get((harness, session))
+            if entries is None:
+                raise SecretNotFound("secret request not found",
+                                     code="request_not_found")
+            current = entries.get(request.id)
+            if current is None:
+                raise SecretNotFound("secret request not found",
+                                     code="request_not_found")
+            if current.state != SESSION_REQUEST_PENDING:
+                # Another thread fulfilled/declined it between the checks.
+                return current
+            updated = replace(current, state=SESSION_REQUEST_FULFILLED,
+                              ref=captured.ref,
+                              fingerprint=captured.fingerprint,
+                              expires=captured.expires)
+            entries[request.id] = updated
+            return updated
+
+    def decline_request(self, request_id: str, *, harness: str,
+                        session: str) -> SecretRequest:
+        """Decline a pending request; repeating a decline is idempotent."""
+        request = self.request_status(request_id, harness=harness,
+                                      session=session)
+        if request.state == SESSION_REQUEST_DECLINED:
+            return request
+        if request.state in (SESSION_REQUEST_FULFILLED,
+                             SESSION_REQUEST_EXPIRED):
+            raise SecretError("secret request is " + request.state,
+                              code="request_closed")
+        with self._lock:
+            entries = self._requests.get((harness, session))
+            if entries is None:
+                raise SecretNotFound("secret request not found",
+                                     code="request_not_found")
+            current = entries.get(request.id)
+            if current is None:
+                raise SecretNotFound("secret request not found",
+                                     code="request_not_found")
+            if current.state == SESSION_REQUEST_DECLINED:
+                return current
+            if current.state != SESSION_REQUEST_PENDING:
+                raise SecretError("secret request is " + current.state,
+                                  code="request_closed")
+            updated = replace(current, state=SESSION_REQUEST_DECLINED,
+                              ref=None, fingerprint=None)
+            entries[request.id] = updated
+            return updated
+
     def describe(self) -> dict[str, Any]:
         """Bounded counts and limits; never a value or a token listing."""
         counts = self.counts()
         counts["default_ttl_s"] = self._default_ttl
         counts["max_ttl_s"] = self._max_ttl
+        counts["request_ttl_s"] = self._request_default_ttl
+        counts["max_request_ttl_s"] = self._request_max_ttl
         counts["storage"] = "memory-only"
         return counts
 

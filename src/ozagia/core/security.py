@@ -101,6 +101,13 @@ _C_FAMILY_SUFFIXES = frozenset({
     ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".hxx",
 })
 _LANGUAGE_BUILTIN_RULES = frozenset({"eval", "exec"})
+# `eval`/`exec` are only executable when they appear in code. A quoted help
+# string or an inline comment is prose, not a call, so these rules check
+# tokenizer spans instead of suppressing whole lines.
+_STRING_LITERAL_RULES = frozenset({"eval", "exec"})
+_SAFE_YAML_LOADER_SUFFIXES = frozenset({
+    "SafeLoader", "BaseLoader", "CSafeLoader", "CBaseLoader",
+})
 
 CI_PREFIXES = (".github/workflows/", ".gitlab-ci", ".circleci/")
 
@@ -220,6 +227,48 @@ def secret_fingerprint(value: str) -> str:
                                       ).hexdigest()[:16]
 
 
+def normalize_finding_path(path: str | None) -> str:
+    """Normalize a finding path for fingerprinting and allowlist matching.
+
+    The path is repository-relative and POSIX-shaped: backslashes become
+    slashes, redundant separators and leading ``./`` are removed. A finding
+    path is already relative, so this only removes spellings that would make
+    the same file hash differently.
+    """
+    text = str(path or "").replace("\\", "/").strip()
+    while text.startswith("./"):
+        text = text[2:]
+    text = re.sub(r"/{2,}", "/", text)
+    return text.rstrip("/")
+
+
+def normalize_finding_line(line: str | None) -> str:
+    """Normalize the matched source line used by a finding fingerprint.
+
+    Only outer whitespace is ignored, so moving or reindenting a line does not
+    invalidate an allowlist entry, while editing its content does.
+    """
+    return str(line or "").strip()
+
+
+def finding_fingerprint(rule: str, path: str | None,
+                        line_text: str | None) -> str:
+    """A reviewed allowlist identity for one finding.
+
+    The identity binds the rule, the normalized repository path and the
+    normalized matched line. It intentionally excludes the line number so a
+    moved line keeps its fingerprint, and it includes the line content so an
+    edit invalidates the allowlist entry. Secret values are never stored; the
+    fingerprint is a one-way hash of the line, including any value on it.
+    """
+    payload = json.dumps(
+        [str(rule or ""), normalize_finding_path(path),
+         normalize_finding_line(line_text)],
+        ensure_ascii=False, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")
+                                      ).hexdigest()[:16]
+
+
 @dataclass(frozen=True)
 class SecretHit:
     rule: str
@@ -229,6 +278,19 @@ class SecretHit:
     line: int
     fingerprint: str
     value: str  # internal only; never serialized
+
+
+def _generic_secret_reference(line: str, value: str, end: int) -> bool:
+    """Whether a generic-secret match is a reference/call, not a literal.
+
+    ``api_key = _load_api_key(...)`` and ``secret = self.loader(...)`` are
+    assignments from a key loader. The rule is about embedded literal secrets,
+    so a call (the matched identifier followed by ``(``) is not one. Quoted
+    literals and bare opaque values stay flagged.
+    """
+    if not re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*", value):
+        return False
+    return bool(re.match(r"\s*\(", line[end:]))
 
 
 def _line_secret_hits(text: str, *, start_line: int = 1,
@@ -253,6 +315,10 @@ def _line_secret_hits(text: str, *, start_line: int = 1,
                                  value)
                         or re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+",
                                         value)):
+                    continue
+                if (rule.name == "generic_high_entropy" and rule.value_group
+                        and _generic_secret_reference(
+                            line, value, match.end(rule.value_group))):
                     continue
                 if rule.name == "url_credentials" and _PLACEHOLDER.search(value):
                     continue
@@ -382,6 +448,48 @@ def _non_code_lines(rel: str, text: str) -> set[int]:
         if re.match(r"^\s*(?:#|//|/\*|\*/|<!--|--\s)", line):
             ignored.add(number)
     return ignored
+
+
+def _python_masked_spans(text: str) -> dict[int, list[tuple[int, int]]] | None:
+    """Per-line character spans that are comments or string-literal text.
+
+    ``eval``/``exec`` are only executable in code. A match inside a quoted
+    help string, a docstring or an inline comment is prose. Python 3.12+
+    tokenizes an f-string into literal ``FSTRING_MIDDLE`` tokens and expression
+    tokens, so ``f"eval(x)"`` is masked while ``f"{eval(x)}"`` keeps its code
+    span visible. The line is suppressed only when the whole match lies in a
+    masked span.
+
+    Returns ``None`` when the file cannot be tokenized; callers then keep the
+    normal rule so an unparseable file never hides a real finding.
+    """
+    masked_types = {tokenize.COMMENT, tokenize.STRING}
+    fstring_middle = getattr(tokenize, "FSTRING_MIDDLE", None)
+    if fstring_middle is not None:
+        masked_types.add(fstring_middle)
+    spans: dict[int, list[tuple[int, int]]] = {}
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(text).readline))
+    except (tokenize.TokenError, IndentationError):
+        return None
+    for token in tokens:
+        if token.type not in masked_types:
+            continue
+        (start_row, start_col), (end_row, end_col) = token.start, token.end
+        if end_row == start_row:
+            spans.setdefault(start_row, []).append((start_col, end_col))
+            continue
+        spans.setdefault(start_row, []).append((start_col, 1 << 30))
+        for row in range(start_row + 1, end_row):
+            spans.setdefault(row, []).append((0, 1 << 30))
+        spans.setdefault(end_row, []).append((0, end_col))
+    return spans
+
+
+def _span_is_masked(spans: Mapping[int, Sequence[tuple[int, int]]],
+                   row: int, start: int, end: int) -> bool:
+    return any(start >= left and end <= right
+               for left, right in spans.get(row, ()))
 
 
 def credential_file_hit(rel: str) -> SecretHit | None:
@@ -1096,12 +1204,107 @@ def _window(lines: Sequence[str], index: int, *, before: int = 2,
 
 
 def _context_skip(rule_name: str, line: str, window: str) -> bool:
-    if rule_name == "unsafe-yaml" and re.search(
-            r"(?i)SafeLoader|safe_load", window):
-        return True
     if rule_name == "template-injection" and "render_template(" in window:
         return True
     return False
+
+
+def _dotted_name(node: ast.AST) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        owner = _dotted_name(node.value)
+        return f"{owner}.{node.attr}" if owner else ""
+    return ""
+
+
+def _is_safe_yaml_loader_name(name: str) -> bool:
+    """A literal ``SafeLoader``/``BaseLoader`` (bare or under ``yaml.``).
+
+    A different module's attribute with the same name is not accepted; only
+    PyYAML's own loader names or a bare name are provable from the line.
+    """
+    if "." not in name:
+        return name in _SAFE_YAML_LOADER_SUFFIXES
+    owner, _, short = name.rpartition(".")
+    return owner == "yaml" and short in _SAFE_YAML_LOADER_SUFFIXES
+
+
+def _safe_yaml_loader_names(rel: str, text: str) -> frozenset[str]:
+    """Class names in one file that provably subclass a safe YAML loader.
+
+    This is deliberately local and static: only a class whose bases are, or
+    transitively are, ``SafeLoader``/``BaseLoader`` (or their C variants) is
+    recognized. A loader imported from elsewhere or computed at runtime is not
+    proven safe and stays a finding (or a reviewed allowlist entry).
+    """
+    if Path(rel).suffix.lower() not in {".py", ".pyi"}:
+        return frozenset()
+    if "yaml.load" not in text and "yaml.unsafe_load" not in text:
+        return frozenset()
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return frozenset()
+    parents: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        bases = {_dotted_name(base) for base in node.bases}
+        parents.setdefault(node.name, set()).update(
+            base for base in bases if base)
+    safe: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, bases in parents.items():
+            if name in safe:
+                continue
+            if any(_is_safe_yaml_loader_name(base) or base in safe
+                   for base in bases):
+                safe.add(name)
+                changed = True
+    return frozenset(safe)
+
+
+def _safe_yaml_loader_expression(node: ast.AST,
+                                 safe_loaders: frozenset[str]) -> bool:
+    name = _dotted_name(node)
+    if not name:
+        return False
+    return (_is_safe_yaml_loader_name(name)
+            or name in safe_loaders
+            or name.rsplit(".", 1)[-1] in safe_loaders)
+
+
+def _safe_yaml_call_lines(rel: str, text: str,
+                          safe_loaders: frozenset[str]) -> frozenset[int]:
+    """Lines whose ``yaml.load`` call has a statically safe ``Loader=``.
+
+    Python is parsed so a ``Loader=`` string argument, a keyword on a later
+    line and a nearby unrelated safe loader cannot be confused with the call's
+    actual loader keyword. A non-Python file has no comparable static proof, so
+    its ``yaml.load`` patterns stay findings unless reviewed.
+    """
+    if Path(rel).suffix.lower() not in {".py", ".pyi"}:
+        return frozenset()
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return frozenset()
+    lines: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _dotted_name(node.func) not in {"yaml.load", "yaml.unsafe_load"}:
+            continue
+        for keyword in node.keywords:
+            if (keyword.arg == "Loader"
+                    and _safe_yaml_loader_expression(
+                        keyword.value, safe_loaders)):
+                lines.add(node.lineno)
+                break
+    return frozenset(lines)
 
 
 def _extra_findings(rule: Rule, path: str, line_no: int, line: str,
@@ -1109,6 +1312,15 @@ def _extra_findings(rule: Rule, path: str, line_no: int, line: str,
                     index: GraphIndex) -> tuple[str, list[str], list[str]] | None:
     """Return (message_suffix, not_assessed, owasp_extra) or a skip marker."""
     if rule.name == "weak-hash":
+        # ``usedforsecurity=False`` is the caller's explicit statement that the
+        # digest is not a security control (for example a protocol nonce or a
+        # cache key). The rule matches the algorithm name, not that intent.
+        # Only look past the matched line when the call clearly continues, so a
+        # later flagged digest in the same window is not suppressed by mistake.
+        if re.search(r"(?i)usedforsecurity\s*=\s*False", line) or (
+                line.rstrip().endswith(("(", ","))
+                and re.search(r"(?i)usedforsecurity\s*=\s*False", window)):
+            return None
         if re.search(r"(?i)password|passwd|pwd", line):
             return None
         if re.search(r"(?i)checksum|integrity|etag|content-md5", window):
@@ -1250,7 +1462,12 @@ def _ci_findings(rel: str, text: str) -> list[dict[str, Any]]:
 def _scan_source(rel: str, text: str, index: GraphIndex,
                  warnings: list[str]) -> list[dict[str, Any]]:
     lines = text.splitlines()
+    suffix = Path(rel).suffix.lower()
     non_code_lines = _non_code_lines(rel, text)
+    string_spans = (_python_masked_spans(text)
+                    if suffix in {".py", ".pyi"} else None)
+    safe_yaml_loaders = _safe_yaml_loader_names(rel, text)
+    safe_yaml_lines = _safe_yaml_call_lines(rel, text, safe_yaml_loaders)
     out: list[dict[str, Any]] = []
     graph_usable = index.usable
 
@@ -1302,12 +1519,20 @@ def _scan_source(rel: str, text: str, index: GraphIndex,
     for number, line in enumerate(lines, start=1):
         if number in non_code_lines:
             continue
-        suffix = Path(rel).suffix.lower()
         for rule in _RULES:
             if (rule.name in _LANGUAGE_BUILTIN_RULES
                     and suffix in _C_FAMILY_SUFFIXES):
                 continue
-            if not rule.pattern.search(line):
+            match = rule.pattern.search(line)
+            if not match:
+                continue
+            if (rule.name in _STRING_LITERAL_RULES
+                    and string_spans is not None
+                    and _span_is_masked(string_spans, number,
+                                        match.start(), match.end())):
+                continue
+            if (rule.name == "unsafe-yaml"
+                    and number in safe_yaml_lines):
                 continue
             window = _window(lines, number - 1)
             if rule.name in ("unsafe-yaml", "template-injection", "weak-hash",
@@ -1336,8 +1561,11 @@ def _scan_source(rel: str, text: str, index: GraphIndex,
                     cwe=["cwe:347"], owasp=["a07"],
                     not_assessed=["runtime reachability",
                                   "the library's default verification mode"]))
-        if re.search(r"(?i)\.set_cookie\s*\(", line) and not re.search(
-                r"(?i)delete_cookie", line):
+        cookie_receiver = re.search(r"(?i)([A-Za-z_][\w.]*)\.set_cookie\s*\(",
+                                    line)
+        if (cookie_receiver is not None
+                and "jar" not in cookie_receiver.group(1).casefold()
+                and not re.search(r"(?i)delete_cookie", line)):
             window = _window(lines, number - 1, after=8)
             missing = []
             if not re.search(r"(?i)secure\s*=\s*True", window):
@@ -2519,7 +2747,8 @@ def _run_tools(names: Sequence[str], root: Path,
 # scan orchestration
 # --------------------------------------------------------------------------- #
 _SECURITY_BOOL_KEYS = ("enabled", "allow_network", "block_secrets")
-_SECURITY_LIST_KEYS = ("tools", "exclude", "secret_allowlist")
+_SECURITY_LIST_KEYS = ("tools", "exclude", "secret_allowlist",
+                       "finding_allowlist")
 
 
 def _security_defaults() -> dict[str, Any]:
@@ -2532,6 +2761,7 @@ def _security_defaults() -> dict[str, Any]:
         "max_findings": DEFAULT_MAX_FINDINGS,
         "block_secrets": True,
         "secret_allowlist": [],
+        "finding_allowlist": [],
     }
 
 
@@ -2772,6 +3002,84 @@ def _dependency_not_assessed(inventory: Mapping[str, Any],
             "runtime reachability and exploitability"]
 
 
+def _finding_source_line(root: Path, rel: str, line_no: Any,
+                         cache: dict[str, list[str] | None]) -> str:
+    """The matched working-tree line for a finding, when it is readable.
+
+    The text is only hashed into a fingerprint; it is never placed in a
+    report. A missing file, a non-positive line or a path outside the root
+    yields an empty string rather than an exception.
+    """
+    if not rel:
+        return ""
+    path = Path(rel)
+    if path.is_absolute() or ".." in path.parts:
+        return ""
+    if not isinstance(line_no, int) or line_no < 1:
+        return ""
+    if rel not in cache:
+        text = _read_text(root / rel)
+        cache[rel] = text.splitlines() if text is not None else None
+    lines = cache[rel]
+    if not lines or line_no > len(lines):
+        return ""
+    return lines[line_no - 1]
+
+
+def _annotate_finding_fingerprints(findings: Sequence[dict[str, Any]],
+                                   root: Path) -> None:
+    cache: dict[str, list[str] | None] = {}
+    for item in findings:
+        source = item.get("source") if isinstance(item.get("source"),
+                                                  Mapping) else {}
+        rule = str(source.get("rule") or "")
+        rel = normalize_finding_path(item.get("file"))
+        line = _finding_source_line(root, rel, item.get("line"), cache)
+        item["finding_fingerprint"] = finding_fingerprint(rule, rel, line)
+
+
+def _split_allowlisted_findings(
+        findings: Sequence[dict[str, Any]], entries: Sequence[str],
+        cap: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
+    """Split findings into kept and reviewed-allowed records.
+
+    The allowed records are a bounded, redacted view: rule, path, line,
+    fingerprint and the entry that matched. They never include a message,
+    evidence or a secret value.
+    """
+    kept: list[dict[str, Any]] = []
+    records: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for item in findings:
+        match = finding_allowlist_match(item, entries)
+        if match is None:
+            kept.append(item)
+            continue
+        rule = _rule_of(item)
+        path = normalize_finding_path(item.get("file"))
+        line = item.get("line")
+        fingerprint = str(item.get("finding_fingerprint") or "")
+        key = (rule, path, line, fingerprint, match)
+        records.setdefault(key, {
+            "rule": rule,
+            "path": path,
+            "line": line,
+            "fingerprint": fingerprint,
+            "allowlist": match,
+        })
+
+    def sort_key(item: Mapping[str, Any]) -> tuple[Any, ...]:
+        line = item.get("line")
+        return (str(item.get("path") or ""),
+                int(line) if isinstance(line, int) else 0,
+                str(item.get("rule") or ""),
+                str(item.get("fingerprint") or ""),
+                str(item.get("allowlist") or ""))
+
+    ordered = sorted(records.values(), key=sort_key)
+    allowed = ordered[:cap]
+    return kept, allowed, len(ordered), max(0, len(ordered) - len(allowed))
+
+
 def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
          tools: Sequence[str] | None = None,
          allow_network: bool | None = None,
@@ -2867,9 +3175,16 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
         warnings.extend(secret_scope.get("notes") or [])
     else:
         source_findings_raw = []
-    findings_raw = (source_findings + dependency_findings + tool_findings
-                    + list(source_findings_raw))
-    findings, total_findings, omitted = _finalize_findings(findings_raw, cap)
+    # The reviewed allowlist covers static scan findings. Staged/diff secret
+    # results stay with the separate secret gate (`secret_allowlist`), where
+    # the added line and the real value are available to that scope.
+    static_findings = source_findings + dependency_findings + tool_findings
+    _annotate_finding_fingerprints(static_findings, root_path)
+    finding_entries = list(config["finding_allowlist"])
+    kept_static, allowed, allowed_total, allowed_omitted = (
+        _split_allowlisted_findings(static_findings, finding_entries, cap))
+    findings, total_findings, omitted = _finalize_findings(
+        kept_static + list(source_findings_raw), cap)
 
     by_severity = {name: 0 for name in SEVERITIES}
     by_category: dict[str, int] = {}
@@ -2925,6 +3240,7 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
             "tools": requested,
             "block_secrets": bool(config["block_secrets"]),
             "secret_allowlist": list(config["secret_allowlist"]),
+            "finding_allowlist": list(config["finding_allowlist"]),
             "error": config.get("error"),
             "errors": list(config.get("errors") or []),
             "sources": dict(config.get("sources") or {}),
@@ -2958,10 +3274,14 @@ def scan(root: str | Path = ".", *, graph_path: str | Path | None = None,
             "results": tool_results,
         },
         "findings": findings,
+        "allowed": allowed,
         "summary": {
             "total": len(findings),
             "candidates": total_findings,
             "omitted": omitted,
+            "allowed": len(allowed),
+            "allowed_total": allowed_total,
+            "allowed_omitted": allowed_omitted,
             "by_severity": by_severity,
             "by_confidence": by_confidence,
             "by_category": dict(sorted(by_category.items())),
@@ -3169,6 +3489,34 @@ def _secret_path_match(path: str, pattern: str) -> bool:
     if clean.endswith("/**") and path.startswith(clean[:-3] + "/"):
         return True
     return False
+
+
+def finding_allowlist_match(finding: Mapping[str, Any],
+                            entries: Sequence[str]) -> str | None:
+    """The first reviewed allowlist entry that covers a static finding.
+
+    ``sha256:`` entries are exact matches against ``finding_fingerprint``; no
+    prefix match is accepted because an allowlist should not silently widen as
+    new findings share a short prefix. ``path:`` and ``rule:`` entries are
+    supported for compatibility with the secret-gate convention but are broad.
+    """
+    fingerprint = str(finding.get("finding_fingerprint") or "")
+    file_path = normalize_finding_path(finding.get("file"))
+    rule = _rule_of(finding)
+    for raw in entries:
+        entry = str(raw or "").strip()
+        if not entry:
+            continue
+        if entry.startswith("sha256:"):
+            if fingerprint and entry == fingerprint:
+                return entry
+        elif entry.startswith("path:"):
+            if _secret_path_match(file_path, entry[5:]):
+                return entry
+        elif entry.startswith("rule:"):
+            if rule and rule == entry[5:]:
+                return entry
+    return None
 
 
 def record_secret_decision(root: str | Path, *, kind: str,
@@ -3514,7 +3862,8 @@ def format_report(report: Mapping[str, Any]) -> str:
         "skipped",
         f"findings: {summary.get('total', 0)} shown "
         f"({summary.get('candidates', 0)} candidates, "
-        f"{summary.get('omitted', 0)} omitted)",
+        f"{summary.get('omitted', 0)} omitted); "
+        f"allowlisted: {summary.get('allowed', 0)}",
         "severity: " + ", ".join(
             f"{name}={count}" for name, count in
             (summary.get("by_severity") or {}).items() if count),
@@ -3549,8 +3898,24 @@ def format_report(report: Mapping[str, Any]) -> str:
             provenance += f":{source['tool']}"
         lines.append(f"    source: {provenance} rule={source.get('rule')} "
                      f"confidence={item.get('confidence')}")
+        if item.get("finding_fingerprint"):
+            lines.append(
+                f"    finding fingerprint: {item['finding_fingerprint']}")
         lines.append(f"    fix: {item.get('remediation')}")
         lines.append(f"    false positive note: {item.get('false_positive_note')}")
+    allowed = report.get("allowed") or []
+    if allowed:
+        lines.append(
+            f"allowlisted findings: {len(allowed)} reviewed "
+            "(not counted against the failure threshold)")
+        for item in allowed:
+            location = item.get("path") or "(no file)"
+            if item.get("line"):
+                location += f":{item['line']}"
+            lines.append(
+                f"  [ALLOWED] {item.get('rule')} {location} "
+                f"fingerprint={item.get('fingerprint')} "
+                f"allowlist={item.get('allowlist')}")
     inventory = report.get("dependency_inventory") or {}
     if inventory.get("manifests"):
         lines.append(
@@ -3616,6 +3981,9 @@ def format_finding(finding: Mapping[str, Any]) -> str:
         f"message: {finding.get('message')}",
         f"source: {source.get('type')} rule={source.get('rule')}",
     ]
+    if finding.get("finding_fingerprint"):
+        lines.insert(-2, f"finding fingerprint: "
+                         f"{finding['finding_fingerprint']}")
     if finding.get("graph_path"):
         lines.append("graph path: " + " -> ".join(finding["graph_path"]))
     evidence = finding.get("evidence") or {}
@@ -3664,6 +4032,8 @@ __all__ = [
     "atomic_write",
     "credential_file_hit",
     "exit_code",
+    "finding_allowlist_match",
+    "finding_fingerprint",
     "format_finding",
     "format_report",
     "format_secrets_report",
@@ -3673,6 +4043,8 @@ __all__ = [
     "install_hook",
     "load_config",
     "load_report",
+    "normalize_finding_line",
+    "normalize_finding_path",
     "record_secret_decision",
     "redact_text",
     "report_json",

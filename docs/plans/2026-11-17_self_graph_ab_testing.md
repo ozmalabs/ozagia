@@ -1,5 +1,17 @@
 # Self-graph A/B evaluation plan — 2026-11-17
 
+Status: evaluation plan, partly executed, verified 2026-11-24. The offline
+contract/inventory checks passed, and a local-Qwen pilot was run and blind
+agent-scored: baseline passed 12/12 sessions and 42/42 points, the self-graph
+arm passed 11/12 with one uncertain and 41/42, and the treatment had three
+unsupported claim instances versus none in baseline. The expanded general A/B
+runner was not used because an audit found isolation and measurement defects.
+Results and caveats:
+[`2026-11-17_self_graph_ab_experiments.md`](../results/2026-11-17_self_graph_ab_experiments.md).
+This is not human verification or evidence of a general speed gain; the
+decision rule below still requires a frozen, valid paired run before changing
+defaults.
+
 ## Question and scope
 
 Measure whether Ozagia's read-only self-graph makes it easier and faster for a

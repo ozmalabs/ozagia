@@ -425,7 +425,9 @@ def test_head_line_names_environment_and_module(mem, no_who_has):
 def test_head_line_names_interpreters_that_have_it(mem, who_has_stub):
     res = _shell(mem, f"{sys.executable} -m pytest -q tests/test_env.py")
     line = _class_line(res["output"])
-    assert line.endswith("available in /opt/proj/.venv/bin/python, /usr/bin/python3")
+    available = [path for path in ("/opt/proj/.venv/bin/python", "/usr/bin/python3")
+                 if path != sys.executable]
+    assert line.endswith("available in " + ", ".join(available))
     assert who_has_stub and who_has_stub[0][1] == "w21_absent_mod"
 
 

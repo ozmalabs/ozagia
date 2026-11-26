@@ -69,7 +69,19 @@ the repository's `.ozagia.toml` (see [iac_context.md](iac_context.md)).
 
 Models and providers are OpenCode's: configure them as for OpenCode
 (`opencode auth login`, `~/.config/opencode/opencode.json`). The pinned
-OpenCode reads the same configuration.
+OpenCode reads the same configuration, but `ozagia agent` runs with its own
+generated `OPENCODE_CONFIG`, so it does not inherit a host config's provider
+definitions. For a local OpenAI-compatible provider (for example vllm), pass
+the provider file explicitly:
+
+```bash
+ozagia agent --opencode-config ~/.config/opencode/vllm.json \
+  -m vllm/qwen3.8-27b --prompt "make tests/test_x.py pass"
+```
+
+Only `provider`, `providers`, `model` and `small_model` are layered from that
+file; plugins, MCP servers, permissions, agents and tools are refused. See
+[harness.md](harness.md#local-providers-vllm).
 
 ## Managing it
 

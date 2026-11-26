@@ -1,0 +1,780 @@
+{
+  "corpus_id": "synthetic:deep-review-corpus-dry-run-v1",
+  "counts": {
+    "excluded_reviewed_labels": 0,
+    "false_negative": 1,
+    "false_positive": 1,
+    "labeled_predictions": 4,
+    "locationless_predictions": 0,
+    "negative_reviewed_labels": 1,
+    "noise_denominator": 6,
+    "noise_on_complete_scope_denominator": 4,
+    "noise_on_complete_scope_numerator": 1,
+    "precision_denominator": 4,
+    "precision_numerator": 3,
+    "predicted_pairs": 6,
+    "recall_denominator": 5,
+    "reviewed_positive_labels": 5,
+    "scored_reviewed_positive_labels": 5,
+    "true_positive": 4,
+    "true_positive_in_complete_scopes": 3,
+    "unknown_reviewed_labels": 0,
+    "unlabeled_predictions": 2
+  },
+  "coverage": {
+    "complete_label_subjects": 1,
+    "complete_repositories": [],
+    "complete_repository_count": 0,
+    "complete_subject_keys": [
+      "fixture-service/range-complete"
+    ],
+    "incomplete_repositories": [
+      "fixture-service"
+    ],
+    "label_errors": [],
+    "label_subject_keys": [
+      "fixture-service/range-complete",
+      "fixture-service/range-partial"
+    ],
+    "label_subjects": 2,
+    "label_warnings": [
+      "fixture-service/range-partial: scope is partial"
+    ],
+    "labels_pin": "verified",
+    "manifest_change_range_slots": 2,
+    "manifest_pin": "verified",
+    "manifest_repositories": 1,
+    "missing_runs_for_complete_labels": [],
+    "partial_or_unknown_label_subjects": 1,
+    "partial_or_unknown_subject_keys": [
+      "fixture-service/range-partial"
+    ],
+    "prediction_scopes": [
+      {
+        "graph_freshness": "fresh",
+        "label_scope_complete": true,
+        "missing_run": false,
+        "predicted": 4,
+        "repository_id": "fixture-service",
+        "reviewed_positive_labels": 4,
+        "run_complete": true,
+        "run_id": "complete-1",
+        "run_status": "complete",
+        "subject_key": "range-complete",
+        "subject_statuses": {
+          "failure-modes": "complete",
+          "performance": "complete",
+          "scalability": "complete",
+          "security": "complete",
+          "tests-and-coverage": "complete"
+        }
+      },
+      {
+        "graph_freshness": "fresh",
+        "label_scope_complete": false,
+        "missing_run": false,
+        "predicted": 2,
+        "repository_id": "fixture-service",
+        "reviewed_positive_labels": 1,
+        "run_complete": true,
+        "run_id": "partial-1",
+        "run_status": "complete",
+        "subject_key": "range-partial",
+        "subject_statuses": {
+          "data-structures": "complete",
+          "performance": "complete"
+        }
+      }
+    ],
+    "report_digest_status": "verified",
+    "source_digest_status": "verified",
+    "stale_scored_runs": [],
+    "target_complete_repositories": 8,
+    "target_repositories": 1,
+    "unavailable_scopes": [
+      {
+        "reason": "label scope is partial or unknown",
+        "repository_id": "fixture-service",
+        "run_id": "partial-1",
+        "subject_key": "range-partial"
+      }
+    ],
+    "unlabeled_manifest_slots": []
+  },
+  "digest_checks": {
+    "labels_digest": "163a22c4af75685484845f2fa49a3aaea47fc3e5a504aa3bd52d871df7de8e36",
+    "labels_pin": "verified",
+    "manifest_digest": "ed7839559057e90b0e233ecb86204fb43ee672949c33bf60e15c006924204a7f",
+    "manifest_pin": "verified",
+    "record_digest": "f6fce32528b1523a0f1d4310996574c22ba6f7261c771165a6ecf0bd6c097b74",
+    "report_digest": "verified",
+    "report_pins": {
+      "expected": 2,
+      "scored_runs": 2
+    },
+    "source_files": {
+      "checked": 6,
+      "mismatched": 0,
+      "mismatches": [],
+      "missing": 0,
+      "not_recorded": 0,
+      "status": "verified"
+    },
+    "status": "verified"
+  },
+  "evidence_class": "synthetic_regression",
+  "gate_status": "not_applicable_synthetic",
+  "gates": {
+    "gates": {
+      "deterministic_report_quality": {
+        "reason": "synthetic or non-realistic evidence cannot satisfy realistic-corpus quality gates",
+        "status": "not_applicable_synthetic"
+      },
+      "high_impact_findings": {
+        "reason": "synthetic or non-realistic evidence cannot satisfy realistic-corpus quality gates",
+        "status": "not_applicable_synthetic"
+      },
+      "human_utility": {
+        "reason": "synthetic or non-realistic evidence cannot satisfy realistic-corpus quality gates",
+        "status": "not_applicable_synthetic"
+      },
+      "noise": {
+        "reason": "synthetic or non-realistic evidence cannot satisfy realistic-corpus quality gates",
+        "status": "not_applicable_synthetic"
+      },
+      "operational_bounds": {
+        "reason": "synthetic or non-realistic evidence cannot satisfy realistic-corpus quality gates",
+        "status": "not_applicable_synthetic"
+      },
+      "repeatability_and_coverage": {
+        "reason": "synthetic or non-realistic evidence cannot satisfy realistic-corpus quality gates",
+        "status": "not_applicable_synthetic"
+      },
+      "subject_stability": {
+        "reason": "synthetic or non-realistic evidence cannot satisfy realistic-corpus quality gates",
+        "status": "not_applicable_synthetic"
+      }
+    },
+    "quality_claim": "none",
+    "status": "not_applicable_synthetic"
+  },
+  "high_impact": {
+    "ambiguous_precision_subjects": [],
+    "ambiguous_subject_attribution": [],
+    "blocking_evidence_ok": true,
+    "blocking_expected": 1,
+    "blocking_matched": 1,
+    "blocking_predicted": 1,
+    "complete_subjects": [
+      "fixture-service::range-complete::failure-modes",
+      "fixture-service::range-complete::performance",
+      "fixture-service::range-complete::scalability",
+      "fixture-service::range-complete::security"
+    ],
+    "declared_complete_subjects": [
+      "fixture-service::range-complete::failure-modes",
+      "fixture-service::range-complete::performance",
+      "fixture-service::range-complete::scalability",
+      "fixture-service::range-complete::security"
+    ],
+    "expected": 2,
+    "false_discovery_rate": 0.0,
+    "false_negative": 0,
+    "false_positive": 0,
+    "false_positive_rate": null,
+    "locationless": 0,
+    "locationless_findings": [],
+    "metric_definitions": {
+      "false_discovery_rate": "false positives / predictions in completely labelled subjects",
+      "false_positive_rate": "false positives / all actual negatives; unavailable because the reviewed labels do not enumerate a negative universe",
+      "precision": "true positives / predictions whose subject has complete reviewed labels; predictions outside a completely labelled subject are not counted",
+      "recall": "matched reviewed labels / reviewed labels",
+      "report_noise_ratio": "reported (path, type, subject) pairs with no reviewed label / all reported pairs; unlabeled subjects contribute to noise but not to false positives"
+    },
+    "precision": 1.0,
+    "predicted": 2,
+    "recall": 1.0,
+    "report_noise_ratio": 0.0,
+    "subjects": {
+      "fixture-service::range-complete::failure-modes": {
+        "complete": true,
+        "expected": 1,
+        "false_discovery_rate": 0.0,
+        "false_negative": 0,
+        "false_positive": 0,
+        "false_positive_rate": null,
+        "notes": [],
+        "precision": 1.0,
+        "predicted": 1,
+        "recall": 1.0,
+        "report_noise_ratio": 0.0,
+        "true_positive": 1,
+        "unmatched": 0
+      },
+      "fixture-service::range-complete::performance": {
+        "complete": true,
+        "expected": 0,
+        "false_discovery_rate": null,
+        "false_negative": 0,
+        "false_positive": 0,
+        "false_positive_rate": null,
+        "notes": [
+          "no reviewed labels for this subject",
+          "no predictions in this subject"
+        ],
+        "precision": null,
+        "predicted": 0,
+        "recall": null,
+        "report_noise_ratio": null,
+        "true_positive": 0,
+        "unmatched": 0
+      },
+      "fixture-service::range-complete::scalability": {
+        "complete": true,
+        "expected": 0,
+        "false_discovery_rate": null,
+        "false_negative": 0,
+        "false_positive": 0,
+        "false_positive_rate": null,
+        "notes": [
+          "no reviewed labels for this subject",
+          "no predictions in this subject"
+        ],
+        "precision": null,
+        "predicted": 0,
+        "recall": null,
+        "report_noise_ratio": null,
+        "true_positive": 0,
+        "unmatched": 0
+      },
+      "fixture-service::range-complete::security": {
+        "complete": true,
+        "expected": 1,
+        "false_discovery_rate": 0.0,
+        "false_negative": 0,
+        "false_positive": 0,
+        "false_positive_rate": null,
+        "notes": [],
+        "precision": 1.0,
+        "predicted": 1,
+        "recall": 1.0,
+        "report_noise_ratio": 0.0,
+        "true_positive": 1,
+        "unmatched": 0
+      }
+    },
+    "true_positive": 2,
+    "unlabeled": 0,
+    "unmatched": 0,
+    "unmatched_pairs": [],
+    "unsupported_blocking": 0
+  },
+  "labeled_vs_unlabeled": {
+    "excluded_reviewed_labels": 0,
+    "labeled_predictions": 4,
+    "locationless_predictions": 0,
+    "note": "Precision uses complete scopes only. Predictions in partial or unlabeled scopes stay in the noise denominator and are never silently counted as true or false positives.",
+    "scored_reviewed_labels": 5,
+    "unlabeled_predictions": 2
+  },
+  "labels_digest": "163a22c4af75685484845f2fa49a3aaea47fc3e5a504aa3bd52d871df7de8e36",
+  "limitations": [
+    "Reviewed labels are a finite sample; recall is relative to reviewed labels, not to all defects in the repository.",
+    "False-positive rate is undefined because labels do not enumerate all actual negatives.",
+    "Per-subject precision is reported only for complete scopes.",
+    "Synthetic/fixture runs are regression checks and cannot support a quality claim.",
+    "This record is synthetic; all quality gates are not applicable."
+  ],
+  "manifest_digest": "ed7839559057e90b0e233ecb86204fb43ee672949c33bf60e15c006924204a7f",
+  "metric_definitions": {
+    "coverage": "a scope is complete only when both reviewers and the adjudicator declare complete scope and the scored run collected every declared subject; otherwise its predictions are unlabeled and its labels do not contribute precision",
+    "false_discovery_rate": "false positives / predictions in completely labelled subjects",
+    "false_positive_rate": "false positives / all actual negatives; unavailable because the reviewed labels do not enumerate a negative universe",
+    "noise_on_complete_scope": "false positives / predictions in complete scopes; this is the proposed noise gate's measure. The overall noise ratio keeps unlabeled-scope predictions in its denominator and is reported separately.",
+    "precision": "true positives / predictions whose subject has complete reviewed labels; predictions outside a completely labelled subject are not counted",
+    "raw_counts": "precision numerator is true-positive predictions in complete scopes; its denominator adds false positives from those scopes. recall uses all reviewed positive labels included by a complete run, including partial-scope labels. noise uses all predictions, labeled or not.",
+    "recall": "matched reviewed labels / reviewed labels",
+    "report_noise_ratio": "reported (path, type, subject) pairs with no reviewed label / all reported pairs; unlabeled subjects contribute to noise but not to false positives"
+  },
+  "operational": {
+    "nonzero_exit_runs": [],
+    "runs": 3,
+    "runs_with_budget": 3,
+    "status": "measured",
+    "within_budget": 3,
+    "within_budget_rate": 1.0,
+    "writes_outside_allowed_paths": []
+  },
+  "other_conditions": [],
+  "overall": {
+    "ambiguous_precision_subjects": [],
+    "ambiguous_subject_attribution": [],
+    "complete_subjects": [
+      "fixture-service::range-complete::failure-modes",
+      "fixture-service::range-complete::performance",
+      "fixture-service::range-complete::scalability",
+      "fixture-service::range-complete::security"
+    ],
+    "declared_complete_subjects": [
+      "fixture-service::range-complete::failure-modes",
+      "fixture-service::range-complete::performance",
+      "fixture-service::range-complete::scalability",
+      "fixture-service::range-complete::security"
+    ],
+    "expected": 5,
+    "false_discovery_rate": 0.25,
+    "false_negative": 1,
+    "false_positive": 1,
+    "false_positive_rate": null,
+    "locationless": 0,
+    "locationless_findings": [],
+    "metric_definitions": {
+      "false_discovery_rate": "false positives / predictions in completely labelled subjects",
+      "false_positive_rate": "false positives / all actual negatives; unavailable because the reviewed labels do not enumerate a negative universe",
+      "precision": "true positives / predictions whose subject has complete reviewed labels; predictions outside a completely labelled subject are not counted",
+      "recall": "matched reviewed labels / reviewed labels",
+      "report_noise_ratio": "reported (path, type, subject) pairs with no reviewed label / all reported pairs; unlabeled subjects contribute to noise but not to false positives"
+    },
+    "precision": 0.75,
+    "predicted": 6,
+    "recall": 0.8,
+    "report_noise_ratio": 0.3333333333333333,
+    "report_noise_ratio_complete_scope": 0.25,
+    "subjects": {
+      "fixture-service::range-complete::failure-modes": {
+        "complete": true,
+        "expected": 1,
+        "false_discovery_rate": 0.0,
+        "false_negative": 0,
+        "false_positive": 0,
+        "false_positive_rate": null,
+        "notes": [],
+        "precision": 1.0,
+        "predicted": 1,
+        "recall": 1.0,
+        "report_noise_ratio": 0.0,
+        "true_positive": 1,
+        "unmatched": 0
+      },
+      "fixture-service::range-complete::performance": {
+        "complete": true,
+        "expected": 1,
+        "false_discovery_rate": 0.0,
+        "false_negative": 0,
+        "false_positive": 0,
+        "false_positive_rate": null,
+        "notes": [],
+        "precision": 1.0,
+        "predicted": 1,
+        "recall": 1.0,
+        "report_noise_ratio": 0.0,
+        "true_positive": 1,
+        "unmatched": 0
+      },
+      "fixture-service::range-complete::scalability": {
+        "complete": true,
+        "expected": 0,
+        "false_discovery_rate": 1.0,
+        "false_negative": 0,
+        "false_positive": 1,
+        "false_positive_rate": null,
+        "notes": [
+          "no reviewed labels for this subject"
+        ],
+        "precision": 0.0,
+        "predicted": 1,
+        "recall": null,
+        "report_noise_ratio": 1.0,
+        "true_positive": 0,
+        "unmatched": 1
+      },
+      "fixture-service::range-complete::security": {
+        "complete": true,
+        "expected": 1,
+        "false_discovery_rate": 0.0,
+        "false_negative": 0,
+        "false_positive": 0,
+        "false_positive_rate": null,
+        "notes": [],
+        "precision": 1.0,
+        "predicted": 1,
+        "recall": 1.0,
+        "report_noise_ratio": 0.0,
+        "true_positive": 1,
+        "unmatched": 0
+      },
+      "fixture-service::range-complete::tests-and-coverage": {
+        "complete": false,
+        "expected": 1,
+        "false_discovery_rate": null,
+        "false_negative": 1,
+        "false_positive": null,
+        "false_positive_rate": null,
+        "notes": [
+          "subject is not marked as completely labelled",
+          "no predictions in this subject"
+        ],
+        "precision": null,
+        "predicted": 0,
+        "recall": 0.0,
+        "report_noise_ratio": null,
+        "true_positive": 0,
+        "unmatched": 0
+      },
+      "fixture-service::range-partial::data-structures": {
+        "complete": false,
+        "expected": 1,
+        "false_discovery_rate": null,
+        "false_negative": 0,
+        "false_positive": null,
+        "false_positive_rate": null,
+        "notes": [
+          "subject is not marked as completely labelled"
+        ],
+        "precision": null,
+        "predicted": 1,
+        "recall": 1.0,
+        "report_noise_ratio": 0.0,
+        "true_positive": 1,
+        "unmatched": 0
+      },
+      "fixture-service::range-partial::performance": {
+        "complete": false,
+        "expected": 0,
+        "false_discovery_rate": null,
+        "false_negative": 0,
+        "false_positive": null,
+        "false_positive_rate": null,
+        "notes": [
+          "no reviewed labels for this subject",
+          "subject is not marked as completely labelled"
+        ],
+        "precision": null,
+        "predicted": 1,
+        "recall": null,
+        "report_noise_ratio": 1.0,
+        "true_positive": 0,
+        "unmatched": 1
+      }
+    },
+    "true_positive": 4,
+    "unlabeled": 1,
+    "unmatched": 2,
+    "unmatched_pairs": [
+      {
+        "ids": [
+          "DR-4"
+        ],
+        "path": "src/noise.py",
+        "subject": "fixture-service::range-complete::scalability",
+        "type": "unbounded_range"
+      },
+      {
+        "ids": [
+          "DR-6"
+        ],
+        "path": "src/partial_noise.py",
+        "subject": "fixture-service::range-partial::performance",
+        "type": "expensive_copy"
+      }
+    ]
+  },
+  "per_repository": [
+    {
+      "complete_subjects": [
+        "fixture-service::range-complete::failure-modes",
+        "fixture-service::range-complete::performance",
+        "fixture-service::range-complete::scalability",
+        "fixture-service::range-complete::security"
+      ],
+      "expected": 5,
+      "false_negative": 1,
+      "false_positive": 1,
+      "locationless": 0,
+      "precision": 0.75,
+      "predicted": 6,
+      "recall": 0.8,
+      "report_noise_ratio": 0.3333333333333333,
+      "repository_id": "fixture-service",
+      "status": "scored",
+      "true_positive": 4,
+      "unlabeled": 1
+    }
+  ],
+  "per_subject": [
+    {
+      "complete": false,
+      "expected": 1,
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": null,
+      "predicted": 1,
+      "prediction_coverage": 0.0,
+      "recall": 1.0,
+      "report_noise_ratio": 0.0,
+      "repositories": [
+        "fixture-service"
+      ],
+      "scopes": [
+        "range-partial"
+      ],
+      "subject": "data-structures",
+      "true_positive": 1
+    },
+    {
+      "complete": true,
+      "expected": 1,
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": 1.0,
+      "predicted": 1,
+      "prediction_coverage": 1.0,
+      "recall": 1.0,
+      "report_noise_ratio": 0.0,
+      "repositories": [
+        "fixture-service"
+      ],
+      "scopes": [
+        "range-complete"
+      ],
+      "subject": "failure-modes",
+      "true_positive": 1
+    },
+    {
+      "complete": true,
+      "expected": 1,
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": 1.0,
+      "predicted": 2,
+      "prediction_coverage": 0.5,
+      "recall": 1.0,
+      "report_noise_ratio": 0.5,
+      "repositories": [
+        "fixture-service"
+      ],
+      "scopes": [
+        "range-complete",
+        "range-partial"
+      ],
+      "subject": "performance",
+      "true_positive": 1
+    },
+    {
+      "complete": true,
+      "expected": 0,
+      "false_negative": 0,
+      "false_positive": 1,
+      "precision": 0.0,
+      "predicted": 1,
+      "prediction_coverage": 1.0,
+      "recall": null,
+      "report_noise_ratio": 1.0,
+      "repositories": [
+        "fixture-service"
+      ],
+      "scopes": [
+        "range-complete"
+      ],
+      "subject": "scalability",
+      "true_positive": 0
+    },
+    {
+      "complete": true,
+      "expected": 1,
+      "false_negative": 0,
+      "false_positive": 0,
+      "precision": 1.0,
+      "predicted": 1,
+      "prediction_coverage": 1.0,
+      "recall": 1.0,
+      "report_noise_ratio": 0.0,
+      "repositories": [
+        "fixture-service"
+      ],
+      "scopes": [
+        "range-complete"
+      ],
+      "subject": "security",
+      "true_positive": 1
+    },
+    {
+      "complete": false,
+      "expected": 1,
+      "false_negative": 1,
+      "false_positive": 0,
+      "precision": null,
+      "predicted": 0,
+      "prediction_coverage": null,
+      "recall": 0.0,
+      "report_noise_ratio": null,
+      "repositories": [
+        "fixture-service"
+      ],
+      "scopes": [
+        "range-complete"
+      ],
+      "subject": "tests-and-coverage",
+      "true_positive": 0
+    }
+  ],
+  "per_subject_key": [
+    {
+      "graph_freshness": "fresh",
+      "label_scope_complete": true,
+      "missing_run": false,
+      "predicted": 4,
+      "repository_id": "fixture-service",
+      "reviewed_positive_labels": 4,
+      "run_complete": true,
+      "run_id": "complete-1",
+      "run_status": "complete",
+      "subject_key": "range-complete",
+      "subject_statuses": {
+        "failure-modes": "complete",
+        "performance": "complete",
+        "scalability": "complete",
+        "security": "complete",
+        "tests-and-coverage": "complete"
+      }
+    },
+    {
+      "graph_freshness": "fresh",
+      "label_scope_complete": false,
+      "missing_run": false,
+      "predicted": 2,
+      "repository_id": "fixture-service",
+      "reviewed_positive_labels": 1,
+      "run_complete": true,
+      "run_id": "partial-1",
+      "run_status": "complete",
+      "subject_key": "range-partial",
+      "subject_statuses": {
+        "data-structures": "complete",
+        "performance": "complete"
+      }
+    }
+  ],
+  "pooling": {
+    "evidence_class": "synthetic_regression",
+    "note": "Realistic-corpus scores never pool synthetic fixture results; synthetic runs are pipeline regressions only.",
+    "separate_from_realistic": true,
+    "synthetic_fixtures_included": true
+  },
+  "quality_claim": "none",
+  "record_digest": "f6fce32528b1523a0f1d4310996574c22ba6f7261c771165a6ecf0bd6c097b74",
+  "repeatability": {
+    "repeats": [
+      {
+        "finding_count": 4,
+        "repeat_of": "complete-2",
+        "run_id": "complete-1",
+        "stable": true,
+        "stable_content": true,
+        "stable_finding_ids": true
+      }
+    ],
+    "status": "verified"
+  },
+  "reviewers": {
+    "counts": {
+      "adjudication_files": 2,
+      "complete_subjects": 1,
+      "partial_or_unknown_subjects": 1,
+      "reviewer_files": 4,
+      "subjects": 2
+    },
+    "errors": [],
+    "provenance": "synthetic_test_fixture",
+    "status": "incomplete",
+    "subjects": [
+      {
+        "adjudication_decisions": 5,
+        "complete": true,
+        "files": [
+          {
+            "kind": "adjudicator",
+            "path": "fixture-service/range-complete/adjudication.json",
+            "reviewer_id": "adjudicator",
+            "sha256": "da706b6a1cfe8f1cbe5efaabd98570247baa7d8024c067dd0c2a9488ae7365c1"
+          },
+          {
+            "kind": "reviewer",
+            "path": "fixture-service/range-complete/reviewer-a.json",
+            "reviewer_id": "reviewer-a",
+            "sha256": "a21a5012468b5506dde44168072e06dba2e8e24ac768810752c24f3f2e7310b2"
+          },
+          {
+            "kind": "reviewer",
+            "path": "fixture-service/range-complete/reviewer-b.json",
+            "reviewer_id": "reviewer-b",
+            "sha256": "4df94f92b7d31947f27a84f75c6f2591e1da41c8051763a712975d762518e9a7"
+          }
+        ],
+        "has_adjudication": true,
+        "provenance": "synthetic_test_fixture",
+        "repository_id": "fixture-service",
+        "resolution_counts": {
+          "agree": 5
+        },
+        "reviewer_ids": [
+          "reviewer-a",
+          "reviewer-b"
+        ],
+        "reviewer_label_counts": {
+          "reviewer-a": 5,
+          "reviewer-b": 5
+        },
+        "subject_key": "range-complete",
+        "subject_kind": "change-range"
+      },
+      {
+        "adjudication_decisions": 1,
+        "complete": false,
+        "files": [
+          {
+            "kind": "adjudicator",
+            "path": "fixture-service/range-partial/adjudication.json",
+            "reviewer_id": "adjudicator",
+            "sha256": "dca026f340e1dd1dcca34d2a0317e42207ab19f78540ecb7929167c84e5ad887"
+          },
+          {
+            "kind": "reviewer",
+            "path": "fixture-service/range-partial/reviewer-a.json",
+            "reviewer_id": "reviewer-a",
+            "sha256": "a260821bf706b275492563de0e3ed157272da89374ef93246a9e391e6de8b33c"
+          },
+          {
+            "kind": "reviewer",
+            "path": "fixture-service/range-partial/reviewer-b.json",
+            "reviewer_id": "reviewer-b",
+            "sha256": "08e7710fe5379c38132f0e6fb353b11a10de5365756a355dc379c2921d7f9e7e"
+          }
+        ],
+        "has_adjudication": true,
+        "provenance": "synthetic_test_fixture",
+        "repository_id": "fixture-service",
+        "resolution_counts": {
+          "agree": 1
+        },
+        "reviewer_ids": [
+          "reviewer-a",
+          "reviewer-b"
+        ],
+        "reviewer_label_counts": {
+          "reviewer-a": 1,
+          "reviewer-b": 1
+        },
+        "subject_key": "range-partial",
+        "subject_kind": "change-range"
+      }
+    ],
+    "warnings": [
+      "fixture-service/range-partial: scope is partial"
+    ]
+  },
+  "schema_version": 1,
+  "scope": "synthetic regression scoring; not quality evidence",
+  "scored_condition": "range",
+  "status": "synthetic_regression"
+}

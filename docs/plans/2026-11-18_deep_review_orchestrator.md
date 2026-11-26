@@ -10,9 +10,10 @@ and version inventory with deterministic SBOM and CVE state unknown, runbook and
 observability declarations, bounded lexical IaC/config candidates,
 documentation/API coverage (including literal local module imports), and
 fresh-graph range blast radius. Local OSV-style introduced/fixed/last_affected range matching
-is implemented for Node and Rust strict SemVer pins and Go `v`-prefixed strict
-SemVer pins; range events support introduced/fixed/last_affected and strict SemVer limits. Python, Ruby,
-Composer and Maven remain exact-version only; Gradle `gradle.lockfile` inventory
+is implemented for Node and Rust strict SemVer pins, Go `v`-prefixed strict
+SemVer pins and Python PEP 440 pins; range events support
+introduced/fixed/last_affected with strict SemVer limits for Node/Rust/Go and
+PEP 440 limits for Python. Ruby, Composer and Maven remain exact-version only; Gradle `gradle.lockfile` inventory
 and conservative Maven coordinate matching are supported, with repository
 origin unknown. Ruby Bundler `Gemfile.lock` inventory and
 exact local-advisory matching for registry (`GEM`) pins are supported; Git and
@@ -27,8 +28,10 @@ quality evaluation remain. Phase 4 is partial: synthetic comparison harnesses,
 baseline and status integration, a `review_my_change` task, a bounded
 working-checkout smoke and an unfilled human-review annotation sheet exist; a
 clean realistic-corpus comparison with completed human labels and published
-go/no-go thresholds remains. The design below is unchanged; each phase section
-marks what is implemented and what remains.
+go/no-go thresholds remains. Audited against the code and result files
+2026-11-24: the Phase 2–4 lists below match what exists, and the named gaps are
+still open. The design below is unchanged; each phase section marks what is
+implemented and what remains.
 
 The goal is not another linter. It is an **evidence-first review atlas**: every
 subject gets its own Markdown file, every finding carries locations, evidence,

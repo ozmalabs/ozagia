@@ -28,6 +28,28 @@ from ozagia.daemon.server import DaemonState
 SRC = Path(__file__).resolve().parents[1] / "src"
 READY_TIMEOUT_S = 60
 PATH_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+# Job admission must not depend on the machine running the suite. The budgets
+# here are small enough for any host, and the floors/reserves are zero; the
+# default policy is covered by tests/test_resources.py.
+TEST_RESOURCE_POLICY = R._deep_merge(R.DEFAULT_POLICY, {
+    "reserve_memory_pct": 0,
+    "reserve_disk_pct": 0,
+    "reserve_disk_gb": 0,
+    "limits": {"job_memory_mb": 256, "job_disk_mb": 64},
+    "admission": {"min_free_memory_pct": 0, "min_free_disk_gb": 0},
+})
+RESOURCE_POLICY_TOML = """\
+reserve_memory_pct = 0
+reserve_disk_gb = 0
+
+[limits]
+job_memory_mb = 256
+job_disk_mb = 64
+
+[admission]
+min_free_memory_pct = 0
+min_free_disk_gb = 0
+"""
 
 
 def _env(**extra: str) -> dict[str, str]:
@@ -59,6 +81,9 @@ def bare_repo(tmp_path, monkeypatch):
 def repo(bare_repo):
     """A repository that enables jobs (`[jobs] enabled = true`)."""
     (bare_repo / ".ozagia.toml").write_text("[jobs]\nenabled = true\n")
+    (bare_repo / "ozagia").mkdir()
+    (bare_repo / "ozagia" / "resources.toml").write_text(
+        RESOURCE_POLICY_TOML, encoding="utf-8")
     return bare_repo
 
 
@@ -139,6 +164,7 @@ def table(repo):
 
     def make(**kw) -> J.JobTable:
         kw.setdefault("cgroup_manager", _UnavailableCgroupManager())
+        kw.setdefault("resource_policy", TEST_RESOURCE_POLICY)
         t = J.JobTable(repo, base_env=PATH_ENV, **kw)
         tables.append(t)
         return t
@@ -527,8 +553,8 @@ def test_job_records_limits_and_a_short_job_is_not_killed(table):
     t = table()
     job = t.start(argv=["sleep", "0.8"])
     assert job["enforcement"] == "rlimit+watch"
-    assert job["limits"] == {"memory_mb": 2048.0, "pids": 256,
-                             "disk_mb": 4096.0, "wall_s": None,
+    assert job["limits"] == {"memory_mb": 256.0, "pids": 256,
+                             "disk_mb": 64.0, "wall_s": None,
                              "file_mb": None}
     for key in ("limits", "peak_memory_mb", "resource_events",
                 "peak_disk_write_mb", "disk_write_source",
@@ -542,12 +568,12 @@ def test_job_records_limits_and_a_short_job_is_not_killed(table):
     assert got["disk_write_source"] in (None, "proc.io")
     listed = t.dispatch("job_list", {})
     row = next(r for r in listed["jobs"] if r["id"] == job["id"])
-    assert row["limits"]["memory_mb"] == 2048
+    assert row["limits"]["memory_mb"] == 256
     assert row["resource_events"] == []
     assert row["peak_disk_write_mb"] == got["peak_disk_write_mb"]
     assert row["disk_write_source"] == got["disk_write_source"]
     logged = t.log(job["id"], reader="resource-reader")
-    assert logged["limits"]["memory_mb"] == 2048
+    assert logged["limits"]["memory_mb"] == 256
     assert logged["peak_memory_mb"] == got["peak_memory_mb"]
     assert logged["peak_disk_write_mb"] == got["peak_disk_write_mb"]
     assert t.stats()["resource_peak_disk_write_mb"] >= 0.0
@@ -765,7 +791,8 @@ def test_cgroup_modes_and_the_environment_opt_out_skip_attempts(
         table, monkeypatch):
     manager = _FakeCgroupManager(_FakeCgroupHandle("j1"))
     t = table(cgroup_manager=manager)
-    job = t.start(argv=["true"], policy={"watchdog": "rlimit"})
+    job = t.start(argv=["true"],
+                  policy={**TEST_RESOURCE_POLICY, "watchdog": "rlimit"})
     assert job["enforcement"] == "rlimit+watch"
     assert job["cgroup"]["attempted"] is False
     assert job["cgroup"]["status"] == "off"
@@ -774,7 +801,8 @@ def test_cgroup_modes_and_the_environment_opt_out_skip_attempts(
     assert manager.calls == []
 
     monkeypatch.setattr(J, "cgroups_enabled", lambda: False)
-    job = t.start(argv=["true"], policy={"watchdog": "cgroup"})
+    job = t.start(argv=["true"],
+                  policy={**TEST_RESOURCE_POLICY, "watchdog": "cgroup"})
     assert job["enforcement"] == "rlimit+watch"
     assert job["cgroup"]["attempted"] is False
     t.wait(job["id"], deadline_s=10)
@@ -1129,6 +1157,7 @@ def test_agents_section_names_the_job_tools_only_with_jobs():
 # --------------------------------------------------------------------------- #
 def test_jobs_are_opt_in(bare_repo, monkeypatch):
     t = J.JobTable(bare_repo, base_env=PATH_ENV,
+                   resource_policy=TEST_RESOURCE_POLICY,
                    cgroup_manager=_UnavailableCgroupManager())
     try:
         with pytest.raises(J.JobError) as e:

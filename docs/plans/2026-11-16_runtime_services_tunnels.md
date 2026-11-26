@@ -1,7 +1,14 @@
 # Runtime services, processes and tunnel configuration plan
 
-Status: proposal. Extends the relay/tunnel foundation without treating a
-configured tunnel as a live connection.
+Status: implemented for the offline-tested runtime layer; live remote service
+ownership remains out of scope, verified 2026-11-24. `core/runtime.py`,
+`core/relay.py`, `core/actions.py`, `tests/test_runtime.py`,
+`tests/test_actions.py`, [`docs/runtime.md`](../runtime.md) and
+[`docs/actions.md`](../actions.md) provide declarative config, managers,
+verified PIDs, stale/unknown state, bounded logs and preview/confirmation
+actions. No test starts a real SSH, SSM, cloud or remote service, and a
+configured tunnel is not a connection. The design sections below are the
+original plan.
 
 ## Outcome
 

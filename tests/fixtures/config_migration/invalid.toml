@@ -1,0 +1,19 @@
+# Each entry fails the legacy project parser in a different way.
+[environments.dev]
+credentials = "nope"
+
+[services.api]
+environment = "missing"
+
+[relays.prod]
+specs = []
+
+[runtime.services.api]
+command = ["python", "x; bad"]
+
+[runtime.tunnels.database]
+relay = "prod"
+target = "db.internal.example:0"
+
+[runtime]
+other = true

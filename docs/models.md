@@ -109,6 +109,12 @@ models = ["vllm/private-model"]
   with a close suggestion. A configured model that discovery does not list is
   reported, not silently accepted.
 
+`[models.local]` declares locality for selection; it does not configure a
+provider. For `ozagia agent` with a local OpenAI-compatible provider such as
+vllm, pass the provider settings explicitly with `--opencode-config PATH`
+(see [harness.md](harness.md#local-providers-vllm)). The harness never reads
+the host's global OpenCode config implicitly.
+
 Precedence follows `ozagia.core.settings`:
 
 ```text

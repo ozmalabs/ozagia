@@ -105,6 +105,24 @@ def test_mutable_sources_direct_sources_and_wildcards(tmp_path: Path) -> None:
     assert "wildcard_dependency" in types
 
 
+def test_internal_workspace_path_dependency_is_not_a_direct_source(
+        tmp_path: Path) -> None:
+    _write(tmp_path / "crates" / "app" / "Cargo.toml",
+           '[package]\nname = "app"\nversion = "0.1.0"\n'
+           '[dependencies]\nhelper = { path = "../helper" }\n'
+           'external = { path = "../../../outside" }\n')
+    (tmp_path / "crates" / "helper").mkdir()
+
+    result = SC.check(tmp_path, budget_s=10)
+    direct = [item for item in result["findings"]
+              if item["type"] == "direct_source_dependency"]
+    summaries = " ".join(item["summary"] for item in direct)
+    # The sibling workspace crate is first-party source; the path that leaves
+    # the checkout is still a direct-source review candidate.
+    assert "helper" not in summaries
+    assert "outside" in summaries
+
+
 def test_install_scripts_and_unknown_build_backend(tmp_path: Path) -> None:
     _write(tmp_path / "pyproject.toml",
            '[build-system]\nrequires = []\nbuild-backend = "custom-backend"\n')

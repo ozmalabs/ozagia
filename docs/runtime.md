@@ -96,9 +96,10 @@ target = "db.internal.example:5432"
 A service or tunnel in either file may reference a relay defined only in the
 other file; unknown relays are still rejected. Duplicate names within one file
 are a TOML error, and invalid fields, argv, specs or ports name the file that
-defines the entry. `ozagia config migrate` does not copy these tables because
-the settings registry has no typed keys for them; copy them by hand if the
-legacy file is removed.
+defines the entry. `ozagia config migrate` copies these named entries whole
+into `ozagia/config.toml` (legacy entries keep priority by name) and never
+merges fields or overwrites a different versioned entry; see
+[settings.md](settings.md#migrating-ozagiatoml).
 
 ## Configuration and runtime state
 

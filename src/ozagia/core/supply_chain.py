@@ -419,6 +419,26 @@ def _direct_source_allowed(value: str, policy: Mapping[str, Any]) -> bool:
                for pattern in policy["allow_direct_sources"])
 
 
+def _is_internal_path_source(root: Path, rel: str, value: str) -> bool:
+    """True for a relative path dependency that stays inside this checkout.
+
+    Cargo workspaces and local Python packages routinely declare sibling path
+    dependencies. Those are first-party source under the reviewer's control,
+    not an external registry bypass, so the direct-source warning is noise.
+    Paths that leave the checkout still keep the warning.
+    """
+    token = str(value).strip().split(maxsplit=1)[0] if str(value).strip() else ""
+    token = token.strip("'\"")
+    if not token.startswith(("./", "../")):
+        return False
+    try:
+        target = (root / Path(rel).parent / token).resolve()
+        target.relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
 def _install_script_allowed(name: str, policy: Mapping[str, Any]) -> bool:
     return any(fnmatch.fnmatchcase(name, pattern)
                or fnmatch.fnmatchcase(_normalized(name), pattern)
@@ -805,6 +825,8 @@ def _git_is_mutable(raw: str, url: str) -> bool:
 def _check_direct(ctx: _Context, rel: str, line: int, raw: str,
                   ecosystem: str, target: str) -> None:
     name = _direct_name(raw, target)
+    if _is_internal_path_source(ctx.root, rel, target):
+        return
     if _direct_source_allowed(target, ctx.policy):
         return
     _add(ctx, "direct_source_dependency", f"dependency:{ecosystem}:{name}",

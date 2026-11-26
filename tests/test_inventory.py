@@ -90,15 +90,21 @@ def test_graph_mcp_surface_is_present_and_distinct():
                for surface in graph.values())
     assert all(surface["coverage"] == "unknown"
                for surface in graph.values())
-    full = [surface for surface in report["surfaces"]
-            if surface["id"].startswith("mcp:tool:")]
+    tools = [surface for surface in report["surfaces"]
+             if surface["id"].startswith("mcp:tool:")]
+    full = [surface for surface in tools
+            if surface["details"]["surface"] == "full"]
+    engine = [surface for surface in tools
+              if surface["details"]["surface"] == "engine"]
     assert full
-    assert all(surface["details"]["surface"] == "full" for surface in full)
+    assert {surface["name"] for surface in engine} == {"graph"}
     assert all(surface["details"]["observation"] == "static-ast"
-               for surface in full)
-    assert all(surface["coverage"] == "unknown" for surface in full)
+               for surface in full + engine)
+    assert all(surface["coverage"] == "unknown" for surface in full + engine)
     assert not ({surface["id"] for surface in full}
                 & {surface["id"] for surface in graph.values()})
+    assert not ({surface["id"] for surface in full}
+                & {surface["id"] for surface in engine})
 
 
 def test_mcp_cli_names_are_non_empty_and_stable():

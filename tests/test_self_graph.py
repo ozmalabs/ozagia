@@ -15,6 +15,7 @@ import pytest
 from ozagia import cli
 from ozagia.core import capabilities as K
 from ozagia.core import contracts as C
+from ozagia.core import graph_engine
 from ozagia.core import self_graph as SG
 from ozagia.core.memory import DevMemory, build_index
 from ozagia.daemon import protocol
@@ -105,13 +106,15 @@ def test_real_surfaces_are_joined_without_guessing():
     declared = {surface for cap in caps for surface in cap.surfaces}
     full = {f"mcp:tool:{tool['name']}" for tool in server._TOOLS}
     graph = {f"mcp:graph:{tool['name']}" for tool in graph_surface.GRAPH_TOOLS}
+    engine = {f"mcp:tool:{tool['name']}"
+              for tool in graph_engine.ENGINE_TOOLS}
     parser = cli.build_parser()
     sub = next(action for action in parser._actions
                if hasattr(action, "choices") and action.choices)
     commands = {f"cli:ozagia.{name}" for name in sub.choices}
     daemon = {f"daemon:op:{operation}" for operation in protocol.OPERATIONS}
     assert {surface for surface in declared if surface.startswith("mcp:")} == (
-        full | graph)
+        full | graph | engine)
     assert {surface for surface in declared if surface.startswith("cli:")} == (
         commands)
     assert {surface for surface in declared

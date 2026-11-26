@@ -8,6 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable
 
+from ozagia.core import dependency_links
 from ozagia.core import federation
 
 
@@ -37,6 +38,10 @@ def check(root: str | Path | None = None,
     ``deployed_by`` (code node -> InfraResource, comparing an explicit
     ``service`` value when both endpoints provide one). Unknown relations and
     unsupported endpoint types are reported as unknown.
+
+    The report also includes ``dependency_links``, a read-only comparison of
+    declared package dependencies between members; it is built from current
+    member manifests and does not affect the API ``overall`` verdict.
     """
     selected = federation._root(root)
     if roots is not None:
@@ -70,11 +75,14 @@ def check(root: str | Path | None = None,
             "id": item["alias"], "name": item["label"],
             "root": str(item["root"]), "snapshot": str(item["snapshot_path"]),
             "state": state, "detail": detail,
+            "identity_source": item.get("identity_source", "derived"),
             "head": item["attrs"].get("head"),
             "generated_at": item["attrs"].get("generated_at"),
             "nodes": len((item["snapshot"] or {}).get("nodes", [])),
             "edges": len((item["snapshot"] or {}).get("edges", [])),
         }
+        if item.get("identity_error"):
+            public_member["identity_error"] = item["identity_error"]
         if reference:
             public_member.update({"reference": True, "pin": reference.get("pin"),
                                   "sync_state": sync_state, "sync": sync})
@@ -109,6 +117,8 @@ def check(root: str | Path | None = None,
     if reference_errors:
         member_errors.append({"state": "reference_manifest_error",
                               "detail": "reference manifest has invalid entries"})
+
+    dependency_report = dependency_links.analyze(members, member_states)
 
     checks: list[dict[str, Any]] = []
     for link in link_report["links"]:
@@ -206,6 +216,7 @@ def check(root: str | Path | None = None,
             "overall": overall, "errors": errors,
             "reference_errors": len(reference_errors),
             "configuration": configuration,
+            "dependency_links": dependency_report,
             "note": "Static evidence only; API compatibility, test execution, and deployment state are not verified."}
 
 

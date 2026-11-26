@@ -1,7 +1,17 @@
 # UI, bounded agents and self-improvement: priority and architecture
 
-**Date:** 2026-11-16. **Status:** proposal for review. This ranks the requested
-UI, configuration, agent and Ocelot work, and fixes the first delivery.
+**Date:** 2026-11-16. **Status:** waves merged, verified 2026-11-24. The
+presentation layer, status snapshot, worktree/resource/file checks, review and
+bounded-task surfaces, console, OpenCode add-in, settings registry and the
+wave 1–11 follow-ups are implemented on `main`; the per-wave merge notes and
+old test counts below are historical. The "Not yet" list in the wave-8 status
+is still accurate apart from project-model migration, which landed after that
+note: the live OpenCode Desktop smoke test, live model/provider adapters for
+review, generation and tool use (the injected seams exist), and a live
+security-tool matrix/DAST. `ozagia config migrate` now copies
+`[environments]`, `[services]`, `[relays]` and `[runtime]` entries into
+`ozagia/config.toml`; see `src/ozagia/core/migrate.py` and
+`docs/settings.md`.
 
 ## What already exists
 

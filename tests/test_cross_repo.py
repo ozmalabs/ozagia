@@ -238,3 +238,71 @@ def test_reference_manifest_errors_make_empty_report_unknown(tmp_path, monkeypat
     assert report["overall"] == "unknown"
     assert report["reference_errors"] == 1
     assert report["member_errors"][0]["state"] == "reference_manifest_error"
+
+
+def test_declared_member_ids_resolve_links_and_are_reported(tmp_path, monkeypatch):
+    consumer, provider = tmp_path / "consumer", tmp_path / "provider"
+    consumer.mkdir()
+    provider.mkdir()
+    _snapshot(consumer, "consumer", [
+        _node(1, "api:client", "ApiOperation", {"method": "GET", "path": "/pets"}),
+    ])
+    _snapshot(provider, "provider", [
+        _node(1, "api:provider", "ApiOperation", {"method": "GET", "path": "/pets"}),
+    ])
+    (consumer / ".ozagia" / "federation.json").write_text(json.dumps({
+        "version": 1,
+        "members": [{"path": str(provider), "id": "pets-api"}],
+        "links": [{"source": "consumer::api:client",
+                   "target": "pets-api::api:provider",
+                   "relation": "same_api_operation",
+                   "provenance": "contract review"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(federation, "_freshness", lambda _: ("fresh", None))
+
+    report = cross_repo.check(consumer)
+
+    assert report["checks"][0]["result"] == "pass"
+    assert report["checks"][0]["target"] == "pets-api::api:provider"
+    assert report["overall"] == "complete"
+    member = next(m for m in report["members"]
+                  if m["root"] == str(provider.resolve()))
+    assert (member["id"], member["identity_source"]) == ("pets-api", "declared")
+
+
+def test_duplicate_declared_member_ids_remain_ambiguous(tmp_path, monkeypatch):
+    consumer, first, second = (tmp_path / name for name in
+                               ("consumer", "first", "second"))
+    for path in (consumer, first, second):
+        path.mkdir()
+    _snapshot(consumer, "consumer", [
+        _node(1, "api:client", "ApiOperation", {"method": "GET", "path": "/pets"}),
+    ])
+    _snapshot(first, "first", [
+        _node(1, "api:first", "ApiOperation", {"method": "GET", "path": "/pets"}),
+    ])
+    _snapshot(second, "second", [
+        _node(1, "api:second", "ApiOperation", {"method": "GET", "path": "/pets"}),
+    ])
+    (consumer / ".ozagia" / "federation.json").write_text(json.dumps({
+        "version": 1,
+        "members": [{"path": str(first), "id": "shared"},
+                    {"path": str(second), "id": "shared"}],
+        "links": [{"source": "consumer::api:client",
+                   "target": "shared::api:first",
+                   "relation": "same_api_operation",
+                   "provenance": "ambiguous declaration"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(federation, "_freshness", lambda _: ("fresh", None))
+
+    report = cross_repo.check(consumer)
+
+    assert report["overall"] == "unknown"
+    assert report["link_state"] == "partial"
+    assert sum("duplicates another member id: shared" in error
+               for error in report["errors"]) == 2
+    assert any("endpoint not found: shared::api:first" in error
+               for error in report["errors"])
+    ids = {m["root"]: m["id"] for m in report["members"]}
+    assert ids[str(first.resolve())] == "first"
+    assert ids[str(second.resolve())] == "second"

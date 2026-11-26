@@ -55,6 +55,7 @@ SECURITY_TO_REVIEW = {
 
 FINDING_TYPES = (
     "breaking_change",
+    "non_breaking_change",
     "missing_test",
     "unhandled_error",
     "stale_reference",
@@ -530,6 +531,7 @@ def _name_status(root: Path, base: str, head: str) -> list[dict[str, Any]]:
             "size": None,
             "large": False,
             "generated": False,
+            "executable": False,
         })
     return files
 
@@ -580,6 +582,25 @@ def _blob_size(root: Path, commit: str, path: str) -> int | None:
         return int(_decode(proc.stdout).strip())
     except ValueError:
         return None
+
+
+def _tree_modes(root: Path, revision: str) -> dict[str, str]:
+    """File modes at `revision`, used to keep deleted executables breaking."""
+    out = _git_required(root, ["ls-tree", "-r", "-z", revision])
+    modes: dict[str, str] = {}
+    for entry in _split_z(out):
+        meta, _sep, path = entry.partition("\t")
+        parts = meta.split()
+        if path and parts:
+            modes[path] = parts[0]
+    return modes
+
+
+def _is_executable_mode(mode: str) -> bool:
+    try:
+        return bool(int(mode, 8) & 0o111)
+    except ValueError:
+        return False
 
 
 def _classify_path(path: str) -> str:
@@ -746,6 +767,8 @@ def _diff_files(root: Path, base: str, head: str, *,
                "--no-textconv", "--find-renames", base, head, "--"]))
     patch = _parse_patch(patch_text)
     files = _name_status(root, base, head)
+    modes = (_tree_modes(root, base)
+             if any(item["deleted"] for item in files) else {})
     for item in files:
         path = item["path"]
         if path in stat:
@@ -758,6 +781,7 @@ def _diff_files(root: Path, base: str, head: str, *,
         item["large"] = bool(
             item["size"] is not None and item["size"] > max_file_bytes)
         item["generated"] = _is_generated(path, patch["generated"])
+        item["executable"] = _is_executable_mode(modes.get(path, ""))
         item["file_kind"] = _classify_path(path)
         item["first_added_line"] = patch["first_added"].get(path)
         item["graph_keys"] = []
@@ -1125,7 +1149,25 @@ def _recompute_summary(packet: dict[str, Any]) -> None:
 
 def _fallback_tests(source: str, repo_tests: Iterable[str]) -> list[str]:
     p = PurePosixPath(source)
-    names = {f"test_{p.stem}.py", f"{p.stem}_test.py", f"{p.stem}_test.go"}
+    stem = p.stem
+    suffix = p.suffix.casefold()
+    names = {f"test_{stem}.py", f"{stem}_test.py", f"{stem}_test.go"}
+    if suffix in {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"}:
+        names |= {
+            f"{stem}{suffix}", f"{stem}.test{suffix}", f"{stem}.spec{suffix}",
+            f"test_{stem}{suffix}", f"{stem}_test{suffix}",
+        }
+    elif suffix == ".rs":
+        names |= {
+            f"{stem}.rs", f"{stem}_test.rs", f"{stem}_tests.rs",
+            f"test_{stem}.rs",
+        }
+    elif suffix in {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx"}:
+        for ext in (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".hxx"):
+            names |= {
+                f"{stem}{ext}", f"{stem}-test{ext}", f"{stem}_test{ext}",
+                f"test_{stem}{ext}",
+            }
     return sorted(path for path in repo_tests
                   if PurePosixPath(path).name in names)
 
@@ -1197,14 +1239,29 @@ def _derive_findings(files: Sequence[dict[str, Any]],
             if kind == "test":
                 severity, ftype = "major", "missing_test"
                 message = f"test file {path} was deleted"
+            elif item["generated"]:
+                severity, ftype = "note", "non_breaking_change"
+                message = (
+                    f"generated file {path} was deleted; no source or API "
+                    "change is implied")
             elif kind == "source":
                 severity, ftype = "major", "breaking_change"
                 message = (
                     f"source file {path} was deleted; imports or callers may "
                     "still reference it")
-            else:
+            elif kind == "config":
                 severity, ftype = "note", "breaking_change"
-                message = f"file {path} was deleted"
+                message = f"config file {path} was deleted"
+            elif item["executable"]:
+                severity, ftype = "note", "breaking_change"
+                message = (
+                    f"executable file {path} was deleted; scripts or jobs may "
+                    "still invoke it")
+            else:
+                severity, ftype = "note", "non_breaking_change"
+                message = (
+                    f"non-source file {path} was deleted; no source or API "
+                    "change is implied")
             findings.append(_finding(
                 ftype, severity, path, None, message,
                 evidence=[f"git diff --name-status: D {path}",
@@ -1213,7 +1270,10 @@ def _derive_findings(files: Sequence[dict[str, Any]],
                 confidence="high",
                 confidence_note="the diff status is deterministic",
             ))
-        if item["binary"]:
+        # A deleted file is already reported by the deletion branch above. The
+        # binary-content check is moot once the blob is gone, and emitting both
+        # made one deletion look like two independent findings.
+        if item["binary"] and not item["deleted"]:
             findings.append(_finding(
                 "unknown", "note", path, None,
                 f"binary file {path} changed; its content was not reviewed",

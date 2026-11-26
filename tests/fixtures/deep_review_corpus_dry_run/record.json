@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "corpus_id": "synthetic:deep-review-corpus-dry-run-v1",
+  "evidence_class": "synthetic_regression",
+  "scored_condition": "range",
+  "source_revision": "synthetic fixture; no target revision exists",
+  "manifest_digest": "ed7839559057e90b0e233ecb86204fb43ee672949c33bf60e15c006924204a7f",
+  "labels_digest": "163a22c4af75685484845f2fa49a3aaea47fc3e5a504aa3bd52d871df7de8e36",
+  "runs": [
+    {
+      "run_id": "complete-1",
+      "repository_id": "fixture-service",
+      "subject_key": "range-complete",
+      "condition": "range",
+      "status": "complete",
+      "report_path": "reports/complete/findings.json",
+      "report_sha256": "82f66e5725bb67c59359bc63bd0916d4aa0b3af894f38affccb00b746768dbb7",
+      "subject_status": {
+        "security": "complete",
+        "performance": "complete",
+        "failure-modes": "complete",
+        "scalability": "complete",
+        "tests-and-coverage": "complete"
+      },
+      "graph_freshness": "fresh",
+      "budget_s": 60,
+      "duration_s": 0.1,
+      "exit_status": 0,
+      "writes_outside_allowed_paths": false
+    },
+    {
+      "run_id": "partial-1",
+      "repository_id": "fixture-service",
+      "subject_key": "range-partial",
+      "condition": "range",
+      "status": "complete",
+      "report_path": "reports/partial/findings.json",
+      "report_sha256": "3721e1ec65a9af3be2c9a7e489c35a4e6d5dfc516c65d02780d1dd92f15332da",
+      "subject_status": {
+        "data-structures": "complete",
+        "performance": "complete"
+      },
+      "graph_freshness": "fresh",
+      "budget_s": 60,
+      "duration_s": 0.1,
+      "exit_status": 0,
+      "writes_outside_allowed_paths": false
+    },
+    {
+      "run_id": "complete-2",
+      "repository_id": "fixture-service",
+      "subject_key": "range-complete",
+      "condition": "range",
+      "status": "complete",
+      "repeat_of": "complete-1",
+      "report_path": "reports/complete-repeat/findings.json",
+      "report_sha256": "82f66e5725bb67c59359bc63bd0916d4aa0b3af894f38affccb00b746768dbb7",
+      "subject_status": {
+        "security": "complete",
+        "performance": "complete",
+        "failure-modes": "complete",
+        "scalability": "complete",
+        "tests-and-coverage": "complete"
+      },
+      "graph_freshness": "fresh",
+      "budget_s": 60,
+      "duration_s": 0.11,
+      "exit_status": 0,
+      "writes_outside_allowed_paths": false
+    }
+  ]
+}

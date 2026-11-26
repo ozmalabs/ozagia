@@ -183,8 +183,10 @@ def tool_env(root: str | Path, *, tool_python: str, config: str | Path | None = 
 
 def run_group(argv: list[str], *, cwd: str | Path, env: dict[str, str],
               timeout_s: float | None, stdout: Any, stderr: Any,
-              cancel: threading.Event | None = None) -> dict[str, Any]:
-    """Run argv in its own session and process group; stdin is /dev/null.
+              cancel: threading.Event | None = None,
+              stdin: Any = subprocess.DEVNULL) -> dict[str, Any]:
+    """Run argv in its own session and process group; stdin is /dev/null
+    unless `stdin` is an open file object (the caller owns it and closes it).
 
     The group is killed (SIGTERM, then SIGKILL after `KILL_GRACE_S`) on
     timeout, on `cancel`, on any exception including KeyboardInterrupt (then
@@ -193,7 +195,7 @@ def run_group(argv: list[str], *, cwd: str | Path, env: dict[str, str],
     timeout or a cancellation."""
     started = time.monotonic()
     env = dict(env, PWD=str(Path(cwd).resolve()))
-    proc = subprocess.Popen(argv, cwd=str(cwd), env=env, stdin=subprocess.DEVNULL,
+    proc = subprocess.Popen(argv, cwd=str(cwd), env=env, stdin=stdin,
                             stdout=stdout, stderr=stderr, start_new_session=True)
     timed_out = cancelled = False
     code: int | None = None

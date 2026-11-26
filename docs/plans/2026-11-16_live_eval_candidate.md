@@ -1,5 +1,8 @@
 # Candidate live coding-agent evaluation
 
+Status: historical candidate (2026-11-16); not a current release plan. Later
+live evaluations and their results are recorded under `docs/results/`.
+
 This is a proposed, small Ocelot coding-agent pilot. It is not a test of the
 Ozma assembler's four context arms. The repository rules require a person's
 approval before running a live agent driver, even for a local model.

@@ -83,13 +83,15 @@ HOOKS: tuple[tuple[str, str, str, str | None], ...] = (
     # A plain word is tried as a regex against the tool ID: web_fetch.
     ("ozagia-post-web-fetch", "PostToolUse", "postToolUse", "web_fetch"),
 )
-# Hooks only the V3 hook file gets: (name, trigger, matcher). PostCompact
-# (CLI 3.1.0+) hands back the working set (hook.compaction_context). The
-# 2.37 V3 loader skips a hook whose trigger it does not know, with a
-# warning, and loads the rest of the file; the CLI 2.x agent validator
-# rejects an unknown trigger, so profiles do not get it. PreCompact is not
-# registered: a non-zero exit there would cancel the compaction.
+# Hooks only the V3 hook file gets: (name, trigger, matcher). SessionEnd and
+# PostCompact (CLI 3.1.0+) clear the session ledger or hand back the working
+# set (hook.compaction_context). The 2.37 V3 loader skips a hook whose trigger
+# it does not know, with a warning, and loads the rest of the file; the CLI
+# 2.x agent validator rejects an unknown trigger, so profiles do not get them
+# (the 2.x engines have no session-end trigger). PreCompact is not registered:
+# a non-zero exit there would cancel the compaction.
 V3_ONLY_HOOKS: tuple[tuple[str, str, str | None], ...] = (
+    ("ozagia-session-end", "SessionEnd", None),
     ("ozagia-post-compact", "PostCompact", None),
 )
 

@@ -54,11 +54,18 @@ secret_allowlist = [
   "rule:generic_high_entropy",
   "sha256:0123abcd",                       # reviewed fingerprint
 ]
+finding_allowlist = [
+  "sha256:0123456789abcdef",               # exact static-finding fingerprint
+]
 ```
 
 `enabled = false` is reported but does not turn a direct CLI invocation into
 silence; the caller asked for the scan. `block_secrets` is the only global
 switch for the commit/push gate.
+
+`finding_allowlist` is separate from `secret_allowlist` and applies to the
+static `scan` findings. Prefer exact `sha256:` finding fingerprints; see
+[Reviewed finding allowlist](#reviewed-finding-allowlist).
 
 ### Precedence and files
 
@@ -80,6 +87,7 @@ tools = ["bandit"]
 exclude = ["tests/**", "vendor/**"]
 block_secrets = true
 secret_allowlist = ["path:tests/fixtures/**"]
+finding_allowlist = ["sha256:0123456789abcdef"]
 ```
 
 `ozagia.core.security.load_config(root)` returns the effective values plus
@@ -146,6 +154,26 @@ A graph path is attached when the matched line falls inside a graph symbol. If
 a route handler calls a helper through a recorded `calls` edge, the path
 includes the intermediate symbol. No runtime data-flow analysis is performed.
 
+Three rules avoid prose and reference false positives without weakening the
+real call/value checks:
+
+- `eval`/`exec`: a match is suppressed only when the whole match lies inside a
+  Python string literal, f-string literal segment or comment. A real call
+  (including `f"{eval(value)}"`) is still flagged. A `.py`/`.pyi` file that
+  cannot be tokenized keeps the rule rather than hiding the finding.
+- `generic_high_entropy`: a match whose value is a dotted identifier, or an
+  identifier immediately followed by `(`, is treated as a loader call or a
+  reference, not an embedded literal. Quoted literals and bare opaque values
+  are still flagged.
+- `unsafe-yaml`: `Loader=yaml.SafeLoader`, `Loader=yaml.BaseLoader` and a
+  same-file class statically shown to subclass either (directly or through
+  another such class) are recognized inside the `yaml.load(...)` call. A
+  loader imported from elsewhere, computed at runtime, `FullLoader`,
+  `UnsafeLoader`, or a bare `yaml.load(value)` is not proven safe and stays a
+  finding (or a reviewed allowlist entry). The subclass test is syntactic:
+  review the custom loader class itself, because an override could still add
+  unsafe behavior.
+
 ## Secrets
 
 Provider formats, generic high-entropy assignments and credential-bearing
@@ -155,6 +183,7 @@ paths are detected:
   tokens/webhooks, Google API keys/OAuth secrets, JWTs, private-key blocks,
   URL credentials;
 - quoted or bare credential assignments whose value passes an entropy check;
+  assignments from a key-loader call/reference are not treated as literals;
 - `.env`/`.env.*`, `.npmrc`, `.pypirc`, `credentials`, SSH private-key names,
   `.aws/credentials`, gcloud application-default credentials, Docker/Kube
   config, and key-store suffixes (`.p12`, `.pfx`, `.jks`, `.keystore`, `.key`).
@@ -207,6 +236,62 @@ The override applies only to that invocation. It is recorded in
 `.ozagia/security/audit.jsonl` as a redacted decision with rule, path, line,
 mode and fingerprint. The secret value is not stored. An invalid token (not a
 `sha256:` fingerprint) is reported and ignored.
+
+## Reviewed finding allowlist
+
+`[security] finding_allowlist` is the reviewed allowlist for static `scan`
+findings. It is deliberately separate from the commit/push `secret_allowlist`:
+a secret-gate exception is not an exception for an unsafe YAML load, a private
+pipe or an installer instruction. The same key is read from either config file
+with the normal legacy-per-key precedence. Staged/diff secret results added by
+`scan --staged` or `scan --diff` are matched by `secret_allowlist`, not this
+key.
+
+Each reviewed entry is an exact `sha256:<16 hex>` fingerprint. The fingerprint
+binds:
+
+- the rule name;
+- the normalized repository path (POSIX separators, no leading `./`, collapsed
+  separators);
+- the normalized matched line (outer whitespace removed).
+
+The line number is not part of the identity, so moving a line keeps the entry;
+editing the matched line changes the fingerprint and the finding returns. An
+exact `sha256:` entry is matched by equality, never by prefix, so a short entry
+cannot silently cover a family of findings.
+
+```toml
+[security]
+finding_allowlist = [
+  # Synthetic redaction-test canary; not a real provider key.
+  "sha256:7f6a68d95fd6bf81",
+  # Printed installer instruction, not executed by the release script.
+  "sha256:108ebf0f1de597eb",
+]
+```
+
+The report keeps allowed findings in a separate bounded `allowed` list with
+`rule`, `path`, `line`, `fingerprint` and the matched `allowlist` entry. This
+list is redacted like the rest of the report and never contains a secret value.
+Allowed findings are excluded from `findings`, from the severity counts and
+from the `--fail-on` exit status. `summary.allowed`, `summary.allowed_total`
+and `summary.allowed_omitted` report the counts; the text report shows the same
+entries with an `[ALLOWED]` marker.
+
+Workflow: run the scan, read the finding, decide why it is intentional, copy
+its `finding_fingerprint` (or recompute it with
+`ozagia.core.security.finding_fingerprint(rule, path, matched_line)`), and add
+the entry with a comment naming the reason. Re-run the scan and keep the
+allowlist small. An allowlist entry is a review decision, not evidence that the
+finding is a false positive: the underlying code and its reachability still
+need a human assessment.
+
+`path:` and `rule:` entries are accepted for compatibility with the secret
+gate's convention, but they are broad: `path:tests/**` can hide a new real
+secret-shaped value in every test file, and `rule:pickle` hides every pickle
+finding in the repository. Use them only when the broad scope itself is the
+reviewed decision. The repository's own reviewed cases use exact fingerprints;
+see `ozagia/config.toml`.
 
 ## Optional tools
 
@@ -273,6 +358,7 @@ the same checks and accepts `--supply-chain-policy`. See
   "confidence": "medium",
   "file": "src/app.py",
   "line": 42,
+  "finding_fingerprint": "sha256:0123456789abcdef",
   "graph_path": ["route:POST /run", "sym:src/app.py::run", "sink:shell"],
   "message": "subprocess call enables a shell",
   "evidence": {"kind": "graph_path", "detail": "...", "path": ["..."]},
@@ -290,6 +376,23 @@ Secret findings additionally contain `secret_rule`, `secret_fingerprint` and
 `value_withheld: true`. Dependency inventory findings contain `cve_status`.
 Tool findings contain `source.tool`, `source.version`, `source.command`,
 `source.exit_code` and `source.database`.
+
+Every static finding carries `finding_fingerprint`. It is a one-way hash of
+rule, normalized path and normalized matched line, used only for the reviewed
+allowlist. Allowed findings are not in `findings`; they appear in the bounded
+`allowed` list:
+
+```json
+"allowed": [
+  {
+    "rule": "pickle",
+    "path": "src/ozagia/core/deep_review/collect.py",
+    "line": 330,
+    "fingerprint": "sha256:7553024ba0d2c480",
+    "allowlist": "sha256:7553024ba0d2c480"
+  }
+]
+```
 
 Findings are deduplicated by rule/target, capped by `max_findings`, sorted by
 severity, confidence, file, line and rule, and assigned stable `sec-...` ids.
@@ -356,8 +459,11 @@ PYTHONPATH=src python -m pytest -q tests/test_security.py tests/test_worktree.py
 ```
 
 The tests cover graph sink paths, secret redaction/fingerprinting, hardcoded
-keys/TLS, dependency inventory, injected tool provenance, unavailable tools,
-the network gate, dedupe/caps, CLI exit codes, the staged commit gate, push
-range gate, allowlists, one-time overrides, disabled gates, binary/large-file
-skips, legacy/versioned `[security]` precedence and malformed-file handling,
-and code-review/repo-scan integration. No test uses the network or a model.
+keys/TLS, string/comment suppression for `eval`/`exec`, key-loader references
+for generic secrets, statically safe YAML loaders, dependency inventory,
+injected tool provenance, unavailable tools, the network gate, dedupe/caps,
+CLI exit codes, the staged commit gate, push range gate, exact finding
+fingerprints and invalidation after a line edit, the reviewed static allowlist,
+one-time overrides, disabled gates, binary/large-file skips,
+legacy/versioned `[security]` precedence and malformed-file handling, and
+code-review/repo-scan integration. No test uses the network or a model.

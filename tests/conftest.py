@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -9,6 +10,88 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+SRC_ROOT = (REPO_ROOT / "src").resolve()
+
+
+def _absolute_pythonpath() -> None:
+    """Make a relative ``PYTHONPATH=src`` safe for child processes.
+
+    Daemons, hooks and bounded verifiers change directory. A relative entry
+    then names a different (or missing) directory. Normalise every entry and
+    keep this checkout's ``src`` importable for the whole test run.
+    """
+    entries: list[str] = []
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        if not entry:
+            continue
+        path = Path(entry)
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        entries.append(str(path))
+    if str(SRC_ROOT) not in entries:
+        entries.insert(0, str(SRC_ROOT))
+    os.environ["PYTHONPATH"] = os.pathsep.join(entries)
+
+
+_absolute_pythonpath()
+
+
+# Test sharding. `OZAGIA_TEST_SHARD=i/n` runs only whole test files assigned to
+# shard `i` (1-based). Assignment is deterministic for the checkout: files are
+# placed largest first on the least-loaded shard, so a module's fixtures stay
+# together and shards are roughly even by file size. Unset runs everything.
+_SHARD_ASSIGNMENTS: dict[int, dict[str, int]] = {}
+
+
+def _test_shard() -> tuple[int, int] | None:
+    raw = os.environ.get("OZAGIA_TEST_SHARD", "").strip()
+    if not raw:
+        return None
+    try:
+        index_text, total_text = raw.split("/", 1)
+        index, total = int(index_text), int(total_text)
+    except ValueError:
+        raise pytest.UsageError(
+            "OZAGIA_TEST_SHARD must be INDEX/TOTAL, e.g. 1/4") from None
+    if total < 1 or index < 1 or index > total:
+        raise pytest.UsageError(
+            f"OZAGIA_TEST_SHARD {raw!r} needs 1 <= INDEX <= TOTAL")
+    return index - 1, total
+
+
+def _shard_assignment(total: int) -> dict[str, int]:
+    assignment = _SHARD_ASSIGNMENTS.get(total)
+    if assignment is not None:
+        return assignment
+    tests = REPO_ROOT / "tests"
+    files = sorted(
+        ((path.relative_to(tests).as_posix(), path.stat().st_size)
+         for path in tests.rglob("test_*.py")),
+        key=lambda item: (-item[1], item[0]))
+    loads = [0] * total
+    assignment = {}
+    for name, size in files:
+        shard = min(range(total), key=lambda item: (loads[item], item))
+        assignment[name] = shard
+        loads[shard] += size
+    _SHARD_ASSIGNMENTS[total] = assignment
+    return assignment
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Keep whole test files together and skip other shards' files."""
+    spec = _test_shard()
+    if spec is None:
+        return None
+    path = Path(str(collection_path))
+    try:
+        relative = path.resolve().relative_to(
+            (REPO_ROOT / "tests").resolve()).as_posix()
+    except ValueError:
+        return None
+    if not relative.endswith(".py") or not path.name.startswith("test_"):
+        return None
+    return _shard_assignment(spec[1]).get(relative) != spec[0]
 
 
 @pytest.fixture(autouse=True)

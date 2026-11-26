@@ -771,8 +771,17 @@ def test_daemon_handled_edit_and_latest_session(daemon, repo):
 
 def test_daemon_working_set_lists_the_sessions_jobs(daemon, repo):
     (repo / ".ozagia.toml").write_text("[jobs]\nenabled = true\n")
+    # Keep job admission independent of the host's free disk and memory.
+    (repo / "ozagia").mkdir()
+    (repo / "ozagia" / "resources.toml").write_text(
+        "reserve_memory_pct = 0\nreserve_disk_gb = 0\n"
+        "[limits]\njob_memory_mb = 256\njob_disk_mb = 64\n"
+        "[admission]\nmin_free_memory_pct = 0\nmin_free_disk_gb = 0\n",
+        encoding="utf-8")
     clear_config_cache()
     st = daemon.state
+    from ozagia.core import resources as R
+    st.jobs.resource_policy = R.load_policy(repo)
     st.jobs.start(command="sleep 30", session="ses_j", harness="kiro")
     try:
         daemon({"op": "after", "harness": "kiro", "session": "ses_j", "tool": "read",

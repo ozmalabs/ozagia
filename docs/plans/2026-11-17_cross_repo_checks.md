@@ -1,5 +1,15 @@
 # Cross-repository checks and linked checkouts
 
+Status: implemented, verified 2026-11-24. `core/cross_repo.py` and
+`core/federation.py` produce declared API, deployment and Kubernetes
+environment checks over existing snapshots with provenance and explicit
+unknown/incomplete states; `tests/test_cross_repo.py`,
+`tests/test_federation.py` and
+[`docs/cross-repo-checks.md`](../cross-repo-checks.md) cover the surface. The
+checks compare declarations and selected attributes only; version-aware
+relationships beyond explicit links, runtime contract tests and broader
+access-control boundaries remain follow-on work.
+
 ## Goal and research
 
 Make linked repositories usable together automatically, and check declared API and code/infrastructure relationships across existing indexed snapshots. Retain source-repository provenance and avoid turning an absent snapshot or a guessed relationship into a passing check. [OpenAPI 3.1](https://spec.openapis.org/oas/v3.1) specifies operation identity, paths and parameters; [Pact's provider verification](https://docs.pact.io/implementation_guides/python/docs/provider) illustrates the distinction between a recorded contract and runtime verification. The first implementation is offline static evidence checking, not a substitute for actual contract or deployment tests.

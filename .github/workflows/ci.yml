@@ -12,6 +12,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ["3.12", "3.13"]
+        shard: ["1/4", "2/4", "3/4", "4/4"]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,6 +30,8 @@ jobs:
           .venv/bin/ruff check src tests scripts
           bash -n install scripts/release/smoke.sh
       - name: Test
+        env:
+          OZAGIA_TEST_SHARD: ${{ matrix.shard }}
         run: .venv/bin/python -m pytest -q
 
   docs:

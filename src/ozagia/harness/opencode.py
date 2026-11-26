@@ -33,6 +33,10 @@
    shell approvals; the harness does not override the user's policy. Eval runs use
    their separate restrictive config (`eval.agent.OPENCODE_GIT_DENY`).
    a `model` goes here too, because the TUI has no `--model` flag.
+   `--opencode-config PATH` layers only the allowlisted provider keys
+   (`provider`, `providers`, `model`, `small_model`) from the caller's file;
+   the host/global config is never read implicitly, and plugins, MCP servers,
+   permissions, agents and tools can never come from that file.
 7. Runs OpenCode in the workdir with `OZAGIA_DAEMON_SOCK`, `PWD` (OpenCode
    takes its project directory from it), `OPENCODE_CONFIG`, and with
    `run_python`, a PATH whose first entry is a `python` shim. With
@@ -41,8 +45,10 @@
    bounded, ranked repository map on each model request. Without it the
    plugin's ordinary once-per-prompt hint is unchanged.
    - Prompt given: `opencode run --standalone --format json --auto --archived
-     [-m model] [extra args] <prompt>`, its own process group, stdout and
-     stderr to files in the logs, killed after `timeout_s`.
+     [-m model] [extra args]` with the prompt on stdin, never in argv,
+     because OpenCode logs its full argv once before the plugin hook runs.
+     Its own process group, stdout and stderr to files in the logs, killed
+     after `timeout_s`.
    - No prompt: the TUI, `opencode --standalone [extra args] [--prompt P]
      <workdir>`, attached to the terminal.
 8. Always (also on Ctrl-C, SIGTERM or an error): removes the plugin and
@@ -191,6 +197,60 @@ def git_unexclude(info: dict[str, Any] | None) -> list[str]:
 
 MCP_MODES = ("coding", "research", "combined")
 
+# `ozagia agent --opencode-config` layers only provider-related keys from a
+# caller-supplied OpenCode config into the harness-owned one. Everything else
+# (plugins, MCP servers, permissions, agents, tools) stays the harness's or
+# the host's own business; see `load_provider_config`.
+OPENCODE_CONFIG_KEYS = ("provider", "providers", "model", "small_model")
+# Allowed but not copied: the harness sets its own `$schema`.
+_OPENCODE_CONFIG_IGNORED = ("$schema",)
+
+
+def load_provider_config(path: str | Path) -> dict[str, Any]:
+    """The provider-related part of a caller-supplied OpenCode config.
+
+    Only `provider`, `providers`, `model` and `small_model` are taken over
+    (`$schema` is allowed and ignored). Any other key is an error rather than
+    silently dropped, so a file meant to configure plugins, permissions, MCP
+    servers or agents cannot quietly widen the harness's trust boundary. The
+    file is read as JSON; `{env:...}` and `{file:...}` values are left exactly
+    as written and are never resolved or printed.
+    """
+    cfg = Path(path)
+    try:
+        text = cfg.read_text(encoding="utf-8")
+    except OSError as exc:
+        reason = exc.strerror or str(exc)
+        raise AgentError(f"cannot read --opencode-config {cfg}: {reason}") from None
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise AgentError(
+            f"--opencode-config {cfg} is not valid JSON: {exc.msg} "
+            f"(line {exc.lineno} column {exc.colno})") from None
+    if not isinstance(doc, dict):
+        raise AgentError(f"--opencode-config {cfg} must be a JSON object")
+    unsupported = sorted(
+        key for key in doc
+        if key not in OPENCODE_CONFIG_KEYS and key not in _OPENCODE_CONFIG_IGNORED)
+    if unsupported:
+        raise AgentError(
+            f"--opencode-config {cfg} has unsupported key(s): "
+            f"{', '.join(unsupported)}; only provider-related keys are layered "
+            f"({', '.join(OPENCODE_CONFIG_KEYS)})")
+    merged: dict[str, Any] = {}
+    for key in OPENCODE_CONFIG_KEYS:
+        if key not in doc:
+            continue
+        value = doc[key]
+        if key in ("provider", "providers"):
+            if not isinstance(value, dict):
+                raise AgentError(f"--opencode-config {cfg}: {key} must be an object")
+        elif not isinstance(value, str):
+            raise AgentError(f"--opencode-config {cfg}: {key} must be a string")
+        merged[key] = value
+    return merged
+
 
 def mcp_server_entry(root: Path, mode: str, *, tool_python: str = sys.executable
                      ) -> dict[str, Any]:
@@ -209,11 +269,20 @@ def mcp_server_entry(root: Path, mode: str, *, tool_python: str = sys.executable
 
 
 def write_opencode_config(path: Path, *, model: str | None = None,
-                          mcp: dict[str, Any] | None = None) -> Path:
-    """The OPENCODE_CONFIG for one harness session, and optional MCP server."""
+                          mcp: dict[str, Any] | None = None,
+                          provider_config: dict[str, Any] | None = None) -> Path:
+    """The OPENCODE_CONFIG for one harness session, and optional MCP server.
+
+    `provider_config` is the allowlisted provider part from
+    `load_provider_config` (`provider`, `providers`, `model`, `small_model`);
+    `model` here stays authoritative over its `model`. `mcp` is the harness's
+    own `ozagia` entry, never one from the caller's file.
+    """
     doc: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
     }
+    if provider_config:
+        doc.update(provider_config)
     if model:
         doc["model"] = model
     if mcp is not None:
@@ -242,6 +311,26 @@ def _sigterm_as_interrupt() -> Iterator[None]:
         yield
     finally:
         signal.signal(signal.SIGTERM, previous)
+
+
+@contextlib.contextmanager
+def _prompt_stdin(prompt: str | None) -> Iterator[Any]:
+    """The prompt on fd 0 for `opencode run`, never in argv.
+
+    OpenCode writes its full argv to its own log once, before the plugin hook
+    runs, so a prompt in argv leaks there. The prompt goes to an anonymous
+    `tempfile.TemporaryFile` (no pathname, mode 0600) written and rewound
+    before the child starts, or to /dev/null when there is none."""
+    if not prompt:
+        yield subprocess.DEVNULL
+        return
+    stream = tempfile.TemporaryFile(mode="w+", encoding="utf-8")
+    try:
+        stream.write(prompt)
+        stream.seek(0)
+        yield stream
+    finally:
+        stream.close()
 
 
 def _run_tui(argv: list[str], *, cwd: Path, env: dict[str, str],
@@ -337,7 +426,8 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
               quiet: bool = False, mcp_mode: str | None = None,
               progress: Progress | None = None,
               background: bool | None = None,
-              repo_map_tokens: int | None = None) -> dict[str, Any]:
+              repo_map_tokens: int | None = None,
+              opencode_config: str | Path | None = None) -> dict[str, Any]:
     """Run one OpenCode session on `workdir` with the graph daemon and plugin
     (see the module docstring). Returns {exit_code, seconds, timed_out,
     transcript_path, stdout_path, stderr_path, daemon_stats, plugin_loaded,
@@ -353,9 +443,20 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
     bounded repo-map delivery: the OpenCode process gets
     `OZAGIA_REPO_MAP_TOKENS`, and the result and summary report the daemon's
     delivered/skipped counts. Without it no repo-map variable is passed and
-    the plugin's ordinary hint is unchanged."""
+    the plugin's ordinary hint is unchanged. `opencode_config` is a
+    caller-supplied OpenCode config whose provider-related keys (`provider`,
+    `providers`, `model`, `small_model`) are layered into the generated
+    harness config; `model` (from `--model`) stays authoritative, and any
+    other key, invalid JSON, or an unreadable file is an AgentError before
+    OpenCode starts. The user's global config is never read implicitly."""
     if repo_map_tokens is not None:
         repo_map_tokens = validate_repo_map_tokens(repo_map_tokens)
+    provider_config = (load_provider_config(opencode_config)
+                       if opencode_config is not None else None)
+    if provider_config is not None and model is not None:
+        # --model wins: do not leave a conflicting model in the TUI config,
+        # and `opencode run` gets -m instead.
+        provider_config.pop("model", None)
     exe = find_opencode(opencode)
     progress = progress if progress is not None else NULL_PROGRESS
     if mcp_mode is not None and mcp_mode not in MCP_MODES:
@@ -407,6 +508,7 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
         res["exclude"] = git_exclude(work)
         config = write_opencode_config(
             log_dir / "opencode_config.json", model=model if interactive else None,
+            provider_config=provider_config,
             mcp=(mcp_server_entry(work, mcp_mode, tool_python=tool_python)
                  if mcp_mode else None))
         session = GraphSession(work, tool_python=tool_python, run_python=run_python,
@@ -482,13 +584,15 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
                     str(work)]
             ran = _run_tui(argv, cwd=work, env=env, timeout_s=timeout_s)
         else:
-            argv = [exe, *RUN_ARGV, *(["-m", model] if model else []), *extra_args, prompt]
+            # No prompt argument: `opencode run` reads the message from stdin.
+            argv = [exe, *RUN_ARGV, *(["-m", model] if model else []), *extra_args]
             stdout_p = log_dir / "opencode.stdout.jsonl"
             stderr_p = log_dir / "opencode.stderr.txt"
-            with stdout_p.open("w", encoding="utf-8") as so, \
+            with _prompt_stdin(prompt) as prompt_in, \
+                    stdout_p.open("w", encoding="utf-8") as so, \
                     stderr_p.open("w", encoding="utf-8") as se:
                 ran = run_group(argv, cwd=work, env=env, timeout_s=timeout_s,
-                                stdout=so, stderr=se)
+                                stdout=so, stderr=se, stdin=prompt_in)
             parsed = ea._parse_opencode_events(
                 stdout_p.read_text(encoding="utf-8", errors="replace"))
             transcript = log_dir / "transcript.txt"
@@ -508,8 +612,8 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
                 plugin.uninstall(work)
 
 
-__all__ = ["AgentError", "EXCLUDE_PATTERNS", "REPO_MAP_DEFAULT_TOKENS",
-           "REPO_MAP_ENV", "REPO_MAP_MAX_TOKENS", "REPO_MAP_MIN_TOKENS",
-           "RUN_ARGV", "TUI_ARGV", "find_opencode", "git_exclude",
-           "git_unexclude", "run_agent", "validate_repo_map_tokens",
-           "write_opencode_config"]
+__all__ = ["AgentError", "EXCLUDE_PATTERNS", "OPENCODE_CONFIG_KEYS",
+           "REPO_MAP_DEFAULT_TOKENS", "REPO_MAP_ENV", "REPO_MAP_MAX_TOKENS",
+           "REPO_MAP_MIN_TOKENS", "RUN_ARGV", "TUI_ARGV", "find_opencode",
+           "git_exclude", "git_unexclude", "load_provider_config", "run_agent",
+           "validate_repo_map_tokens", "write_opencode_config"]

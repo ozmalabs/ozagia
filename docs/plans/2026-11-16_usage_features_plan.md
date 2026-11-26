@@ -4,6 +4,24 @@ Date: 16 Nov 2026. Source: `2026-11-16_usage_findings.md` (the 16 ranked
 features). This plan turns that list into workstreams that agents can run in
 parallel, in waves, with a merge gate between waves.
 
+Status: Waves 1–4 implemented in large part, verified 2026-11-24. W1–W11 landed
+in `integrations/hookcore.py`, `integrations/codex/`, `integrations/kiro/`, the
+`intent/` modules (read ledger, compound shell, structured data, patch
+recovery, affected tests, lint, path resolution and ownership),
+`daemon/jobs.py` and their focused tests (`tests/test_codex_hooks.py`,
+`tests/test_kiro_hooks.py`, `tests/test_read_ledger.py`,
+`tests/test_intent_compound.py`, `tests/test_structured.py`,
+`tests/test_daemon_jobs.py`, `tests/test_affected_tests.py`,
+`tests/test_edit_lint.py`, `tests/test_paths_owners.py`). W12–W15 landed as
+`intent/replace.py` (`tests/test_replace.py`), `core/ops_graph.py`
+(`tests/test_ops_graph.py`), research user positions
+(`tests/test_research_positions.py`) and fetch fallback
+(`tests/test_research_fetch_fallback.py`). What remains is verification, not a
+missing wave: no post-wave live comparison of tokens, tool calls or wall time
+has been run, so the savings in the findings document are still unverified;
+Codex and Kiro hooks are implemented but untested against a live host. The wave
+specifications below are the original plan text.
+
 ## Facts the plan depends on
 
 - **Codex 0.169 has command hooks** (docs: learn.chatgpt.com/docs/hooks).

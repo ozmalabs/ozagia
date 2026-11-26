@@ -28,6 +28,12 @@ def _advisory(*, ecosystem="python", package="Requests", versions=None,
             "affected_versions": versions or ["2.31.0"], **extra}
 
 
+def _range_advisory(events, *, ecosystem="python", package="demo",
+                    identifier="OSV-PY-1", **extra):
+    return {"id": identifier, "ecosystem": ecosystem, "package": package,
+            "affected_ranges": [{"events": events}], **extra}
+
+
 def test_exact_local_advisory_match_uses_pinned_inventory_and_hashes_source():
     inventory = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
                                 "packages": [{"name": "requests",
@@ -184,8 +190,190 @@ def test_osv_semver_range_supports_go_prefix_and_open_ended_ranges():
     assert result["findings"][0]["version"] == "1.3.0"
 
 
+def test_pep440_introduced_fixed_range_excludes_the_fixed_version():
+    inventory = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                                "packages": [
+                                    {"name": "demo", "version": version}
+                                    for version in ("2.30.0", "2.31.0",
+                                                    "2.31.9", "2.32.0",
+                                                    "2.32.0.post1", "3.0.0")]}]}
+    advisory = _range_advisory([
+        {"introduced": "2.31.0"}, {"fixed": "2.32.0"}])
+
+    result = match_local_advisories(inventory, _advisories(advisory))
+
+    assert {row["version"] for row in result["findings"]} == {
+        "2.31.0", "2.31.9"}
+    assert all(row["type"] == "local_advisory_pep440_range_match"
+               for row in result["findings"])
+
+
+def test_pep440_last_affected_is_inclusive_and_pre_releases_sort_first():
+    inventory = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                                "packages": [
+                                    {"name": "demo", "version": version}
+                                    for version in (
+                                        "0.9", "1.0.dev0", "1.0a1", "1.0",
+                                        "1.0.post0", "1.1.0rc1", "1.1.0",
+                                        "1.1.0.post1", "1.1.1")]}]}
+    advisory = _range_advisory([
+        {"introduced": "1.0"}, {"last_affected": "1.1.0"}])
+
+    result = match_local_advisories(inventory, _advisories(advisory))
+
+    assert {row["version"] for row in result["findings"]} == {
+        "1.0", "1.0.post0", "1.1.0rc1", "1.1.0"}
+
+
+def test_pep440_epoch_dominates_the_release_segment():
+    inventory = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                                "packages": [
+                                    {"name": "demo", "version": version}
+                                    for version in (
+                                        "0.5", "1!0.1", "1!0.2", "2.0",
+                                        "1!1.0")]}]}
+    advisory = _range_advisory([
+        {"introduced": "1!0.1"}, {"fixed": "1!1.0"}])
+
+    result = match_local_advisories(inventory, _advisories(advisory))
+
+    assert {row["version"] for row in result["findings"]} == {
+        "1!0.1", "1!0.2"}
+
+
+def test_pep440_pre_post_dev_and_local_order_around_a_public_boundary():
+    inventory = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                                "packages": [
+                                    {"name": "demo", "version": version}
+                                    for version in (
+                                        "1.0.dev0", "1.0a1", "1.0",
+                                        "1.0+local", "1.0.post0.dev0",
+                                        "1.0.post0", "1.0.post1", "1.1")]}]}
+    advisory = _range_advisory([
+        {"introduced": "1.0"}, {"fixed": "1.0.post1"}])
+
+    result = match_local_advisories(inventory, _advisories(advisory))
+
+    assert {row["version"] for row in result["findings"]} == {
+        "1.0", "1.0+local", "1.0.post0.dev0", "1.0.post0"}
+
+
+def test_pep440_local_segments_sort_alphabetic_before_numeric():
+    inventory = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                                "packages": [
+                                    {"name": "demo", "version": version}
+                                    for version in (
+                                        "1.0", "1.0+abc", "1.0+abc.1",
+                                        "1.0+1", "1.0+1.0", "1.1")]}]}
+    advisory = _range_advisory([
+        {"introduced": "1.0"}, {"fixed": "1.0+1"}])
+
+    result = match_local_advisories(inventory, _advisories(advisory))
+
+    assert {row["version"] for row in result["findings"]} == {
+        "1.0", "1.0+abc", "1.0+abc.1"}
+
+
+def test_pep440_introduced_zero_starts_before_dev_and_pre_releases():
+    inventory = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                                "packages": [
+                                    {"name": "demo", "version": version}
+                                    for version in (
+                                        "0.dev0", "0a1", "0", "0.post1",
+                                        "1.0")]}]}
+    advisory = _range_advisory([
+        {"introduced": "0"}, {"fixed": "1.0"}])
+
+    result = match_local_advisories(inventory, _advisories(advisory))
+
+    assert {row["version"] for row in result["findings"]} == {
+        "0.dev0", "0a1", "0", "0.post1"}
+
+
+def test_pep440_range_accepts_ecosystem_type_and_refuses_git():
+    inventory = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                                "packages": [{"name": "demo",
+                                              "version": "1.5"}]}]}
+    advisory = _range_advisory([{"introduced": "1.0"}, {"fixed": "2.0"}])
+    advisory["affected_ranges"][0]["type"] = "ECOSYSTEM"
+    assert len(match_local_advisories(
+        inventory, _advisories(advisory))["findings"]) == 1
+
+    advisory["affected_ranges"][0]["type"] = "GIT"
+    with pytest.raises(ValueError, match="SEMVER or ECOSYSTEM"):
+        match_local_advisories(inventory, _advisories(advisory))
+
+
+def test_pep440_uncomparable_version_is_unknown_not_a_match():
+    inventory = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                                "packages": [{"name": "demo",
+                                              "version": "1.0+bad local"}]}]}
+    advisory = _range_advisory([
+        {"introduced": "1.0"}, {"fixed": "2.0"}])
+
+    result = match_local_advisories(inventory, _advisories(advisory))
+
+    assert result["state"] == "no_exact_match_in_supplied_data"
+    assert result["findings"] == []
+    assert result["pinned_packages"] == 0
+    assert result["not_checked"]
+
+    malformed = _range_advisory([{"introduced": "1.0+bad local"}])
+    with pytest.raises(ValueError, match="PEP 440"):
+        match_local_advisories({"lockfiles": []}, _advisories(malformed))
+
+
+def test_python_exact_advisories_still_match_and_no_match_is_explicit():
+    advisory = _advisory(versions=["2.31.0"])
+    matching = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                               "packages": [{"name": "requests",
+                                             "version": "2.31.0"}]}]}
+    assert len(match_local_advisories(
+        matching, _advisories(advisory))["findings"]) == 1
+
+    other = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                            "packages": [{"name": "requests",
+                                          "version": "2.32.0"}]}]}
+    result = match_local_advisories(other, _advisories(advisory))
+    assert result["state"] == "no_exact_match_in_supplied_data"
+    assert result["findings"] == []
+    assert "no-match" in result["not_checked"]
+
+
+def test_python_direct_source_does_not_match_a_registry_range_advisory():
+    inventory = {"lockfiles": [{"file": "uv.lock", "ecosystem": "python",
+                                "packages": [
+                                    {"name": "registry-demo", "version": "1.5",
+                                     "provenance": "pypi"},
+                                    {"name": "fork-demo", "version": "1.5",
+                                     "provenance": "git"},
+                                    {"name": "path-demo", "version": "1.5",
+                                     "provenance": "workspace-or-path"}]}]}
+    advisories = _advisories(
+        _range_advisory([{"introduced": "1.0"}, {"fixed": "2.0"}],
+                        package="registry-demo"),)
+    for index, package in enumerate(("fork-demo", "path-demo"), start=2):
+        advisories["advisories"].append(_range_advisory(
+            [{"introduced": "1.0"}, {"fixed": "2.0"}], package=package,
+            identifier=f"OSV-PY-{index}"))
+
+    result = match_local_advisories(inventory, advisories)
+
+    assert {row["dependency"] for row in result["findings"]} == {
+        "registry-demo"}
+    assert "2 Python pins were excluded" in result["not_checked"]
+
+
 @pytest.mark.parametrize(("ecosystem", "events"), [
-    ("python", [{"introduced": "1.0.0"}]),
+    ("ruby", [{"introduced": "1.0.0"}]),
+    ("python", [{"fixed": "1.0.0"}]),
+    ("python", [{"introduced": "1.0.0"}, {"fixed": "0.9.0"}]),
+    ("python", [{"introduced": "1.0.0"}, {"fixed": "1.0.0"}]),
+    ("python", [{"introduced": "1.0.0"}, {"fixed": "2.0.0"},
+                {"introduced": "1.5.0"}, {"fixed": "3.0.0"}]),
+    ("python", [{"introduced": "1.0.0"}, {"last_affected": "2.0.0"},
+                {"fixed": "3.0.0"}]),
+    ("python", [{"introduced": "1.0.*"}]),
     ("node", [{"fixed": "1.2.0"}]),
     ("node", [{"introduced": "1.0.0"}, {"fixed": "1.1.0"},
               {"fixed": "1.2.0"}]),

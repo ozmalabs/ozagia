@@ -1,8 +1,15 @@
 # OpenCode intent-oriented graph retrieval — 2026-11-17
 
-Status: partial implementation in progress, 2026-11-17. Stages A and C are
-implemented; stage B has permission-aware guidance only; stage E has paired
-offline classifier evaluation. Shell intent linking beyond definitions remains.
+Status: partial implementation, verified 2026-11-24. Stages A, B and C are
+implemented: grep definition enrichment in `intent/structural.py`; bounded
+prompt routing in `core/structural_intent.py` and `core/proactive_context.py`
+with the permission boundary described below; and the native
+`ozagia_structure` tool plus daemon `structural` request. Stage D is partial:
+BRE definition search is scoped to matched files, but caller/test/module shell
+intent linking and `sed` correlation remain. Stage E is an initial paired
+offline classifier check, not an end-to-end usefulness result. Tests:
+`tests/test_intent.py`, `tests/test_structural_intent_routing.py`,
+`tests/test_intent_live_hints.py` and `tests/test_opencode_context_hook.py`.
 The OpenCode plugin does not invoke a model itself. It may append bounded,
 untrusted graph context to a tool result or prompt through the existing daemon.
 

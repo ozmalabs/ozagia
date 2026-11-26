@@ -178,6 +178,14 @@ class DaemonClient:
     def stats(self) -> dict[str, Any]:
         return self.request("stats")
 
+    def job_list(self) -> dict[str, Any]:
+        """List jobs known to the daemon; never starts or attaches to one."""
+        return self.request("job_list")
+
+    def secret_providers(self) -> dict[str, Any]:
+        """Secret-provider availability; resolves no value."""
+        return self.request("secrets", action="providers")
+
     def shutdown(self) -> dict[str, Any]:
         return self.request("shutdown")
 

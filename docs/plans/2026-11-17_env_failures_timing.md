@@ -1,6 +1,15 @@
 # Environments, deterministic failure classes and per-component timing
 
-Date: 17 Nov 2026. Source: the live Ocelot eval
+Date: 17 Nov 2026. Status: implemented, verified 2026-11-24. Project environment
+discovery is in `core/environments.py`, failure classes in `core/failures.py`
+and component timings in `src/ozagia/eval/timing.py`, with
+`tests/test_environments.py`, `tests/test_failures.py` and
+`tests/test_eval_timing.py`; usage docs are [`docs/environments.md`](../environments.md)
+and [`docs/eval_agent.md`](../eval_agent.md). The W23 replay and validation on
+the Ocelot tasks was not re-run for this audit, and no live model call is
+claimed.
+
+Source: the live Ocelot eval
 (`docs/results/ocelot_live_eval_2026-11-17.md`). Four tasks "failed" because
 the harness ran their checks with ozagia's interpreter, which lacks `numpy`;
 the agents had fixed them, using a third interpreter that has it. Rerun with

@@ -222,6 +222,32 @@ end` clears that session's captures, and expired entries are pruned on access.
 daemon socket can call these actions; protect the socket and state directory
 like the rest of `.ozagia/`.
 
+### OpenCode prompt admission
+
+The OpenCode plugin registers `ctx.session.hook("prompt", ...)` at setup when
+the host exposes it (registration failure is ignored). The hook runs once per
+user prompt, before model dispatch:
+
+1. it requires a string `event.prompt.text` and `event.sessionID`;
+2. it sends `{op: "secrets", action: "capture_text", text, harness,
+   session}` over the ordinary bounded local socket with a 2 s timeout;
+3. when the reply is `ok`, has a string `text`, and contains captured
+   `secrets` entries (`start`, `end`, `ref`), it replaces `prompt.text` with
+   the rewritten text;
+4. it remaps every mention in `prompt.files`, `prompt.agents` and
+   `prompt.skills`, sorted by start: mentions after a replacement shift by the
+   length delta, and a mention overlapping a replaced span is removed so no
+   invalid offset remains. All other prompt fields, `metadata`, `delivery` and
+   the session/message ids are preserved.
+
+An empty capture (`count`/`secrets` empty) leaves the prompt exactly as it was.
+No daemon, a timeout, an error response, a malformed mention list or any other
+failure is fail-open: the prompt passes through unchanged and the hook does not
+throw. The prompt text is never logged, and the only secret-shaped content the
+hook can add is a reference returned by the daemon. This path is verified
+against the plugin host fixture and the daemon protocol, not a live OpenCode
+session; the native dialog/composer pill and HTTP fallback remain future work.
+
 ### Redaction
 
 `SecretBroker.redactor` (a `Redactor`) keeps at most 64 resolved values and
@@ -293,13 +319,74 @@ rewritten = detect_text(
   reference. The store's `repr` and `describe()` expose counts and limits, not
   tokens or values.
 
-The daemon/plugin wiring is the current slice: the daemon owns the store, the
-`secrets` op captures text and values over its local socket, jobs resolve
-session references only for their own harness/session, and a session end
-clears its captures. The CLI's `capture`/`capture-text` commands read from
-stdin and call the daemon; they never take a value in argv. No in-memory store
-is persisted by a CLI process, and a capture made by one session cannot be
-resolved by another.
+The daemon/plugin wiring includes prompt admission: the daemon owns the store,
+the `secrets` op captures text and values over its local socket, the OpenCode
+`prompt` hook rewrites a pasted value to a session reference before dispatch,
+jobs resolve session references only for their own harness/session, and a
+session end clears its captures and request records. The CLI's
+`capture`/`capture-text` commands read from stdin and call the daemon; they
+never take a value in argv. No in-memory store is persisted by a CLI process,
+and a capture made by one session cannot be resolved by another.
+
+### Model-initiated secret requests
+
+A model can ask for a named secret without receiving its value. This slice is
+host-agnostic: the OpenCode plugin exposes `ozagia_secret_request` when the
+host provides the native tool registry and permission API (the same path as
+`ozagia_structure`), and any tool or person can create the same request with
+the CLI. MCP is unchanged because an MCP server does not learn the harness
+session id; accepting one from model arguments would let a caller claim
+another session.
+
+```json
+{"action": "request", "harness": "opencode", "session": "ses_123",
+ "label": "OpenAI API key", "purpose": "the task calls the OpenAI API",
+ "target": "session", "ttl_s": 300}
+```
+
+The daemon records metadata only and returns an opaque `request_id`, `state`
+and `expires`. A request has no value, prompt text or source path. The model
+then tells the user to run the trusted local CLI:
+
+```bash
+ozagia-secrets fulfill req_<handle> --harness opencode --session ses_123 --root .
+```
+
+`fulfill` reads one value with `getpass` (or `--stdin` for tests and
+automation), sends it to the local daemon, captures it in the session store,
+and prints only the reference, fingerprint and expiry. The next status call
+for the same request returns `fulfilled` with `ref` and `fingerprint`; the
+model receives those and never the value.
+
+Protocol actions (all require matching `harness`/`session` for
+`request_status`, `request_fulfill` and `request_decline`):
+
+| Action | Input | Result |
+| --- | --- | --- |
+| `request` | `label`, optional `purpose`, `target: "session"`, `ttl_s` | pending record: `request_id`, `state`, `expires` |
+| `request_list` | none | that session's records, newest last |
+| `request_status` | `request_id` | state; `ref`/`fingerprint` only when fulfilled |
+| `request_fulfill` | `request_id`, `value` | fulfilled record: `ref`, `fingerprint`, expiry |
+| `request_decline` | `request_id` | declined record, no ref |
+
+Lifecycle rules:
+
+- pending requests expire after 300 s by default, capped at 600 s; at most 16
+  are pending per session and 64 records are kept (terminal ones evicted
+  first). A duplicate `request` with the same label, purpose and target
+  returns the existing record instead of creating another.
+- `fulfill` is idempotent: fulfilling an already fulfilled request returns the
+  same reference and ignores the new value. Fulfilling or declining a
+  declined/expired request is `request_closed`.
+- A cross-session `request_status`, `request_fulfill` or `request_decline` is
+  `request_mismatch` and returns no reference. A request id is otherwise
+  unguessable and never derived from the value.
+- Declined and expired records carry no reference. If a fulfilled capture is
+  forgotten, expires or the session ends, later status marks the request
+  expired and drops its reference; the fingerprint remains for rotation.
+- A plugin tool without session context returns a typed refusal
+  (`session_unavailable`); a daemon refusal is `refused` and an unreachable
+  daemon is `unavailable`. None includes a value.
 
 ### Pasted-text detection
 
@@ -345,6 +432,16 @@ PYTHONPATH=src python -m ozagia.secrets_cli check secret://session/... \
   --session ses_123
 PYTHONPATH=src python -m ozagia.secrets_cli forget secret://session/... \
   --session ses_123
+
+# Model-initiated requests: no value is read or printed by `request`.
+PYTHONPATH=src python -m ozagia.secrets_cli request --label "OpenAI API key" \
+  --purpose "the task calls the OpenAI API" --harness opencode --session ses_123
+PYTHONPATH=src python -m ozagia.secrets_cli requests --harness opencode \
+  --session ses_123
+PYTHONPATH=src python -m ozagia.secrets_cli fulfill req_<handle> \
+  --harness opencode --session ses_123
+PYTHONPATH=src python -m ozagia.secrets_cli decline req_<handle> \
+  --harness opencode --session ses_123
 ```
 
 `providers` prints names, whether they are enabled/available/ready, and their
@@ -364,6 +461,15 @@ daemon answers, `capture-text` **fails closed**: it prints the text with
 detected secrets replaced by `[REDACTED]`, writes the daemon error to stderr,
 and exits `2`; no value is captured. No command prints a resolved value and
 there is no `resolve`/`show` command.
+
+`request` creates a pending request and prints its id, state, expiry and the
+`fulfill` command; it never accepts or prints a value. `requests` lists the
+session's records (pending and terminal), and `decline` records a terminal
+decline. `fulfill` prompts with `getpass`, or reads one value from stdin with
+`--stdin` for tests and automation, and prints only the reference,
+fingerprint and expiry. It exits `0` on success, `1` for a declined, expired,
+closed or cross-session request, and `2` when the daemon is unavailable or the
+input is empty. A value is never accepted in argv; there is no reveal command.
 
 ## Rotation and revocation
 
@@ -433,10 +539,25 @@ there is no `resolve`/`show` command.
 - A clean `check` means the provider is reachable, not that the credential is
   valid, unexpired or authorized. Missing/denied statuses are the safe
   outcomes.
-- No live GUI or host plugin is implemented here: the hook path is the daemon
-  `secrets capture_text` op, exercised by tests and the CLI. There is no
-  external keychain integration beyond the optional `keyring` provider, and no
-  guarantee about a GUI keychain's lock state.
+- The daemon accepts `capture`, `request_fulfill` and `request_decline` from a
+  same-user local client; it cannot verify which process sent the value. The
+  trusted-CLI rule is a client convention, not a cryptographic boundary.
+  Any process that can talk to the daemon socket already shares the daemon
+  user's privileges. The model-facing plugin tool cannot send a value, and the
+  MCP `dev_secrets` tool stays read-only.
+- The model-initiated request slice has a metadata-only handle and a CLI
+  prompt. The OpenCode plugin also registers a prompt-admission hook that
+  rewrites a pasted value to a session reference and remaps mentions; it is
+  verified against the plugin host fixture and the daemon protocol, not a live
+  OpenCode session. It does **not** yet include the native secret dialog,
+  composer pill, the HTTP provider-request fallback, keychain/`pass`/`op`
+  persistence UI, or live-host verification of prompt-storage order. A user
+  who pastes a value into chat still relies on the host hook and the
+  best-effort detector described above.
+- No live GUI is implemented here: the prompt hook and the CLI share the
+  daemon `secrets capture_text` op, exercised by tests and the host fixture.
+  There is no external keychain integration beyond the optional `keyring`
+  provider, and no guarantee about a GUI keychain's lock state.
 
 ## Tests
 
@@ -444,12 +565,15 @@ there is no `resolve`/`show` command.
 PYTHONPATH=src python -m pytest -q tests/test_secrets.py \
   tests/test_secrets_cli.py tests/test_security.py tests/test_config.py \
   tests/test_runtime.py tests/test_daemon.py tests/test_daemon_jobs.py \
-  tests/test_mcp_server.py
+  tests/test_mcp_server.py tests/test_opencode_plugin.py
 .venv/bin/ruff check src tests
 ```
 
 The tests use temporary directories and injected fakes for keyring, `pass`,
 `op` and the runtime process factory. Job tests print a fake value from a real
 child and assert that the raw log file, reads and responses do not contain it.
-No test uses a real secret store, the network, `pass`, `op` or the keyring
-package.
+The OpenCode plugin tests drive the prompt hook against a fake daemon: a pasted
+canary disappears from the returned model-facing event, mentions before/after
+shift and an overlapping mention is removed, and the only capture request is
+`capture_text` with text/harness/session. No test uses a real secret store, the
+network, `pass`, `op` or the keyring package.

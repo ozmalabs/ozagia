@@ -86,7 +86,7 @@ already carry worker fields. The adapter fills:
 | `missing_test`, `missing_tests`, `test_policy` | `evidence` |
 | `breaking_change`, `contract_mismatch` | `claim_structure` |
 | `stale_reference`, `orphaned_files`, `stale_history` | `provenance` |
-| `scope_creep`, `weak_boundaries` | `scope` |
+| `scope_creep`, `non_breaking_change`, `weak_boundaries` | `scope` |
 | `unhandled_error`, `security_sensitive`, `performance_risk`, `unknown`, remaining scan categories | `other` |
 
 Unknown types fall back to the research adapter's

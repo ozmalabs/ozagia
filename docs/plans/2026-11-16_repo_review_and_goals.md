@@ -1,6 +1,14 @@
 # Whole-repo review and graph-addressed goals
 
-Date: 16 Nov 2026. Two features requested after wave 4:
+Date: 16 Nov 2026. Status: implemented, verified 2026-11-24.
+`core/repo_review.py`/`ozagia review-repo` and `core/goals.py`/`ozagia goal`
+are on `main` with their MCP/CLI surfaces; tests are
+`tests/test_repo_review.py`, `tests/test_goals.py` and
+`tests/test_review_goals.py`, docs are [`docs/repo_review.md`](../repo_review.md)
+and [`docs/goals.md`](../goals.md). The design below is the original
+specification; live harness runs for goals remain unverified.
+
+Two features requested after wave 4:
 
 1. A function that reviews a whole repository: architecture, tests, health,
    risks and operations, not just a diff.

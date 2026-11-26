@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "corpus_id": "synthetic:deep-review-corpus-dry-run-v1",
+  "description": "Synthetic dry-run corpus for pipeline tests only. It is not a realistic repository, its labels are not human labels, and its scores are not quality evidence.",
+  "created": "2026-11-24",
+  "status": "synthetic_test_fixture",
+  "evidence_class": "synthetic_regression",
+  "targets": {
+    "repositories": 1,
+    "change_ranges": 2,
+    "holdout_repositories": 0
+  },
+  "review_policy": {
+    "reviewers": 2,
+    "adjudicator": true,
+    "independent_before_findings": true,
+    "reviewers_blind_to_ozagia_findings": true,
+    "require_sealed_label_files": true,
+    "require_source_file_digests": true,
+    "separate_from_synthetic_fixtures": true,
+    "notes": "Synthetic fixture; all reviewer identities are fictional test data."
+  },
+  "repositories": [
+    {
+      "id": "fixture-service",
+      "repo": "example/fixture-service",
+      "remote": "https://github.com/example/fixture-service",
+      "license": "MIT",
+      "license_status": "synthetic_test_fixture",
+      "acquisition_status": "candidate_unacquired",
+      "pinned_commit": null,
+      "tree_sha256": null,
+      "archive_sha256": null,
+      "verified_at": null,
+      "languages": [
+        "Python"
+      ],
+      "language_mix_status": "synthetic_test_fixture",
+      "size_class": "small",
+      "size_status": "synthetic_test_fixture",
+      "reason": "Exercises the corpus scoring pipeline with hand-written synthetic findings; not a real repository.",
+      "local_checkout": "checkout/fixture-service",
+      "holdout": false
+    }
+  ],
+  "change_ranges": [
+    {
+      "id": "range-complete",
+      "repository_id": "fixture-service",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "security",
+      "review_focus": [
+        "security",
+        "performance"
+      ],
+      "source_hint": "synthetic fixture, not an upstream commit",
+      "reason": "Complete-scope scoring fixture.",
+      "holdout": false
+    },
+    {
+      "id": "range-partial",
+      "repository_id": "fixture-service",
+      "status": "slot_unassigned",
+      "base": null,
+      "head": null,
+      "theme": "correctness",
+      "review_focus": [
+        "change",
+        "performance"
+      ],
+      "source_hint": "synthetic fixture, not an upstream commit",
+      "reason": "Partial-scope scoring fixture.",
+      "holdout": false
+    }
+  ]
+}

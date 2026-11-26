@@ -234,6 +234,7 @@ def test_agent_maps_options_to_run_agent(repo, tmp_path, monkeypatch):
     code = cli.main(["agent", "--root", str(repo), "--prompt-file", str(prompt),
                      "-m", "vllm/x", "--clone", "--base", "HEAD~0", "--keep-plugin",
                      "--timeout", "30", "--python", "/usr/bin/python3",
+                     "--opencode-config", str(tmp_path / "provider.json"),
                      "--", "--agent", "build"])
     assert code == 3
     assert seen["workdir"] == repo
@@ -241,6 +242,7 @@ def test_agent_maps_options_to_run_agent(repo, tmp_path, monkeypatch):
     assert seen["model"] == "vllm/x" and seen["clone"] is True and seen["base"] == "HEAD~0"
     assert seen["keep_plugin"] is True and seen["timeout_s"] == 30.0
     assert seen["run_python"] == "/usr/bin/python3"
+    assert seen["opencode_config"] == str(tmp_path / "provider.json")
     assert seen["extra_args"] == ["--agent", "build"]
     # Launch feedback goes to the (captured, not a terminal) stderr sink.
     assert isinstance(seen["progress"], Spinner)
@@ -292,6 +294,27 @@ def test_agent_help_describes_opt_in_repo_map(capsys):
     assert "bounded, task-ranked repository map in the first model request" in text
     assert "off by default" in text
     assert "200..8000" in text and "default: 1500" in text
+
+
+def test_agent_help_describes_the_provider_config_boundary(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["agent", "--help"])
+    assert exc.value.code == 0
+    text = " ".join(capsys.readouterr().out.split())
+    assert "--opencode-config PATH" in text
+    assert "provider, providers, model, small_model only" in text
+    assert "--model wins" in text
+    assert "never copied" in text and "global config is not read implicitly" in text
+
+
+def test_agent_rejects_an_unsupported_provider_config_before_launch(repo, tmp_path, capsys):
+    provider = tmp_path / "provider.json"
+    provider.write_text('{"provider": {"vllm": {}}, "mcp": {}}', encoding="utf-8")
+    assert cli.main(["agent", "--workdir", str(repo), "--prompt", "x",
+                     "--opencode-config", str(provider)]) == 2
+    err = capsys.readouterr().err
+    assert "unsupported key(s): mcp" in err
+    assert "provider-related keys" in err
 
 
 def test_agent_exit_codes(repo, monkeypatch, capsys):

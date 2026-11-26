@@ -1,0 +1,60 @@
+# Legacy project-model shapes from docs/settings.md, docs/runtime.md and
+# docs/relay.md. The migration must copy each named entry whole.
+[index]
+source_dirs = ["src"]
+test_dirs = ["tests"]
+
+[environments.dev]
+paths = ["envs/dev"]
+namespaces = ["dev"]
+account_alias = "development"
+region = "us-east-1"
+cluster = "dev-cluster"
+risk = "low"
+pipelines = ["deploy-dev"]
+
+[environments.staging]
+paths = ["envs/staging"]
+region = "us-west-2"
+
+[services.api]
+chart = "charts/api"
+values_globs = ["charts/api/values.*.yaml"]
+buildspec = "buildspec.yml"
+pipeline = "pipelines/api.yaml"
+namespace = "api"
+environment = "dev"
+paths = ["services/api"]
+
+[services.worker]
+chart = "charts/worker"
+environment = "staging"
+
+[relays.prod]
+specs = [
+  { kind = "local" },
+  { kind = "ssh", options = { host = "internal.example", port = 22, strict = true } },
+]
+allowed_kinds = ["local", "ssh"]
+max_timeout_s = 300.5
+command_allowlist = [["uptime"], ["kubectl", "get"]]
+max_output_bytes = 4096
+
+[runtime.services.api]
+command = ["python", "-m", "app"]
+workdir = "services/api"
+relay = "prod"
+mode = "background"
+description = "API service"
+env = { LOG_LEVEL = "info", API_TOKEN = "secret://env/API_TOKEN" }
+
+[runtime.services.migrate]
+command = ["python", "manage.py", "migrate"]
+workdir = "services/api"
+mode = "foreground"
+
+[runtime.tunnels.database]
+relay = "prod"
+target = "db.internal.example:5432"
+local_port = 0
+description = "Payments database"

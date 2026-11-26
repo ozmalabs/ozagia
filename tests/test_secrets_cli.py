@@ -298,3 +298,182 @@ def test_cli_list_forget_and_check_session_use_the_daemon(
     out = capsys.readouterr().out
     assert "available" in out and "secret://session/token" in out
     assert calls[-1]["fields"]["action"] == "check"
+
+
+def test_cli_request_creates_a_pending_handle_without_a_value(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[dict] = []
+    reply = {"ok": True, "request_id": "req_test-handle-1", "label": "OpenAI API key",
+             "purpose": "the task calls the API", "target": "session",
+             "state": "pending", "created": 1.0, "expires": 301.0,
+             "ref": None, "fingerprint": None, "storage": "memory-only"}
+    monkeypatch.setattr("ozagia.daemon.jobcli.request",
+                        _fake_request(calls, reply))
+    assert CLI.main([
+        "request", "--root", str(tmp_path), "--session", "s1",
+        "--harness", "opencode", "--label", "OpenAI API key",
+        "--purpose", "the task calls the API", "--ttl-s", "60",
+    ]) == 0
+    out, err = capsys.readouterr()
+    assert "req_test-handle-1" in out and "pending" in out
+    assert "ozagia-secrets fulfill req_test-handle-1" in out
+    assert "getpass" in out
+    assert "secret://" not in out
+    assert err == ""
+    fields = calls[0]["fields"]
+    assert fields["action"] == "request"
+    assert fields["label"] == "OpenAI API key"
+    assert fields["purpose"] == "the task calls the API"
+    assert fields["ttl_s"] == 60.0
+    assert fields["session"] == "s1" and fields["harness"] == "opencode"
+    assert "value" not in fields
+
+    assert CLI.main([
+        "request", "--root", str(tmp_path), "--label", "token", "--json",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["request_id"] == "req_test-handle-1"
+    assert payload["state"] == "pending"
+
+
+def test_cli_requests_lists_states_without_values(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[dict] = []
+    reply = {"ok": True, "count": 2, "storage": "memory-only", "requests": [
+        {"request_id": "req_one", "label": "api", "purpose": "call",
+         "state": "fulfilled", "created": 1.0, "expires": 2.0,
+         "ref": "secret://session/token", "fingerprint": "sha256:abc"},
+        {"request_id": "req_two", "label": "other", "purpose": None,
+         "state": "declined", "created": 3.0, "expires": 4.0,
+         "ref": None, "fingerprint": None},
+    ]}
+    monkeypatch.setattr("ozagia.daemon.jobcli.request",
+                        _fake_request(calls, reply))
+    assert CLI.main(["requests", "--root", str(tmp_path),
+                     "--session", "s1"]) == 0
+    out = capsys.readouterr().out
+    assert "req_one" in out and "secret://session/token" in out
+    assert "req_two" in out and "declined" in out
+    assert calls[0]["fields"]["action"] == "request_list"
+    assert calls[0]["fields"]["session"] == "s1"
+
+    assert CLI.main(["requests", "--root", str(tmp_path),
+                     "--session", "s1", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["count"] == 2
+
+
+def test_cli_fulfill_reads_stdin_and_prints_only_the_ref(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    value = "fulfill-canary-1234"
+    calls: list[dict] = []
+    reply = {"ok": True, "request_id": "req_test-handle-1",
+             "state": "fulfilled", "ref": "secret://session/token",
+             "fingerprint": "sha256:abc", "created": 1.0, "expires": 2.0,
+             "label": "api token", "purpose": "call", "target": "session"}
+    monkeypatch.setattr("ozagia.daemon.jobcli.request",
+                        _fake_request(calls, reply))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(value + "\n"))
+    assert CLI.main([
+        "fulfill", "req_test-handle-1", "--root", str(tmp_path),
+        "--session", "s1", "--harness", "opencode", "--stdin", "--ttl", "90",
+    ]) == 0
+    out, err = capsys.readouterr()
+    assert value not in out and value not in err
+    assert "secret://session/token" in out
+    assert "sha256:abc" in out and "expires: 2.0" in out
+    assert "label:" not in out
+    fields = calls[0]["fields"]
+    assert fields["action"] == "request_fulfill"
+    assert fields["request_id"] == "req_test-handle-1"
+    assert fields["value"] == value
+    assert fields["ttl_s"] == 90.0
+    assert fields["session"] == "s1" and fields["harness"] == "opencode"
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    assert CLI.main(["fulfill", "req_test-handle-1", "--root", str(tmp_path),
+                     "--stdin"]) == 2
+    assert "non-empty" in capsys.readouterr().err
+
+
+def test_cli_fulfill_uses_getpass_and_never_echoes_the_value(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    value = "getpass-canary-1234"
+    calls: list[dict] = []
+    reply = {"ok": True, "request_id": "req_test-handle-1",
+             "state": "fulfilled", "ref": "secret://session/token2",
+             "fingerprint": "sha256:def", "created": 1.0, "expires": 2.0}
+    monkeypatch.setattr("ozagia.daemon.jobcli.request",
+                        _fake_request(calls, reply))
+    prompts: list[str] = []
+    monkeypatch.setattr(CLI.getpass, "getpass",
+                        lambda prompt="": prompts.append(prompt) or value)
+    assert CLI.main(["fulfill", "req_test-handle-1", "--root",
+                     str(tmp_path)]) == 0
+    out, err = capsys.readouterr()
+    assert value not in out and value not in err
+    assert "secret://session/token2" in out
+    assert prompts and prompts[0].startswith("secret value")
+    assert calls[0]["fields"]["value"] == value
+    assert "value" not in json.dumps(reply)
+
+
+def test_cli_decline_and_request_errors_have_consistent_exit_codes(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str]) -> None:
+    calls: list[dict] = []
+    reply = {"ok": True, "request_id": "req_test-handle-1",
+             "state": "declined", "ref": None, "fingerprint": None}
+    monkeypatch.setattr("ozagia.daemon.jobcli.request",
+                        _fake_request(calls, reply))
+    assert CLI.main(["decline", "req_test-handle-1", "--root",
+                     str(tmp_path), "--session", "s1"]) == 0
+    out = capsys.readouterr().out
+    assert "declined: req_test-handle-1" in out
+    assert calls[0]["fields"]["action"] == "request_decline"
+
+    def refused(root, op, fields, **kwargs):
+        calls.append({"root": Path(root), "op": op, "fields": dict(fields)})
+        return {"ok": False, "code": "request_mismatch",
+                "error": "secret request belongs to another session"}
+
+    monkeypatch.setattr("ozagia.daemon.jobcli.request", refused)
+    assert CLI.main(["decline", "req_test-handle-1", "--root",
+                     str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "another session" in err
+
+    # The real client turns ``ok: false`` into JobUnavailable; its code and
+    # refusal flag must still map to exit 1, not "daemon unavailable".
+    def refused_exception(root, op, fields, **kwargs):
+        raise JobUnavailable("secret request belongs to another session",
+                             code="request_mismatch", refused=True)
+
+    monkeypatch.setattr("ozagia.daemon.jobcli.request", refused_exception)
+    assert CLI.main(["decline", "req_test-handle-1", "--root",
+                     str(tmp_path)]) == 1
+    assert "another session" in capsys.readouterr().err
+
+    def unavailable(*args, **kwargs):
+        raise JobUnavailable("no daemon answers")
+
+    monkeypatch.setattr("ozagia.daemon.jobcli.request", unavailable)
+    assert CLI.main(["request", "--root", str(tmp_path),
+                     "--label", "token"]) == 2
+    assert "no daemon" in capsys.readouterr().err
+
+
+def test_cli_request_commands_never_take_a_value_in_argv() -> None:
+    parser = CLI.build_parser()
+    assert parser.parse_args(["request", "--label", "token"]).command == (
+        "request")
+    assert parser.parse_args(["requests"]).command == "requests"
+    assert parser.parse_args(["fulfill", "req_abcdefgh"]).command == "fulfill"
+    assert parser.parse_args(["decline", "req_abcdefgh"]).command == "decline"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["fulfill", "req_abcdefgh", "a-value-in-argv"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["request", "--label", "token", "a-value-in-argv"])

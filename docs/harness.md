@@ -32,8 +32,9 @@ ozagia agent                                                       # the TUI
 | option | meaning |
 |---|---|
 | `--workdir W` / `--root W` | the repository (default as above) |
-| `--prompt TEXT`, `--prompt-file F` | run non-interactively; without either, the TUI |
+| `--prompt TEXT`, `--prompt-file F` | run non-interactively; the prompt is written to OpenCode's stdin, never argv; without either, the TUI |
 | `--model M`, `-m M` | `provider/model`. `opencode run` gets `-m`; the TUI has no model flag, so it goes into the generated config as `model` |
+| `--opencode-config PATH` | layer provider settings from an OpenCode JSON config into the generated harness config. Allowlist: `provider`, `providers`, `model`, `small_model` (`$schema` is allowed and ignored). `--model` wins over a config `model`. The file's plugins, MCP servers, permissions, agents and tools are never copied; any other key, invalid JSON or unreadable file is an error before OpenCode starts. See [Local providers](#local-providers-vllm). |
 | `--clone [--base REV]` | run in an isolated clone at REV (default HEAD), kept afterwards |
 | `--keep-plugin` | leave `.opencode/plugins/ozagia.js` in the workdir |
 | `--timeout S` | kill the session after S seconds (exit 124) |
@@ -74,6 +75,9 @@ daemon failure).
    set a shell permission policy, so OpenCode applies the user's own approval
    rules. Ref-moving git commands are delegated to OpenCode's built-in shell;
    eval sessions keep their separate deny policy and the daemon's refusal.
+   `--opencode-config PATH` adds only the allowlisted provider keys from the
+   caller's file to this document (see below); the host/global config is not
+   read implicitly.
 7. OpenCode runs in the workdir with `OZAGIA_DAEMON_SOCK`, `PWD` (OpenCode
    takes its project directory from it) and `OPENCODE_CONFIG` added to this
    process's environment, and with `--python`, the python shim first on PATH.
@@ -85,9 +89,9 @@ daemon failure).
    The TUI also gets `OZAGIA_LAUNCH_STATUS`, the status file its sidebar
    polls.
    - With a prompt: `opencode run --standalone --format json --auto --archived
-     [-m M] [ARGS] <prompt>` in its own process group, stdin `/dev/null`,
-     stdout to `logs/opencode.stdout.jsonl`, stderr to
-     `logs/opencode.stderr.txt`, text parts to `logs/transcript.txt`.
+     [-m M] [ARGS]` in its own process group, the prompt on stdin, stdout to
+     `logs/opencode.stdout.jsonl`, stderr to `logs/opencode.stderr.txt`, text
+     parts to `logs/transcript.txt`.
    - Without: `opencode --standalone [ARGS] <workdir>` on the terminal.
 8. In `finally` (also on Ctrl-C and SIGTERM): the plugin and its exclude
    line are removed unless `--keep-plugin`, then the daemon is stopped.
@@ -97,6 +101,26 @@ daemon failure).
    preparation that has not reached the daemon is cancelled (its prep process
    is killed); the summary then says `graph: not ready (the session ended
    first)`.
+
+### Prompt transport and argv logging
+
+A non-interactive prompt is never an argument. `ozagia agent` writes it to
+`opencode run`'s stdin through an anonymous, mode-0600 temporary file (no
+pathname; it is closed after the session). `--prompt-file F` is read in the
+ozagia process, and only its contents go to stdin: the path is not passed to
+OpenCode either. This is deliberate. OpenCode writes its full argv to
+`~/.local/share/opencode/log/opencode.log` once, before its plugin hook runs,
+so a prompt or prompt-file path in argv leaks there no matter what the plugin
+does later (observed in the live `--opencode-config` canary). For a
+non-interactive run, the result's `argv` and the harness's own config and log
+files never contain the prompt.
+
+The TUI path is unchanged: a library caller that passes both `prompt=` and
+`interactive=True` still gets `opencode --standalone [--prompt P] <workdir>`.
+The `ozagia agent` CLI never takes that path (with a prompt it runs
+`opencode run`; without one it opens the TUI with no initial prompt). The
+TUI's `--prompt` handling and OpenCode Desktop prompt paths remain untested;
+`ozagia agent` uses neither.
 
 Interactive launch: the TUI starts at once and the sidebar (the
 `ozagia-profile` TUI plugin) shows the phase until the snapshot is current and
@@ -197,6 +221,58 @@ The summary adds one line when the mode is on:
 ```
   repo map: 1200 tokens; delivered 4, skipped 0
 ```
+
+### Local providers (vllm)
+
+`ozagia agent` always sets `OPENCODE_CONFIG` to the generated harness config.
+That is deliberate: a global config may carry plugins, MCP servers or
+permissions the harness must not adopt. It also means a local
+OpenAI-compatible provider configured only in the host's
+`~/.config/opencode/opencode.json` is not visible to the session. This was
+found in the live prompt-secret test, which had to fall back to
+`opencode run --standalone` for `vllm/qwen3.8-27b`.
+
+`--opencode-config PATH` layers a caller-supplied JSON config into the harness
+config:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "vllm": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "vLLM",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/v1",
+        "apiKey": "{env:VLLM_API_KEY}"
+      },
+      "models": {"qwen3.8-27b": {"name": "Qwen 3.8 27B"}}
+    }
+  }
+}
+```
+
+```bash
+ozagia agent --opencode-config ~/.config/opencode/vllm.json \
+  -m vllm/qwen3.8-27b --prompt "make test_retry pass"
+```
+
+The exact allowlist is `provider`, `providers`, `model` and `small_model`;
+`$schema` is allowed and ignored. The harness sets its own `model` from
+`--model`, so a config `model` is used only when `--model` is absent. With
+`--model`, the TUI config gets the CLI model, while a non-interactive run
+passes `-m` and drops the file's `model` from the config. `mcp.ozagia` is still
+added by `--mcp`/`--research`, independent of the supplied file. Values such
+as `{env:VLLM_API_KEY}` and `{file:...}` are copied verbatim and are never
+resolved, printed or written to logs.
+
+The trust boundary is the allowlist. `plugin`, `plugins`, `mcp`, `permission`,
+`agent`, `agents`, `tools` and every other key are refused, not silently
+dropped, so this option cannot import a plugin, MCP server or permission
+override. Invalid JSON, a non-object document, a missing/unreadable file, an
+unsupported key or a wrong value type raises `AgentError` before OpenCode
+starts (CLI exit 2). The host/global config is never used implicitly; point
+`--opencode-config` at the file you mean.
 
 ### Interactive mode and the plugin's environment
 

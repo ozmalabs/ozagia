@@ -1,0 +1,58 @@
+{
+  "label_schema_version": 1,
+  "corpus_id": "synthetic:deep-review-corpus-dry-run-v1",
+  "repository_id": "fixture-service",
+  "subject_key": "range-partial",
+  "kind": "reviewer",
+  "provenance": "synthetic_test_fixture",
+  "reviewer": {
+    "id": "reviewer-b",
+    "role": "reviewer",
+    "independent_pass": false,
+    "started_at": "2026-11-24T00:00:00Z",
+    "completed_at": "2026-11-24T00:10:00Z"
+  },
+  "declared_scope": {
+    "status": "partial",
+    "description": "Reviewer stopped after the first file; remaining scope is unknown.",
+    "subjects": [
+      "data-structures"
+    ],
+    "paths": [
+      "src/partial.py"
+    ]
+  },
+  "labels": [
+    {
+      "id": "B-P-1",
+      "subject": "data-structures",
+      "type": "mutable_default",
+      "severity": "minor",
+      "scope": "exact",
+      "verdict": "true_positive",
+      "location": {
+        "path": "src/partial.py",
+        "start_line": 1,
+        "end_line": 1,
+        "symbol": null
+      },
+      "evidence": [
+        {
+          "kind": "line",
+          "reference": "src/partial.py:1",
+          "digest": "4d4292496852532c0c0cc0aae2f5c876b739e5823355a0ea0f6032c67e305003",
+          "note": "Synthetic fixture evidence."
+        }
+      ],
+      "claim": "A mutable default list is shared across calls.",
+      "actionable": {
+        "is_actionable": true,
+        "wording": "Use None and create a list inside the function."
+      },
+      "severity_appropriate": true,
+      "source_file_digest": "4d4292496852532c0c0cc0aae2f5c876b739e5823355a0ea0f6032c67e305003",
+      "notes": "Synthetic dry-run fixture; not a human label."
+    }
+  ],
+  "label_file_sha256": "08e7710fe5379c38132f0e6fb353b11a10de5365756a355dc379c2921d7f9e7e"
+}

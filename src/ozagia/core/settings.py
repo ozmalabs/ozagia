@@ -130,6 +130,7 @@ from ozagia.config import (
     REPO_CONFIG_DIRNAME,
     REPO_CONFIG_FILENAME,
     _OWNED_SECTIONS,
+    _PROJECT_MODEL_SECTIONS,
     repo_root,
     state_dir,
 )
@@ -430,6 +431,32 @@ def _check_security_allowlist(value: Any) -> list[str]:
                 raise ValueError("allowlist entries need a value after the prefix")
         else:
             raise ValueError("must start with path:, rule: or sha256:")
+    return items
+
+
+_SECURITY_FINDING_FINGERPRINT = re.compile(r"sha256:[0-9a-f]{16}\Z")
+
+
+def _check_finding_allowlist(value: Any) -> list[str]:
+    """Reviewed static-finding allowlist: exact fingerprints, never secrets.
+
+    ``path:`` and ``rule:`` remain accepted for compatibility with the secret
+    gate's convention, but broad entries are discouraged. An exact ``sha256:``
+    entry must use the finding fingerprint (rule + path + matched line) and is
+    matched without a prefix shortcut.
+    """
+    items = _check_text_list(value, limit=500, max_len=256)
+    for item in items:
+        if item.startswith("sha256:"):
+            if not _SECURITY_FINDING_FINGERPRINT.fullmatch(item):
+                raise ValueError(
+                    "sha256 entries must be exact sha256:<16 lowercase hex> "
+                    "finding fingerprints")
+        elif item.startswith(("path:", "rule:")):
+            if len(item.split(":", 1)[1]) < 1:
+                raise ValueError("allowlist entries need a value after the prefix")
+        else:
+            raise ValueError("must start with sha256:, path: or rule:")
     return items
 
 
@@ -1271,6 +1298,15 @@ _SETTINGS: tuple[Setting, ...] = (
         check=_check_security_allowlist,
     ),
     Setting(
+        "security.finding_allowlist", "string_list", (), "repo",
+        "Reviewed allowlist for intentional static scan findings; prefer exact "
+        "sha256 finding fingerprints over broad path: or rule: entries.",
+        section="security", name="finding_allowlist",
+        validation="exact sha256:<16 hex> finding fingerprints (path:/rule: "
+                   "accepted but discouraged)",
+        check=_check_finding_allowlist,
+    ),
+    Setting(
         "ui.default_aperture", "string", "architecture", "both",
         "Aperture shown first in a graph view.",
         section="ui", name="default_aperture",
@@ -1577,12 +1613,49 @@ def _parse_layer(data: Mapping[str, Any], path: Path, layer: str) -> tuple[
     locations: dict[str, tuple[str, str]] = {}
     dynamic_seen: dict[str, str] = {}
 
+    def read_leaf(prefix: str, name: str, dotted: str, raw: Any) -> None:
+        """Read one registry leaf with the normal scope and duplicate checks."""
+        setting = _BY_STORAGE.get((prefix, name))
+        if setting is None:
+            raise SettingsError(_unknown_leaf(path, dotted))
+        if setting.scope != "both" and setting.scope != layer:
+            raise SettingsError(
+                f"{path}: [{dotted}] ({setting.key}) is "
+                f"{setting.scope}-only and cannot be set in the "
+                f"{layer} config")
+        if setting.key in values:
+            raise SettingsError(
+                f"{path}: setting {setting.key!r} is defined twice: "
+                f"[{where_defined[setting.key]}] and [{dotted}]")
+        values[setting.key] = _validate(
+            setting, raw, where=f"{path}: [{dotted}] ({setting.key})")
+        where_defined[setting.key] = dotted
+        locations[setting.key] = (prefix, name)
+
     def walk(table: Mapping[str, Any], prefix: str) -> None:
         for name, raw in table.items():
             if not isinstance(name, str):
                 raise SettingsError(f"{path}: TOML keys must be strings")
             dotted = f"{prefix}.{name}" if prefix else name
             if isinstance(raw, Mapping):
+                # Project-model sections hold named project entries beside
+                # ordinary settings (for example
+                # [environments] trust_project_python and [environments.dev]).
+                # Read the real registry leaves and skip the named entries.
+                if not prefix and dotted in _PROJECT_MODEL_SECTIONS:
+                    for leaf, leaf_raw in raw.items():
+                        if not isinstance(leaf, str):
+                            raise SettingsError(
+                                f"{path}: TOML keys must be strings")
+                        leaf_dotted = f"{dotted}.{leaf}"
+                        if (dotted, leaf) not in _BY_STORAGE:
+                            continue
+                        if isinstance(leaf_raw, Mapping):
+                            raise SettingsError(
+                                f"{path}: [{leaf_dotted}] must be a value, "
+                                "not a table")
+                        read_leaf(dotted, leaf, leaf_dotted, leaf_raw)
+                    continue
                 # A top-level table owned by another module (for example
                 # [tools], read by ozagia.core.toolchain) is not a settings
                 # group. Skip it instead of reporting its keys as unknown.
@@ -1636,23 +1709,7 @@ def _parse_layer(data: Mapping[str, Any], path: Path, layer: str) -> tuple[
                 continue
             if _is_known_table(dotted):
                 raise SettingsError(f"{path}: [{dotted}] must be a table")
-            setting = _BY_STORAGE.get((prefix, name))
-            if setting is None:
-                raise SettingsError(_unknown_leaf(path, dotted))
-            if setting.scope != "both" and setting.scope != layer:
-                raise SettingsError(
-                    f"{path}: [{dotted}] ({setting.key}) is "
-                    f"{setting.scope}-only and cannot be set in the "
-                    f"{layer} config")
-            if setting.key in values:
-                raise SettingsError(
-                    f"{path}: setting {setting.key!r} is defined twice: "
-                    f"[{where_defined[setting.key]}] and [{dotted}]")
-            values[setting.key] = _validate(
-                setting, raw,
-                where=f"{path}: [{dotted}] ({setting.key})")
-            where_defined[setting.key] = dotted
-            locations[setting.key] = (prefix, name)
+            read_leaf(prefix, name, dotted, raw)
 
     walk(data, "")
     return values, locations
@@ -2237,14 +2294,14 @@ def validate_file_value(key: str, value: Any, *, where: str = "") -> Any:
     return _validate(setting, value, where=where or setting.key)
 
 
-def set_values(root: str | Path | None, values: Mapping[str, Any],
-               scope: str = "repo", dry_run: bool = True) -> dict[str, Any]:
-    """Validate and write several settings in one atomic update.
+def _prepare_values(root: str | Path | None, values: Mapping[str, Any],
+                    scope: str = "repo", *,
+                    old_text: str | None = None) -> dict[str, Any]:
+    """Validate several settings and render the write, without writing.
 
-    Existing keys keep their TOML location (including aliases); new keys use
-    the canonical section. Values already equal to the file's value are left
-    alone. A preview (the default) changes nothing. Unrelated TOML and
-    comments are preserved.
+    ``old_text`` lets a caller that already read the target (for example the
+    migration, which must cover both files in its token) render against that
+    exact text. It is internal, but keeps every settings write on one writer.
     """
     if scope not in {"repo", "user"}:
         raise SettingsError(f"scope must be 'repo' or 'user', got {scope!r}")
@@ -2273,7 +2330,13 @@ def set_values(root: str | Path | None, values: Mapping[str, Any],
             setting, raw_value, where=f"[] {setting.key}")
         settings[setting.key] = setting
 
-    data, old_text = _read_toml(path)
+    if old_text is None:
+        data, old_text = _read_toml(path)
+    else:
+        try:
+            data = tomllib.loads(old_text) if old_text.strip() else {}
+        except tomllib.TOMLDecodeError as exc:
+            raise SettingsError(f"{path}: {exc}") from exc
     layer, locations = _parse_layer(data, path, scope)
     existed = path.is_file()
     new_text = old_text
@@ -2306,6 +2369,40 @@ def set_values(root: str | Path | None, values: Mapping[str, Any],
         if unexpected:
             raise SettingsError(
                 f"{path}: the update would also add {sorted(unexpected)[0]!r}")
+
+    return {
+        "path": path,
+        "scope": scope,
+        "old_text": old_text,
+        "new_text": new_text,
+        "existed": existed,
+        "changed": changed,
+        "cleaned": cleaned,
+        "settings": settings,
+        "written": written,
+        "layer": layer,
+    }
+
+
+def set_values(root: str | Path | None, values: Mapping[str, Any],
+               scope: str = "repo", dry_run: bool = True) -> dict[str, Any]:
+    """Validate and write several settings in one atomic update.
+
+    Existing keys keep their TOML location (including aliases); new keys use
+    the canonical section. Values already equal to the file's value are left
+    alone. A preview (the default) changes nothing. Unrelated TOML and
+    comments are preserved.
+    """
+    prepared = _prepare_values(root, values, scope)
+    path = prepared["path"]
+    old_text = prepared["old_text"]
+    new_text = prepared["new_text"]
+    changed = prepared["changed"]
+    written = prepared["written"]
+    cleaned = prepared["cleaned"]
+    settings = prepared["settings"]
+    layer = prepared["layer"]
+    existed = prepared["existed"]
 
     applied = False
     if not dry_run and changed:

@@ -42,14 +42,22 @@ class StubDaemon:
         self.sock = sock
         self.reply = reply
         self.requests: list[dict] = []
+        self.profile_requests: list[dict] = []
+        self.order: list[str] = []
         stub = self
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
                 for line in self.rfile:
                     req = json.loads(line)
-                    stub.requests.append(req)
-                    resp = {"id": req.get("id"), **stub.reply(req)}
+                    stub.order.append(str(req.get("op")))
+                    if req.get("op") == "profile_event":
+                        stub.profile_requests.append(req)
+                        body = {"ok": True, "stored": True}
+                    else:
+                        stub.requests.append(req)
+                        body = stub.reply(req)
+                    resp = {"id": req.get("id"), **body}
                     self.wfile.write((json.dumps(resp) + "\n").encode())
                     self.wfile.flush()
 
@@ -167,6 +175,8 @@ def test_post_bash_maps_to_shell(repo, daemon):
     assert req["session"] == "019a-sess" and req["tool"] == "shell"
     assert req["input"] == {"command": "python -m pytest -q", "workdir": str(repo)}
     assert req["output"] == "1 failed in 0.1s"
+    assert stub.order[0] == "after"
+    assert "profile_event" in stub.order[1:]
 
 
 @pytest.mark.parametrize("response, text", [

@@ -43,14 +43,22 @@ class StubDaemon:
         self.sock = sock
         self.reply = reply
         self.requests: list[dict] = []
+        self.profile_requests: list[dict] = []
+        self.order: list[str] = []
         stub = self
 
         class Handler(socketserver.StreamRequestHandler):
             def handle(self):
                 for line in self.rfile:
                     req = json.loads(line)
-                    stub.requests.append(req)
-                    resp = {"id": req.get("id"), **stub.reply(req)}
+                    stub.order.append(str(req.get("op")))
+                    if req.get("op") == "profile_event":
+                        stub.profile_requests.append(req)
+                        body = {"ok": True, "stored": True}
+                    else:
+                        stub.requests.append(req)
+                        body = stub.reply(req)
+                    resp = {"id": req.get("id"), **body}
                     self.wfile.write((json.dumps(resp) + "\n").encode())
                     self.wfile.flush()
 
@@ -343,6 +351,8 @@ def test_post_maps_tool_and_prints_append(repo, daemon, name, tool, tool_input,
     assert req["session"] == "kiro-sess-1"
     assert req["tool"] == neutral and req["input"] == expect(repo)
     assert req["output"] == "result text"
+    assert stub.order[0] == "after"
+    assert "profile_event" in stub.order[1:]
 
 
 @pytest.mark.parametrize("response, text", [
@@ -413,13 +423,16 @@ def test_other_events_print_nothing(repo, daemon, name):
 
 
 def test_compaction_triggers_are_v3_only():
-    # PostCompact goes in the V3 hook file only (2.37's V3 loader skips an
-    # unknown trigger; the CLI 2.x validator rejects one); PreCompact nowhere.
+    # SessionEnd and PostCompact go in the V3 hook file only (2.37's V3 loader
+    # skips an unknown trigger; the CLI 2.x validator rejects one, and its
+    # engines have no session-end trigger); PreCompact nowhere.
     assert all({v3, cli}.isdisjoint({"PreCompact", "PostCompact", "postCompact"})
                for _, v3, cli, _ in inst.HOOKS)
-    assert [t for _, t, _ in inst.V3_ONLY_HOOKS] == ["PostCompact"]
+    assert [t for _, t, _ in inst.V3_ONLY_HOOKS] == ["SessionEnd", "PostCompact"]
     assert "postCompact" not in json.dumps(inst.legacy_hooks(PY))
-    assert all(h["trigger"] != "PostCompact" for h in inst.profile_hooks(PY))
+    assert "SessionEnd" not in json.dumps(inst.legacy_hooks(PY))
+    assert all(h["trigger"] not in ("PostCompact", "SessionEnd")
+               for h in inst.profile_hooks(PY))
 
 
 @pytest.mark.parametrize("stdin", ["", "not json", "[1, 2]"])
@@ -563,7 +576,7 @@ def test_install_v3_writes_hook_file_and_mcp(tmp_path):
     assert [(h["trigger"], h.get("matcher")) for h in hooks] == [
         ("SessionStart", None), ("PreToolUse", "shell"), ("PreToolUse", "read"),
         ("PreToolUse", "write"), ("PostToolUse", "read"), ("PostToolUse", "write"), ("PostToolUse", "shell"),
-        ("PostToolUse", "web_fetch"), ("PostCompact", None)]
+        ("PostToolUse", "web_fetch"), ("SessionEnd", None), ("PostCompact", None)]
     for h in hooks:
         assert set(h) <= V3_FIELDS and h["trigger"] in V3_TRIGGERS | {"PostCompact"}
         assert h["action"] == {"type": "command", "command": CMD}

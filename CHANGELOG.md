@@ -2,6 +2,69 @@
 
 ## Unreleased
 
+- A first stateful graph-engine surface (`OZAGIA_SURFACE=engine`) exposes one
+  `graph` MCP tool with `hello` sessions, compact tabular rows, hard estimated
+  token budgets, `known` outline/context deltas and bounded background
+  speculation (`spec`/`fetch`). Computation and parent application
+  are separate: a forked child per engine computes at most two candidates after
+  the response and a parent IPC listener applies validated results, with a
+  daemon-thread fallback when fork is unavailable or the child dies. It has
+  snapshot/freshness/scope/generation checks, a worker deadline, bounded
+  `fetch` waits, cancellation and a `bye` close path. The v2 wire keeps the
+  default handshake to
+  protocol/session/snapshot/budget/capability-mask fields, sends columns once
+  per session, omits redundant success metadata, and moves the speculation
+  ledger behind `stats: true`. It reuses the existing graph, context and
+  repository-shape services, withholds structural data on stale/unknown
+  snapshots, and has no edit, test-run, refresh, shell, network or model path.
+  The prototype wire/readiness measurements are in
+  `docs/results/graph_engine_prototype_2026-11-25.md` and
+  `docs/results/graph_engine_speculation_2026-11-25.md`; they are not
+  model-task gains. The worker is fork-isolated where available, with a thread
+  fallback, and is not a supervised daemon.
+- Deep-review local advisories now match Python lockfile pins against OSV-style
+  `introduced`/`fixed`/`last_affected` ranges using PEP 440 ordering (epoch,
+  release, pre/post/dev and local segments), with the existing event
+  alternation, limit and size bounds. Python range blocks accept OSV
+  `ECOSYSTEM` or `SEMVER` types; malformed or unorderable versions are refused
+  or skipped, never coerced. Ruby, Composer and Maven remain exact-version
+  only, and no network advisory feed was added.
+- The test suite is hermetic and sharded. Job and admission tests inject small
+  test-only resource limits instead of inheriting the host's disk and memory
+  budgets, and `OZAGIA_TEST_SHARD=i/n` filters whole test files into four
+  roughly even shards. CI runs the four shards on Python 3.12 and 3.13; the
+  release workflow runs them on Python 3.13. The full suite remains available
+  unsharded.
+- Plan and feature statuses now match the code, and a new `docs/roadmap.md`
+  records each release's scope, evidence, gates and what is explicitly
+  untested.
+- Deep review gains realistic-corpus scaffolding: a candidate repository
+  manifest, reviewer/adjudicator label templates, a label schema and a
+  deterministic scorer, with a dry run over a synthetic fixture. No public
+  repository is acquired, no human label is entered and no realistic quality
+  result is claimed.
+- `ozagia config migrate` copies the `[environments.NAME]`, `[services.NAME]`,
+  `[relays.NAME]`, `[runtime.services.NAME]` and `[runtime.tunnels.NAME]`
+  project-model tables whole, validates every entry with the project parser,
+  writes atomically only after the preview token matches, and leaves
+  conflicting, unmapped and unknown entries in the legacy `.ozagia.toml`.
+- `docs/integrations.md` publishes the host integration matrix with the
+  verification level actually reached. `ozagia doctor --json` and
+  `ozagia-status --json` now report installed host versions, configuration
+  presence and capability-catalogue health, and warn when a host version is
+  outside the tested range.
+- The capability catalogue declares 102 capabilities across 156 surfaces; the
+  read-only `capabilities audit` reports zero findings.
+- Security scanning reduces reference false positives: `eval`/`exec` matches
+  inside strings and comments are masked, entropy checks ignore key-loader
+  calls, and statically safe YAML loaders are recognised. A new exact
+  `[security] finding_allowlist` applies `sha256:` fingerprints to static
+  findings separately from the secret gate; this repository records nine
+  reviewed entries.
+- **Not tested in this release:** a live Codex, Kiro, Claude Code or OpenCode
+  Desktop session, and the bundle build/installer smoke, which downloads the
+  pinned CPython runtime, OpenCode and Python extras.
+
 ## 0.1.4 (2026-11-24)
 
 - Rust graph imports now include resolved `use` records as `File -> File`
