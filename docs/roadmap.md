@@ -514,6 +514,14 @@ real fixtures, provenance-preserving and still opt-in.
   container entitlements with permissions, budget, lifetime, approval and
   teardown. Admin permission and unbounded spend are explicit human-approved
   grants, never model defaults; claims record spend and cleanup evidence.
+- Session mesh: local peer discovery, bounded addressed messages and leases on
+  worktrees, branches, merge targets, paths and grants. No leader: lease order
+  is the only authority. Peers negotiate a worktree each; whoever is ready
+  takes the exclusive merge lease, merges and releases. Stale sessions and
+  leases are reported, with heartbeat/TTL takeover recorded. Core/CLI works
+  without a model; read-only peer/topology awareness is opt-in, and only an
+  explicitly enabled session may send, request leases or accept a sub/super
+  link. Supervision is mutual and advisory, never self-approved.
 - Expand shell/task intent linking and richer paired usefulness evaluation from
   the OpenCode intent plan.
 - Orientation reference: one deterministic repository-shape page
@@ -528,8 +536,15 @@ real fixtures, provenance-preserving and still opt-in.
 [resource-grants plan](plans/2026-11-26_resource_grants.md) defines named
 entitlements for local VMs, VM-capable hosts, cloud accounts and containers,
 with read-only readiness checks, approval-gated admin/unbounded use, a
-claim/release ledger and mandatory teardown. It is planned, not implemented;
-host admission (`core.resources`) remains a separate capacity check.
+claim/release ledger and mandatory teardown. The read-only schema/readiness
+slice is in progress; host admission (`core.resources`) remains a separate
+capacity check.
+
+**Implementation status (2026-11-26, session mesh).** A separate
+[session-mesh plan](plans/2026-11-26_session_mesh.md) defines local peer
+discovery, bounded messages and worktree/branch/merge leases with no leader.
+The merge lease is advisory; existing worktree/commit/merge policy remains
+authoritative. It is planned, not implemented.
 
 **Implementation status (2026-11-26, external assets).** The
 [external-assets plan](plans/2026-11-26_external_assets.md) is implemented as
