@@ -88,6 +88,29 @@ def test_partial_scope_predictions_stay_unlabeled_not_false_positives():
     assert subjects["tests-and-coverage"]["complete"] is False
 
 
+def test_complete_label_scope_without_scored_run_is_reported_as_missing(tmp_path):
+    copied = tmp_path / "corpus"
+    shutil.copytree(FIXTURE, copied)
+    record_path = copied / "record.json"
+    raw = json.loads(record_path.read_text(encoding="utf-8"))
+    raw["runs"] = [run for run in raw["runs"]
+                   if run["subject_key"] != "range-complete"]
+    record_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = score_corpus(
+        load_manifest(copied / "corpus.json"), copied / "labels",
+        load_run_record(record_path), checkout_root=copied)
+
+    missing = result["coverage"]["missing_runs_for_complete_labels"]
+    assert missing == [{
+        "repository_id": "fixture-service",
+        "subject_key": "range-complete",
+        "run_id": None,
+        "reason": "no scored run for this label scope",
+    }]
+    assert any(row["missing_run"] for row in result["per_subject_key"])
+
+
 def test_high_impact_and_repository_views_are_reported_separately():
     result = _score()
     assert result["high_impact"]["expected"] == 2

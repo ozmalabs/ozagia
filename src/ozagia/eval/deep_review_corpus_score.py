@@ -545,8 +545,34 @@ def _build_scoring_inputs(loaded: Mapping[str, Any], manifest: Mapping[str, Any]
             "graph_freshness": run["graph_freshness"],
         })
     for key, group in sorted(loaded["subjects"].items()):
-        if key in primary:
+        repository_id, subject_key = key.split("/", 1)
+        if (repository_id, subject_key) in primary:
             continue
+        # Keep complete human label scopes in coverage even when the selected
+        # condition has no corresponding run.  Otherwise their expected
+        # findings disappear from both recall and the coverage gate, allowing
+        # a score over a cherry-picked subset of the frozen corpus.
+        if _scope_complete(group):
+            unavailable_scopes.append({
+                "repository_id": repository_id,
+                "subject_key": subject_key,
+                "run_id": None,
+                "reason": "no scored run for this label scope",
+            })
+            scope_rows.append({
+                "repository_id": repository_id,
+                "subject_key": subject_key,
+                "run_id": None,
+                "run_status": "missing",
+                "run_complete": False,
+                "label_scope_complete": True,
+                "predicted": 0,
+                "reviewed_positive_labels": source_expected_by_scope.get(
+                    (repository_id, subject_key), 0),
+                "missing_run": True,
+                "subject_statuses": {},
+                "graph_freshness": "unknown",
+            })
     return {
         "primary": primary,
         "repeats": repeats,
