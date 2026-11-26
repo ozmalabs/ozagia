@@ -377,3 +377,6 @@ The survey's main gaps for this implementation are recorded there: allocated
 bytes and inodes are not yet reported, there is no lease or per-session size
 budget, and cleanup is still an explicit command rather than an idle/end-of-
 session hook.  Those are design inputs, not claims about the current code.
+The follow-up [improvements plan](plans/2026-11-26_temp_space_improvements.md)
+sequences the work: accounting and discovery, then leases/pinning/budgets,
+then lifecycle/cache/hardening.
