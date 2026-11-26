@@ -12,6 +12,12 @@ The MCP server has three tool surfaces:
 Adapter MCP tools are listed and callable on the full and graph surfaces. The
 engine surface lists only `graph`.
 
+The full surface also lists the read-only managed-temporary-space views
+`dev_tmp_list` and `dev_tmp_status` (metadata, capacity and registry errors).
+They are not part of the `graph` or `engine` surfaces, and no surface exposes
+a create, write or delete temporary-space tool: creation is the OpenCode
+`ozagia_scratch` tool, the harness or `ozagia tmp create`.
+
 ```
 OZAGIA_SURFACE=graph python -m ozagia.integrations.mcp.server
 python -m ozagia.integrations.mcp.server --surface graph   # overrides the env

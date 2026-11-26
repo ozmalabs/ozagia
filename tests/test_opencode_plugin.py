@@ -211,7 +211,10 @@ class StubDaemon:
                 resp = dict(resp)
                 time.sleep(resp.pop("_delay", 0))
                 try:
-                    fh.write((json.dumps({"id": req["id"], **resp}) + "\n").encode())
+                    reply = {"id": req["id"], **resp}
+                    # The response envelope id is always the request id.
+                    reply["id"] = req["id"]
+                    fh.write((json.dumps(reply) + "\n").encode())
                     fh.flush()
                 except OSError:  # the plugin gave up and closed its connection
                     return
@@ -374,6 +377,140 @@ def test_native_secret_request_tool_refuses_without_session(tmp_path, daemon):
     assert payload["status"] == "refused"
     assert payload["code"] == "session_unavailable"
     assert not any(req.get("op") == "secrets" for req in d.requests)
+
+
+def _scratch_script(path: str):
+    def script(req):
+        if req["op"] == "hello":
+            return {"ok": True}
+        if req["op"] == "tmp":
+            assert req["harness"] == "opencode"
+            assert req["session"] == "ses_test"
+            assert req["reason"] == "parse fixture dump"
+            assert "path" not in req
+            if req["action"] == "preflight":
+                return {"ok": True, "id": None, "path": path, "exists": False}
+            if req["action"] == "create":
+                assert req["preflight_path"] == path
+                return {"ok": True, "id": "tmp_abcdef123456",
+                        "entry_id": "tmp_abcdef123456", "path": path,
+                        "expires_at": 1234, "bytes": 0, "files": 0,
+                        "tmpfs": False}
+        return _standard(req)
+    return script
+
+
+@needs_node
+def test_native_scratch_tool_preflights_asks_write_permission_and_creates(
+        tmp_path, daemon):
+    path = "/w/repo/.ozagia/tmp/workspaces/scratch/demo-abc"
+    d = daemon(_scratch_script(path))
+    out = _run(tmp_path, {"nativeTools": True, "permission": "allow", "calls": [
+        {"tool": "ozagia_scratch",
+         "input": {"purpose": "parse fixture dump", "ttl_s": 3600}},
+    ]}, d.path)
+    payload = json.loads(out["results"][0]["result"]["content"])
+    assert payload == {"ok": True, "id": "tmp_abcdef123456", "path": path,
+                       "expires_at": 1234, "bytes": 0, "files": 0}
+    assert out["asserts"][-1]["action"] == "write"
+    assert out["asserts"][-1]["resources"] == [path]
+    assert out["asserts"][-1]["save"] == [path]
+    actions = [req["action"] for req in d.requests if req["op"] == "tmp"]
+    assert actions == ["preflight", "create"]
+    hello = next(req for req in d.requests if req["op"] == "hello")
+    assert hello["tools"]["ozagia_scratch"] == {
+        "codemode": False, "read_only": False}
+
+
+@needs_node
+def test_native_scratch_tool_refuses_without_a_session_and_creates_nothing(
+        tmp_path, daemon):
+    d = daemon(lambda req: {"ok": True})
+    out = _run(tmp_path, {"nativeTools": True, "permission": "allow",
+                          "sessionID": None,
+                          "calls": [{"tool": "ozagia_scratch",
+                                     "input": {"purpose": "parse fixture dump"}}]},
+               d.path)
+    payload = json.loads(out["results"][0]["result"]["content"])
+    assert payload["status"] == "refused"
+    assert payload["code"] == "session_unavailable"
+    assert not any(req.get("op") == "tmp" for req in d.requests)
+
+
+@needs_node
+def test_native_scratch_tool_is_not_registered_without_permission_api(
+        tmp_path, daemon):
+    d = daemon(lambda req: {"ok": True})
+    out = _run(tmp_path, {"nativeTools": True, "calls": []}, d.path)
+    assert "ozagia_scratch" not in out["toolNames"]
+
+
+@needs_node
+def test_native_scratch_tool_fails_closed_when_the_daemon_is_down(
+        tmp_path, sockdir):
+    out = _run(tmp_path, {"nativeTools": True, "permission": "allow", "calls": [
+        {"tool": "ozagia_scratch", "input": {"purpose": "parse fixture dump"}},
+    ]}, sockdir / "missing.sock")
+    payload = json.loads(out["results"][0]["result"]["content"])
+    assert payload["status"] == "unavailable"
+    assert payload["code"] == "daemon_unavailable"
+    assert "no /tmp fallback" in payload["message"]
+    assert "path" not in payload
+
+
+@needs_node
+def test_native_scratch_tool_permission_denial_creates_nothing(tmp_path, daemon):
+    path = "/w/repo/.ozagia/tmp/workspaces/scratch/demo-abc"
+    d = daemon(_scratch_script(path))
+    out = _run(tmp_path, {"nativeTools": True, "permission": "deny", "calls": [
+        {"tool": "ozagia_scratch", "input": {"purpose": "parse fixture dump"}},
+    ]}, d.path)
+    payload = json.loads(out["results"][0]["result"]["content"])
+    assert payload["status"] == "refused"
+    assert payload["code"] == "permission_denied"
+    assert [req["action"] for req in d.requests if req["op"] == "tmp"] \
+        == ["preflight"]
+    assert out["asserts"][-1]["action"] == "write"
+
+
+@needs_node
+def test_context_hint_names_scratch_only_when_available_or_the_env_is_set(
+        tmp_path, sockdir):
+    event = {
+        "sessionID": "ses_test", "system": [],
+        "messages": [{"role": "user", "parts": [
+            {"type": "text", "text": "Fix the retry loop"}]}],
+    }
+
+    def script(req):
+        if req["op"] == "hint":
+            return {"ok": True, "context": "GRAPH CONTEXT"}
+        return {"ok": True}
+
+    def context_text(cfg, env=None):
+        stub = StubDaemon(sockdir / f"scratch-{context_text.calls}.sock", script)
+        context_text.calls += 1
+        try:
+            out = _run(tmp_path, cfg, stub.path, env=env)
+        finally:
+            stub.close()
+        return "\n".join(part.get("text", "")
+                         for part in out["contextEvents"][0]["system"]
+                         if isinstance(part, dict))
+
+    context_text.calls = 0
+    text = context_text({"context": event})
+    assert "[ozagia task context]" in text
+    assert "ozagia_scratch" not in text
+
+    text = context_text({"nativeTools": True, "permission": "allow",
+                         "context": event})
+    assert "ozagia_scratch" in text
+    assert "instead of /tmp" in text
+
+    text = context_text({"context": event},
+                        env={"OZAGIA_SCRATCH_ROOT": "/w/repo/.ozagia/scratch"})
+    assert "ozagia_scratch" in text
 
 
 @needs_node
@@ -924,9 +1061,11 @@ def test_self_test_passes_on_the_packaged_plugin(tmp_path):
     res = oc.self_test(oc.install(tmp_path))
     assert res["ok"] is True, res
     assert sorted(res["replaced"]) == sorted(oc.REPLACED_TOOLS)
-    assert res["native_tools"] == ["ozagia_structure", "ozagia_secret_request"]
+    assert sorted(res["native_tools"]) == sorted([
+        "ozagia_structure", "ozagia_secret_request", "ozagia_scratch"])
     assert res["structure_readonly"] is True
     assert res["secret_request_readonly"] is True
+    assert res["scratch_readonly"] is True
 
 
 def test_cli_install_and_uninstall(tmp_path, capsys):

@@ -349,8 +349,12 @@ def create(root: str | Path, *, kind: str = DEFAULT_SCRATCH_KIND, reason: str,
         raise TempSpaceError(f"pid must be a non-negative integer, got {pid!r}")
 
     _ensure_dir(registry_dir(root_path))
+    # A default target is created here, so it is ours to remove if the record
+    # write fails; a caller-supplied path may already exist and is left alone.
+    created_target = False
     if path is None:
         target, entry_id = _create_default_target(root_path, kind)
+        created_target = True
     else:
         raw = _lexical_path(path)
         _refuse_symlink(raw)
@@ -408,7 +412,7 @@ def create(root: str | Path, *, kind: str = DEFAULT_SCRATCH_KIND, reason: str,
         _write_json(_record_path(root_path, entry_id), record)
     except BaseException:
         _remove_marker_and_empty_dir(target, entry_id,
-                                     remove_dir=not preexisting)
+                                     remove_dir=created_target or not preexisting)
         raise
     return _entry(root_path, record)
 

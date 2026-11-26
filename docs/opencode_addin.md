@@ -269,6 +269,42 @@ paths, freshness and graph/cache hash. The daemon exposes `repo_map_delivered`,
 runner's summary prints the delivered and skipped counts. The mode adds no
 tool, writes no file and does not replace reads or searches.
 
+## Managed scratch tool (`ozagia_scratch`)
+
+The same OpenCode server plugin (`.opencode/plugins/ozagia.js`, not the add-in's
+server part) registers a native `ozagia_scratch` tool when OpenCode exposes its
+permission assertion API. It exists so the model stops using `/tmp` as a
+workspace. It is **OpenCode-only**: the daemon requires
+`harness: "opencode"`, and the tool is absent on hosts without that registry
+and permission API.
+
+Input is deliberately small; a path, session or kind is not accepted:
+
+```jsonc
+{"purpose": "parse fixture dump", "ttl_s": 3600}   // purpose 1..200, ttl 60..7776000
+```
+
+The flow is:
+
+1. require `c.sessionID`; without it, return
+   `{status:"refused", code:"session_unavailable"}` and create nothing;
+2. send `{op:"tmp", action:"preflight", harness:"opencode", session, reason:
+   purpose, ttl_s}` to the daemon over the existing bounded request helper;
+3. assert OpenCode's **write** permission for the returned managed path with
+   `permission.assert`, then send `{op:"tmp", action:"create", ...}`;
+4. return only `{ok, id, path, expires_at, bytes, files}`.
+
+It fails closed. A daemon that is down or errors, a denied permission, or a
+missing session returns a typed `unavailable`/`refused` result; it never falls
+back to `/tmp` and never creates a directory itself. No prompt text or file
+contents are returned. When the tool is registered (or the harness sets
+`OZAGIA_SCRATCH_ROOT`), the `[ozagia task context]` block adds one sentence
+telling the model to use `ozagia_scratch` for throwaway files instead of
+`/tmp`; when the plugin is disabled the hint is absent.
+
+The tool and daemon op are offline-tested (Node harness and stub daemon). They
+have not been verified in a live OpenCode Desktop session.
+
 ## GUI part
 
 ### Session profile in OpenCode

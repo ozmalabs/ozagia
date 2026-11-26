@@ -992,6 +992,36 @@ _TOOLS.extend([
                      "description": "Repo-relative or absolute file path."},
         }, ["path"]),
     },
+    {
+        "name": "dev_tmp_list",
+        "description": (
+            "List managed temporary-space entries: id, path, kind, session, "
+            "reason, TTL/expiry, state, bytes, files and tmpfs membership. "
+            "Metadata only, no file contents or prompts. Read-only: creation "
+            "is the OpenCode ozagia_scratch tool, the harness or the CLI; no "
+            "MCP tool creates or deletes an entry."),
+        "inputSchema": _schema({
+            "kind": {"type": "string",
+                     "description": "Only this kind (scratch, agent, check, eval, engine, other)."},
+            "session": {"type": "string",
+                        "description": "Only entries of this harness session id."},
+            "owned": {"type": "boolean",
+                      "description": "Only owned (true) or unowned (false) entries."},
+            "include_all": {"type": "boolean", "default": False,
+                            "description": "Include released/expired entries too."},
+            "limit": {"type": "integer", "default": 100,
+                      "description": "Most entries to return (at most 500)."},
+        }),
+    },
+    {
+        "name": "dev_tmp_status",
+        "description": (
+            "Managed temporary-space status: totals by kind, session and "
+            "ownership, filesystem capacity and warnings, and registry "
+            "errors. Metadata only and read-only; there is no MCP create, "
+            "write or delete tool."),
+        "inputSchema": _schema({}),
+    },
 ])
 
 
@@ -1508,6 +1538,8 @@ class DevMemoryServer:
             "dev_working_set": self._working_set,
             "dev_files_list": self._files_list,
             "dev_files_explain": self._files_explain,
+            "dev_tmp_list": self._tmp_list,
+            "dev_tmp_status": self._tmp_status,
             "dev_review_repo": self._review_repo,
             "dev_deep_review": self._deep_review,
             "dev_supply_chain": self._supply_chain,
@@ -2602,6 +2634,29 @@ class DevMemoryServer:
         try:
             report = F.explain(self._files_root(), str(a["path"]))
         except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, **report}
+
+    # -- managed temporary space (`ozagia.core.temp_space`) ----------------- #
+    def _tmp_list(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import temp_space as T
+        limit = max(1, min(int(a.get("limit", 100)), 500))
+        try:
+            entries = T.list_entries(
+                self._files_root(), kind=a.get("kind") or None,
+                session=a.get("session") or None, owned=a.get("owned"),
+                include_all=a.get("include_all") is True)
+        except T.TempSpaceError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "entries": entries[:limit], "count": len(entries),
+                "truncated": len(entries) > limit, "limit": limit,
+                "root": str(self._files_root())}
+
+    def _tmp_status(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import temp_space as T
+        try:
+            report = T.status(self._files_root())
+        except T.TempSpaceError as e:
             return {"ok": False, "error": str(e)}
         return {"ok": True, **report}
 

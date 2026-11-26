@@ -239,6 +239,31 @@ SECRET_ACTIONS = ("capture_text", "capture", "list", "forget", "providers",
                   "check", "request", "request_list", "request_status",
                   "request_fulfill", "request_decline")
 MAX_SECRET_CHECK_REFS = 64
+# `tmp` op (`ozagia.core.temp_space`): managed scratch directories for one
+# harness session. The daemon root and state directory are authoritative; a
+# caller never supplies a path. `create` is the only write.
+TMP_ACTIONS = ("preflight", "create", "info", "list", "status")
+TMP_HARNESSES = ("opencode",)
+TMP_WRITABLE_KIND = "scratch"
+TMP_DEFAULT_TTL_S = 7 * 24 * 60 * 60
+TMP_MIN_TTL_S = 60
+TMP_MAX_TTL_S = 90 * 24 * 60 * 60
+TMP_SESSION_MAX_CHARS = 128
+TMP_REASON_MAX_CHARS = 200
+TMP_LABEL_MAX_CHARS = 200
+TMP_LIST_DEFAULT = 100
+TMP_LIST_MAX = 500
+_TMP_SESSION_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_TMP_ENVELOPE = frozenset({"op", "id", "deadline_ms", "action"})
+_TMP_TRACKED_FIELDS = {
+    "preflight": frozenset({"harness", "session", "reason", "ttl_s",
+                            "kind", "model", "run_id"}),
+    "create": frozenset({"harness", "session", "reason", "ttl_s", "kind",
+                         "model", "run_id", "preflight_path"}),
+    "info": frozenset({"entry_id"}),
+    "list": frozenset({"kind", "session", "owned", "include_all", "limit"}),
+    "status": frozenset(),
+}
 _SECRET_REF_TEXT = re.compile(r"secret://[A-Za-z0-9._~%/:@+-]+")
 
 # Passthrough reasons that name a file or directory, rewritten to one key
@@ -281,6 +306,14 @@ SUN_PATH_MAX = 107
 
 class DaemonStartError(RuntimeError):
     """The daemon cannot start (socket in use, bad path)."""
+
+
+class TempOpError(ValueError):
+    """A `tmp` op request is invalid; `code` is a stable reply code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _ensure_root(root: Path) -> None:
@@ -406,6 +439,120 @@ def _toolchain_flag(msg: dict[str, Any], name: str) -> bool:
     value = msg.get(name, False)
     if not isinstance(value, bool):
         raise ValueError(f"{name} must be true or false")
+    return value
+
+
+# -- `tmp` request validation ---------------------------------------------- #
+
+
+def _tmp_has_control(text: str) -> bool:
+    return any(ord(char) < 0x20 or ord(char) == 0x7f for char in text)
+
+
+def _tmp_harness(msg: dict[str, Any]) -> str:
+    harness = msg.get("harness")
+    if not isinstance(harness, str) or harness not in TMP_HARNESSES:
+        raise TempOpError(
+            "invalid_harness",
+            "harness must be one of " + ", ".join(TMP_HARNESSES))
+    return harness
+
+
+def _tmp_session(msg: dict[str, Any]) -> str:
+    value = msg.get("session")
+    if not isinstance(value, str):
+        raise TempOpError("invalid_session", "session must be a string")
+    value = value.strip()
+    if (not value or len(value) > TMP_SESSION_MAX_CHARS
+            or not _TMP_SESSION_RE.fullmatch(value)):
+        raise TempOpError(
+            "invalid_session",
+            f"session must be 1..{TMP_SESSION_MAX_CHARS} characters from "
+            "[A-Za-z0-9._:-]")
+    return value
+
+
+def _tmp_reason(msg: dict[str, Any]) -> str:
+    value = msg.get("reason")
+    if not isinstance(value, str):
+        raise TempOpError("invalid_reason", "reason must be a string")
+    value = value.strip()
+    if not value:
+        raise TempOpError("invalid_reason", "reason must not be empty")
+    if len(value) > TMP_REASON_MAX_CHARS:
+        raise TempOpError(
+            "invalid_reason",
+            f"reason must be at most {TMP_REASON_MAX_CHARS} characters")
+    if _tmp_has_control(value):
+        raise TempOpError(
+            "invalid_reason", "reason must not contain control characters")
+    return value
+
+
+def _tmp_ttl(msg: dict[str, Any]) -> int:
+    value = msg.get("ttl_s")
+    if value is None:
+        return TMP_DEFAULT_TTL_S
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TempOpError("invalid_ttl", "ttl_s must be an integer")
+    if not TMP_MIN_TTL_S <= value <= TMP_MAX_TTL_S:
+        raise TempOpError(
+            "invalid_ttl",
+            f"ttl_s must be between {TMP_MIN_TTL_S} and {TMP_MAX_TTL_S} "
+            "seconds")
+    return value
+
+
+def _tmp_kind(msg: dict[str, Any], *, writable: bool) -> str | None:
+    from ozagia.core import temp_space as T
+    value = msg.get("kind")
+    if value is None:
+        return TMP_WRITABLE_KIND if writable else None
+    if not isinstance(value, str) or value not in T.KINDS:
+        raise TempOpError(
+            "invalid_kind", "kind must be one of " + ", ".join(T.KINDS))
+    if writable and value != TMP_WRITABLE_KIND:
+        raise TempOpError(
+            "invalid_kind", f"create only makes {TMP_WRITABLE_KIND} entries")
+    return value
+
+
+def _tmp_label(msg: dict[str, Any], name: str) -> str | None:
+    value = msg.get(name)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TempOpError(f"invalid_{name}", f"{name} must be a string")
+    value = value.strip()
+    if not value:
+        raise TempOpError(f"invalid_{name}", f"{name} must not be empty")
+    if len(value) > TMP_LABEL_MAX_CHARS:
+        raise TempOpError(
+            f"invalid_{name}",
+            f"{name} must be at most {TMP_LABEL_MAX_CHARS} characters")
+    if _tmp_has_control(value):
+        raise TempOpError(
+            f"invalid_{name}", f"{name} must not contain control characters")
+    return value
+
+
+def _tmp_bool(msg: dict[str, Any], name: str, default: bool | None
+              ) -> bool | None:
+    value = msg.get(name, default)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise TempOpError(f"invalid_{name}", f"{name} must be true or false")
+    return value
+
+
+def _tmp_limit(msg: dict[str, Any]) -> int:
+    value = msg.get("limit", TMP_LIST_DEFAULT)
+    if (isinstance(value, bool) or not isinstance(value, int)
+            or not 1 <= value <= TMP_LIST_MAX):
+        raise TempOpError(
+            "invalid_limit",
+            f"limit must be an integer between 1 and {TMP_LIST_MAX}")
     return value
 
 
@@ -637,6 +784,8 @@ class DaemonState:
             return self.working_set(msg)
         if op == "toolchain":
             return self.toolchain_op(msg)
+        if op == "tmp":
+            return self.tmp_op(msg)
         if op == "goals":
             return self.goals(msg)
         if op == "structural":
@@ -1734,6 +1883,111 @@ class DaemonState:
             self.toolchain_counts["toolchain_plans"] += 1
         return {"ok": True, "plan": plan, "text": text, "cached": False}
 
+    def tmp_op(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """The `tmp` op: managed temporary space (`ozagia.core.temp_space`).
+
+        `preflight` validates a create request and returns a suggested path
+        without creating anything; `create` makes one owned `scratch` entry
+        and returns its path, expiry and usage; `info`, `list` and `status`
+        are read-only. The harness is a closed allowlist, the session is
+        required and bounded, the reason is 1..200 characters without control
+        characters, and the TTL is 60..90 days (default seven days). A caller
+        never supplies a path: unknown fields (including `path`) are refused.
+        """
+        from ozagia.core import temp_space as T
+        action = msg.get("action")
+        if action not in TMP_ACTIONS:
+            return {"ok": False, "code": "invalid_action",
+                    "error": "action must be one of " + ", ".join(TMP_ACTIONS)}
+        unknown = sorted(set(msg) - _TMP_ENVELOPE
+                         - _TMP_TRACKED_FIELDS[action])
+        if unknown:
+            return {"ok": False, "code": "unknown_field",
+                    "error": "unknown field(s): " + ", ".join(unknown)}
+        try:
+            if action == "status":
+                return {"ok": True, **T.status(self.root)}
+            if action == "info":
+                entry_id = msg.get("entry_id")
+                if entry_id is None and isinstance(msg.get("id"), str):
+                    # Direct callers may put the entry id in `id`; over the
+                    # socket that field is the request id.
+                    entry_id = msg.get("id")
+                if not isinstance(entry_id, str):
+                    raise TempOpError("not_found",
+                                      "entry_id must be a temporary entry id")
+                try:
+                    entry = T.get(self.root, entry_id)
+                except T.TempNotFound as exc:
+                    raise TempOpError("not_found", str(exc)) from exc
+                return {"ok": True, "entry": entry}
+            if action == "list":
+                kind = _tmp_kind(msg, writable=False)
+                session = msg.get("session")
+                if session is not None:
+                    session = _tmp_session(msg)
+                owned = _tmp_bool(msg, "owned", None)
+                include_all = _tmp_bool(msg, "include_all", False) is True
+                limit = _tmp_limit(msg)
+                entries = T.list_entries(
+                    self.root, kind=kind, session=session, owned=owned,
+                    include_all=include_all)
+                return {"ok": True, "entries": entries[:limit],
+                        "count": len(entries),
+                        "truncated": len(entries) > limit, "limit": limit}
+            harness = _tmp_harness(msg)
+            session = _tmp_session(msg)
+            reason = _tmp_reason(msg)
+            ttl_s = _tmp_ttl(msg)
+            kind = _tmp_kind(msg, writable=True)
+            model = _tmp_label(msg, "model")
+            run_id = _tmp_label(msg, "run_id")
+            session_value = {"harness": harness, "id": session}
+            if action == "preflight":
+                path = T.suggest_path(self.root, str(kind), reason,
+                                      session_value)
+                return {"ok": True, "id": None, "entry_id": None,
+                        "path": str(path), "exists": False, "kind": kind}
+            # Create at the same managed path preflight named, so the write
+            # permission is for the directory that is actually made. The
+            # plugin echoes the preflight path; the daemon verifies it is
+            # inside the managed kind root. Without it, derive a fresh path.
+            T.ensure_default_root(self.root, str(kind))
+            pinned = msg.get("preflight_path")
+            if pinned is not None:
+                if not isinstance(pinned, str) or not pinned:
+                    raise TempOpError(
+                        "invalid_path", "preflight_path must be a non-empty string")
+                base = T.default_kind_root(self.root, str(kind)).resolve()
+                candidate = Path(pinned).resolve(strict=False)
+                if candidate == base or not candidate.is_relative_to(base):
+                    raise TempOpError(
+                        "invalid_path",
+                        "preflight_path must be inside the managed scratch root")
+                path = candidate
+            else:
+                path = T.suggest_path(self.root, str(kind), reason,
+                                      session_value)
+            entry = T.create(self.root, kind=str(kind), reason=reason,
+                             session=session_value, ttl_s=ttl_s, model=model,
+                             run_id=run_id, path=path)
+            # `id` is the entry id; on the wire the envelope repeats the
+            # request id, so `entry_id` carries the entry id unambiguously.
+            return {"ok": True, "id": entry["id"],
+                    "entry_id": entry["id"], "path": entry["path"],
+                    "expires_at": entry.get("expires_at"),
+                    "bytes": entry.get("bytes", 0),
+                    "files": entry.get("files", 0),
+                    "tmpfs": entry.get("tmpfs")}
+        except TempOpError as exc:
+            return {"ok": False, "code": exc.code, "error": str(exc)}
+        except T.TempSpaceError as exc:
+            return {"ok": False, "code": "temp_error", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - the op must not kill a socket
+            return {"ok": False, "code": "temp_error",
+                    "error": "temporary space operation failed: "
+                             f"{type(exc).__name__}"}
+
     def working_set(self, msg: dict[str, Any]) -> dict[str, Any]:
         """The `working_set` op: the session's working set as text, or with
         `since: true` the session-start brief (`ozagia.core.working_set`).
@@ -2308,6 +2562,9 @@ class _Handler(socketserver.StreamRequestHandler):
                 else:
                     try:
                         resp = {"id": msg.get("id"), **state.dispatch(msg)}
+                        # A handler's own `id` field (the `tmp` preflight
+                        # reports `id: null`) must not replace the request id.
+                        resp["id"] = msg.get("id")
                     except Exception as e:  # noqa: BLE001 - reported
                         resp = {"id": msg.get("id"), "ok": False,
                                 "error": f"{type(e).__name__}: {e}"}

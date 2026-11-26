@@ -96,6 +96,8 @@ try {
     && nativeTools.ozagia_structure.options.codemode === false;
   out.secret_request_readonly = nativeTools.ozagia_secret_request
     && nativeTools.ozagia_secret_request.options.codemode === false;
+  out.scratch_readonly = nativeTools.ozagia_scratch
+    && nativeTools.ozagia_scratch.options.codemode === false;
 } catch (err) {
   out.error = String((err && err.stack) || err);
 }
@@ -224,9 +226,11 @@ def self_test(path: str | Path, *, timeout: float = 60,
                      and doc.get("transformed") and doc.get("schema_swapped")
                      and doc.get("patch_untouched")
                      and sorted(doc.get("native_tools") or []) == [
-                         "ozagia_secret_request", "ozagia_structure"]
+                         "ozagia_scratch", "ozagia_secret_request",
+                         "ozagia_structure"]
                      and doc.get("structure_readonly")
                      and doc.get("secret_request_readonly")
+                     and doc.get("scratch_readonly")
                      and sorted(doc.get("replaced") or []) == sorted(REPLACED_TOOLS))
     return doc
 

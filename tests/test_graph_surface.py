@@ -43,7 +43,7 @@ FULL_SURFACE_TOOLS = [
     "dev_symbol_callers", "dev_symbol_callees", "dev_symbol_graph_impact",
     "dev_symbol_resolve", "job_start", "job_wait", "job_list", "job_log",
     "job_stop", "dev_secrets", "dev_working_set", "dev_files_list",
-    "dev_files_explain",
+    "dev_files_explain", "dev_tmp_list", "dev_tmp_status",
     "dev_review_repo", "dev_deep_review", "dev_supply_chain", "dev_profile",
     "dev_environment", "dev_tools", "dev_migration", "dev_capabilities",
     "goal_list", "goal_show", "goal_check", "goal_add", "goal_from_review", "goal_claim",

@@ -119,6 +119,13 @@ def test_real_surfaces_are_joined_without_guessing():
         commands)
     assert {surface for surface in declared
             if surface.startswith("daemon:")} == daemon
+    assert "daemon:op:tmp" in daemon
+    assert {"mcp:tool:dev_tmp_list", "mcp:tool:dev_tmp_status"} <= full
+    states = {row["surface"]: row["state"]
+              for row in report["surface_states"]}
+    for surface in ("daemon:op:tmp", "mcp:tool:dev_tmp_list",
+                    "mcp:tool:dev_tmp_status"):
+        assert states[surface] == "observed"
     assert "toolchain:registry" in declared
     assert report["audit"]["counts"]["surface_states"] == {
         "observed": len(declared)}

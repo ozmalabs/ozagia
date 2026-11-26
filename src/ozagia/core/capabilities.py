@@ -447,6 +447,7 @@ _TESTS = {
     "model_api": "test:tests/test_model_api.py",
     "temp_space": "test:tests/test_temp_space.py",
     "temp_cli": "test:tests/test_temp_cli.py",
+    "daemon_tmp": "test:tests/test_daemon_tmp.py",
 }
 
 
@@ -1441,7 +1442,7 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
                  "capacity warnings."),
         owner="ozagia.core.temp_space",
         side_effect="write",
-        exposure=["cli"],
+        exposure=["cli", "daemon", "mcp"],
         impl=["impl:ozagia.core.temp_space.create",
               "impl:ozagia.core.temp_space.adopt",
               "impl:ozagia.core.temp_space.touch",
@@ -1449,8 +1450,10 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
               "impl:ozagia.core.temp_space.audit",
               "impl:ozagia.core.temp_space.clean",
               "impl:ozagia.core.temp_space.prune_registry",
+              "impl:ozagia.daemon.server.tmp_op",
               "impl:ozagia.temp_cli.run"],
-        surfaces=["cli:ozagia.tmp"],
+        surfaces=["cli:ozagia.tmp", "daemon:op:tmp",
+                  "mcp:tool:dev_tmp_list", "mcp:tool:dev_tmp_status"],
         prerequisites=["a repository root and a writable state directory"],
         limits=["cleanup is a plan unless --apply is given",
                 "only owned entries with a matching marker are deletable",
@@ -1458,9 +1461,11 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "patterns",
                 "registry and markers store provenance, never file contents",
                 "usage walks are bounded; a stopped walk is reported partial",
-                "tmpfs detection reads /proc and returns unknown elsewhere"],
+                "tmpfs detection reads /proc and returns unknown elsewhere",
+                "the daemon and MCP surfaces create nothing from a caller "
+                "path; MCP is read-only and the daemon accepts no path"],
         authorization=_STATE,
-        tests=_tests("temp_space", "temp_cli"),
+        tests=_tests("temp_space", "temp_cli", "daemon_tmp"),
         docs=_docs("temp"),
     ),
     # toolchain ------------------------------------------------------------

@@ -205,6 +205,11 @@ valid research `session_id`, then returns coding context and cited research
 context as separate results. It does not create a link between them or treat
 their contents as supporting evidence for each other.
 
+The full surface (the default `coding`/`combined` tool list) also exposes the
+read-only `dev_tmp_list` and `dev_tmp_status` views of managed temporary
+space. The `graph` and `engine` surfaces do not list them, and no surface
+exposes a create/write/delete temporary-space tool.
+
 ## Wire it into Claude Code
 
 `.mcp.json` in the project root:
@@ -280,6 +285,8 @@ their contents as supporting evidence for each other.
 | `dev_capabilities` | Read-only list/show/audit of Ozagia's declared capabilities and their observed CLI/MCP/daemon/toolchain/status surfaces. The audit states both mismatch directions (`declared_surface_not_observed`/`declared_not_observed` and `observed_surface_undeclared`/`observed_not_declared`, with meaning) plus explicit coverage and readiness limits (`coverage.statement`, `limits`). Bounded by `limit`/`cursor`; unknown coverage is explicit. |
 | `dev_maps` | Bounded read-only model-facing maps: `graph`, `outline`, `capabilities` or `work`/evidence. Use it to orient before reading or editing: `map=graph` for a key's bounded neighbourhood, `map=outline` for signatures/headings, `map=capabilities` for the declared-capability audit including its directions and limits, and `map=work` for a goal's recorded evidence plus the explicit omissions of that join (task output is not collected; the interpreter link is unknown). Returns structured v1 or L0-style plain output with schema/content hashes, source/snapshot identities, freshness, evidence/trust labels, omissions and truncation, configured/observed negotiation and explicit fallback. `limit`/`cursor` page a task-scoped result. Writes only bounded cache metadata under `.ozagia/model_api/cache`. |
 | `dev_migration` | Bounded Python→Rust migration overlay: `view=status` reports per-status totals, top gaps/divergences, inference candidates (never accepted), freshness and explicit omissions; `view=tasks` returns a checklist without creating a goal or running anything; `view=scaffold` previews a simple dataclass/function skeleton. Read-only; the CLI's explicit `ozagia migration scaffold --write` is the only write path. |
+| `dev_tmp_list` | Read-only managed temporary-space entries (`ozagia.core.temp_space`): id, path, kind, session, reason, TTL/expiry, state, bytes, files and tmpfs membership. Filters `kind`, `session`, `owned`, `include_all` and `limit`. Metadata only; no file contents or prompts. |
+| `dev_tmp_status` | Read-only temporary-space totals by kind, session and ownership, filesystem capacity/warnings, and registry errors. There is deliberately no MCP create, write or delete tool: creation is the OpenCode `ozagia_scratch` tool, the harness or `ozagia tmp create`. |
 
 All tools are read-only except `dev_edit`, `dev_span_edit` and `dev_key_edit` (transactions, preview by
 default, backup on apply), `dev_record` (one JSONL line), and `dev_maps`

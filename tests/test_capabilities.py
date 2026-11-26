@@ -92,7 +92,8 @@ def test_builtin_mcp_and_graph_tools_are_declared():
             if surface.startswith("mcp:")} == full | graph | engine
     assert "mcp:tool:dev_capabilities" in declared
     for name in ("dev_context", "dev_tools", "dev_capabilities",
-                 "goal_list", "job_start", "federation_status"):
+                 "goal_list", "job_start", "federation_status",
+                 "dev_tmp_list", "dev_tmp_status"):
         assert f"mcp:tool:{name}" in declared
 
 
@@ -144,6 +145,7 @@ def test_daemon_operations_match_the_dispatch_vocabulary():
                 for surface in cap.surfaces
                 if surface.startswith("daemon:op:")}
     assert declared == set(protocol.OPERATIONS)
+    assert "tmp" in protocol.OPERATIONS
 
 
 def test_invalid_records_fail_explicitly():

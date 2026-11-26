@@ -596,6 +596,59 @@ def test_dev_files_tools_read_the_ledger(server, tmp_path: Path) -> None:
     assert payload["ok"] is False
 
 
+def test_dev_tmp_tools_list_and_status_are_metadata_only(server) -> None:
+    from ozagia.core import temp_space as T
+
+    root = Path(server.mem.raw_repo_root)
+    first = T.create(root, kind="scratch", reason="mcp fixture",
+                     session={"harness": "opencode", "id": "ses_mcp"},
+                     ttl_s=600)
+    T.create(root, kind="check", reason="second",
+             session={"harness": "claude", "id": "ses_other"})
+    (Path(first["path"]) / "blob.txt").write_text(
+        "CANARY NOT A RETURNED CONTENT", encoding="utf-8")
+
+    reply = server.handle(_call("dev_tmp_list", {"kind": "scratch"}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True and payload["count"] == 1
+    row = payload["entries"][0]
+    assert row["id"] == first["id"]
+    assert row["session"] == {"harness": "opencode", "id": "ses_mcp"}
+    assert row["reason"] == "mcp fixture"
+    assert isinstance(row["bytes"], int) and isinstance(row["files"], int)
+    assert "CANARY" not in json.dumps(payload)
+
+    reply = server.handle(_call("dev_tmp_list", {
+        "owned": True, "include_all": True, "limit": 1}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True and payload["count"] == 2
+    assert payload["truncated"] is True
+
+    reply = server.handle(_call("dev_tmp_status", {}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True
+    assert payload["totals"]["entries"] == 2
+    assert payload["by_kind"]["scratch"]["entries"] == 1
+    assert payload["by_kind"]["check"]["entries"] == 1
+    assert isinstance(payload["filesystems"], list)
+    assert payload["registry_errors"] == []
+
+    reply = server.handle(_call("dev_tmp_list", {"kind": "nope"}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is False
+
+
+def test_tmp_mcp_tools_are_full_surface_and_read_only(server) -> None:
+    names = {tool["name"] for tool in server._tools}
+    assert {"dev_tmp_list", "dev_tmp_status"} <= names
+    assert not ({"dev_tmp_create", "dev_tmp_write", "dev_tmp_delete"}
+                & names)
+    graph = DevMemoryServer(server.mem, surface="graph")
+    graph_names = {tool["name"] for tool in graph._tools}
+    assert "dev_tmp_list" not in graph_names
+    assert "dev_tmp_status" not in graph_names
+
+
 def test_server_without_memory_still_builds_the_coding_tool_list() -> None:
     """A server may be started before a snapshot exists; static tools must load.
 

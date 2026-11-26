@@ -185,6 +185,54 @@ value or returns `None` when no id is known.  `suggest_path` returns a
 non-created suggestion, and `default_scratch_root` returns the managed scratch
 root.
 
+## Daemon `tmp` op and the `ozagia_scratch` tool (offline-tested)
+
+The graph daemon exposes the manager as the `tmp` operation so a harness can
+create scratch without a shell or a caller-supplied path:
+
+| Action | Writes? | Answer |
+| --- | --- | --- |
+| `preflight` | no | `{ok, id: null, path, exists: false}` |
+| `create` | one `scratch` entry | `{ok, id, path, expires_at, bytes, files, tmpfs}` |
+| `info` | no | `{ok, entry}` for one `entry_id` |
+| `list` | no | `{ok, entries, count, truncated, limit}` |
+| `status` | no | `{ok, ...temp_space.status(root)}` |
+
+The answers above show the handler fields. On the socket the JSON envelope's
+`id` is the request id, so the entry id also travels as `entry_id` (and is
+`null` for `preflight`); clients keep `entry_id`.
+
+`preflight` and `create` require `harness: "opencode"`, a session id of 1..128
+safe characters, and a reason of 1..200 characters without control characters.
+`ttl_s` is 60..7776000 seconds and defaults to seven days; the kind is fixed to
+`scratch`. A caller never supplies a path: `path` (or any other unknown field)
+is refused with a stable `code`. The daemon's root and state directory are
+authoritative, so the entry is always under
+`<state dir>/tmp/workspaces/scratch`.
+
+The OpenCode server plugin registers `ozagia_scratch` for the same operation.
+It takes only `{purpose, ttl_s?}`:
+
+```jsonc
+{"purpose": "parse fixture dump", "ttl_s": 3600}
+```
+
+The tool preflights, asserts the harness's **write** permission for the
+returned path, then creates at that same path (the daemon recomputes the
+suggestion; the caller never supplies it). It returns only `{ok, id, path,
+expires_at, bytes, files}`. It fails closed: no session, a denied permission or
+a down daemon returns a typed `refused`/`unavailable` result and creates
+nothing. There is **no `/tmp` fallback**, and no file contents or prompt text
+are returned or stored.
+
+The MCP full surface adds only the read-only views `dev_tmp_list` and
+`dev_tmp_status`; it deliberately exposes no create, write or delete tool.
+Creation remains the plugin, harness or `ozagia tmp create` path.
+
+This daemon/plugin/MCP slice is covered by offline tests (focused daemon,
+plugin and MCP suites). It has not been verified against a live OpenCode
+Desktop session; no model or host is called by those tests.
+
 ## Agent and eval integration (2026-11-26)
 
 The agent harness and the eval harness now use the registry. What is recorded,

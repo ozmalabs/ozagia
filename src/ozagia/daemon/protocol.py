@@ -231,6 +231,43 @@ Requests (`op`):
       their respective flags are true. The plan never installs anything;
       its source is `ozagia.core.toolchain.tool_plan`.
 
+    {"id": 17, "op": "tmp", "action": "preflight", "harness": "opencode",
+     "session": "ses_...", "reason": "parse fixture dump", "ttl_s"?: 604800}
+      -> {"id": 17, "ok": true, "id": null, "path": "<managed path>",
+          "exists": false}
+    {"id": 18, "op": "tmp", "action": "create", "harness": "opencode",
+     "session": "ses_...", "reason": "parse fixture dump", "ttl_s"?: 604800,
+     "model"?: "...", "run_id"?: "..."}
+      -> {"id": 18, "ok": true, "id": "tmp_...", "path": "...",
+          "expires_at": 123, "bytes": 0, "files": 0, "tmpfs": true}
+    {"id": 19, "op": "tmp", "action": "info", "entry_id": "tmp_..."}
+      -> {"id": 19, "ok": true, "entry": {...}}
+    {"id": 20, "op": "tmp", "action": "list", "kind"?: "scratch",
+     "session"?: "ses_...", "owned"?: true, "include_all"?: false,
+     "limit"?: 100}
+      -> {"id": 20, "ok": true, "entries": [...], "count": 1,
+          "truncated": false}
+    {"id": 21, "op": "tmp", "action": "status"}
+      -> {"id": 21, "ok": true, ...`temp_space.status(root)`}
+      Managed temporary space (`ozagia.core.temp_space`). `create` is the
+      only write: it creates one `scratch` entry under
+      `<state dir>/tmp/workspaces/scratch` and returns its path, expiry and
+      usage. `preflight` validates the same request and returns a suggested
+      path without creating anything; `info`, `list` and `status` are
+      read-only. The harness is `opencode`, the session id is required and
+      bounded, the reason is 1..200 characters without control characters,
+      and the TTL is 60..7776000 seconds (default seven days). A caller
+      never supplies a path: an unknown field (including `path`) is
+      refused. Errors carry a stable `code` (`invalid_action`,
+      `unknown_field`, `invalid_harness`, `invalid_session`,
+      `invalid_reason`, `invalid_ttl`, `invalid_kind`, `invalid_limit`,
+      `invalid_owned`, `invalid_include_all`, `not_found`,
+      `temp_error`). The daemon's root and state directory are
+      authoritative; nothing is written outside them. The `create` answer
+      also carries `entry_id` (the same value as `id`): over the socket the
+      JSON envelope repeats the request `id`, so `entry_id` is the
+      unambiguous entry id a client should keep.
+
 Sessions. `tool`, `after` and `read_check` with a `session` use that
 session's read ledger (`ozagia.intent.ledger`), keyed by (harness, session,
 `sub`). `sub` is optional: agents that share a session id send something
@@ -401,6 +438,7 @@ OPERATIONS = (
     "shutdown",
     "stats",
     "structural",
+    "tmp",
     "tool",
     "toolchain",
     "who",
