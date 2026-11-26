@@ -26,6 +26,7 @@
                                  [--ttl S] [--max-uses N] [--reason R]
     ozagia mesh delegation revoke DELEGATION_ID [--reason R]
     ozagia mesh delegation list|show [DELEGATION_ID]
+    ozagia mesh ozma status|map|check [--json]
     ozagia mesh prune (--expired | --delivered-before S) [--apply]
 
 Identity defaults to ``OZAGIA_MESH_HARNESS``/``OZAGIA_MESH_SESSION``.  Every
@@ -51,6 +52,7 @@ from typing import Any
 
 from ozagia.config import repo_root
 from ozagia.core import mesh as M
+from ozagia.core import ozma_mesh as O
 from ozagia.core import security as SEC
 
 PROG = "ozagia mesh"
@@ -274,6 +276,29 @@ def add_parser(sub: Any) -> None:
         "show", help="show one delegation")
     _add_common(delegation_show)
     delegation_show.add_argument("delegation_id")
+
+    ozma = children.add_parser(
+        "ozma", help="read-only Ozma mesh bridge status and identity mapping")
+    ozma_children = ozma.add_subparsers(dest="ozma_action", required=True)
+    ozma_status = ozma_children.add_parser(
+        "status", help="report Ozma bridge readiness without the network")
+    _add_common(ozma_status)
+    _add_identity(ozma_status)
+    ozma_map = ozma_children.add_parser(
+        "map", help="show the Ozagia to Ozma identity mapping")
+    _add_common(ozma_map)
+    _add_identity(ozma_map)
+    ozma_map.add_argument("--save", action="store_true",
+                          help="write the local mapping record")
+    ozma_check = ozma_children.add_parser(
+        "check", help="validate readiness for the configured mode")
+    _add_common(ozma_check)
+    _add_identity(ozma_check)
+    ozma_check.add_argument("--require-ready", action="store_true",
+                            help="exit 1 when the configured mode is not ready")
+    ozma_check.add_argument("--live", action="store_true",
+                            help="request a live check; unavailable in this "
+                                 "slice and never contacts the network")
 
     prune = children.add_parser("prune", help="explicitly remove read messages")
     _add_common(prune)
@@ -533,6 +558,8 @@ def run(args: argparse.Namespace) -> int:
             return _run_link(root, args, as_json)
         if action == "delegation":
             return _run_delegation(root, args, as_json)
+        if action == "ozma":
+            return _run_ozma(root, args, as_json)
         if action == "merge":
             harness, session = _coordinate(root, args)
             payload = M.merge_request(
@@ -799,6 +826,102 @@ def _run_delegation(root: Path, args: argparse.Namespace,
             print(f"{verb} {_print_delegation(payload['delegation'])}")
         return 0
     raise M.MeshError(f"unknown delegation action {action!r}")
+
+
+def _run_ozma(root: Path, args: argparse.Namespace, as_json: bool) -> int:
+    action = args.ozma_action
+    harness = getattr(args, "harness", None)
+    session = getattr(args, "session", None)
+    if action == "status":
+        payload = O.status(root, harness=harness, session=session)
+        if as_json:
+            _print_json(payload)
+        else:
+            flight = payload.get("flight") or {}
+            agent = payload.get("agent") or {}
+            card = payload.get("card") or {}
+            verification = payload.get("verification") or {}
+            print(f"state={payload.get('state')} "
+                  f"configured={payload.get('configured')} "
+                  f"enabled={payload.get('enabled')} "
+                  f"mode={payload.get('mode')}")
+            print(f"transport={payload.get('transport')} "
+                  f"lossy={payload.get('lossy')} "
+                  f"flight={flight.get('id')} "
+                  f"flight_source={flight.get('source')}")
+            print(f"agent={agent.get('id') or '-'} "
+                  f"scope={agent.get('scope')} "
+                  f"card_fingerprint={card.get('fingerprint')} "
+                  f"verification={verification.get('status')}")
+            print(f"wake_modes={','.join(payload.get('wake_modes') or ())} "
+                  f"channels={payload.get('channels', {}).get('count', 0)} "
+                  f"subscriptions="
+                  f"{payload.get('subscriptions', {}).get('count', 0)}")
+            queue = payload.get("queue") or {}
+            print(f"queue={queue.get('max_messages')}/"
+                  f"{queue.get('max_bytes')} "
+                  f"priority_floor={payload.get('priority_floor')} "
+                  f"network={payload.get('network')}")
+            readiness = payload.get("readiness") or {}
+            print(f"ready={readiness.get('ready')} "
+                  f"ready_for={','.join(readiness.get('ready_for') or ())}")
+            for reason in readiness.get("reasons") or ():
+                print(f"note: {reason}")
+        return 0
+    if action == "map":
+        payload = O.map_report(root, harness=harness, session=session,
+                               save=args.save)
+        if as_json:
+            _print_json(payload)
+        else:
+            flight = payload.get("flight") or {}
+            ozagia = payload.get("ozagia") or {}
+            ozma = payload.get("ozma") or {}
+            verification = payload.get("verification") or {}
+            record = payload.get("record") or {}
+            print(f"flight={flight.get('id')} source={flight.get('source')}")
+            if ozagia:
+                print(f"ozagia={ozagia.get('harness')}:"
+                      f"{ozagia.get('session')} key={ozagia.get('key')} "
+                      f"registered={ozagia.get('registered')}")
+            else:
+                print("ozagia=- (no --harness/--session identity)")
+            print(f"ozma={ozma.get('agent_id') or '-'} "
+                  f"scope={ozma.get('scope')} "
+                  f"transport={payload.get('transport')} "
+                  f"verification={verification.get('status')}")
+            print(f"state={payload.get('state')} "
+                  f"lossy={payload.get('lossy')} "
+                  f"record={record.get('path') or '-'} "
+                  f"exists={record.get('exists')} "
+                  f"saved={record.get('saved')}")
+            for entry in payload.get("loss_table") or ():
+                print(f"loss {entry['field']}: native={entry['native']} "
+                      f"a2a={entry['a2a']}")
+            print(f"network={payload.get('network')}")
+        return 0
+    if action == "check":
+        payload = O.check(root, harness=harness, session=session,
+                          live=args.live)
+        if as_json:
+            _print_json(payload)
+        else:
+            print(f"state={payload.get('state')} "
+                  f"mode={payload.get('mode')} "
+                  f"effective_mode={payload.get('effective_mode')} "
+                  f"ready={payload.get('ready')}")
+            print(f"ready_for={','.join(payload.get('ready_for') or ())} "
+                  f"transport={payload.get('transport')} "
+                  f"lossy={payload.get('lossy')}")
+            for reason in payload.get("reasons") or ():
+                print(f"note: {reason}")
+            live = payload.get("live") or {}
+            print(f"live={live.get('state')} "
+                  f"network={payload.get('network')}")
+        if getattr(args, "require_ready", False) and not payload.get("ready"):
+            return 1
+        return 0
+    raise M.MeshError(f"unknown ozma action {action!r}")
 
 
 def _refusal(exc: M.MeshRefusal, as_json: bool) -> int:

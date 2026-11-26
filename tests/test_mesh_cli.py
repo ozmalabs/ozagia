@@ -1,6 +1,7 @@
 """The `ozagia mesh` command surface and its exit codes."""
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 from pathlib import Path
@@ -144,6 +145,76 @@ def test_missing_identity_and_bad_config_are_exit_two(env, capsys) -> None:
     assert cli.main(["mesh", "status", "--json"]) == 2
     payload = _json(capsys)
     assert payload["code"] == "mesh_config"
+
+
+def test_ozma_status_defaults_to_off_and_invalid_config_exits_two(env,
+                                                                  capsys) -> None:
+    repo, state = env
+    assert cli.main(["mesh", "ozma", "status", "--json"]) == 0
+    payload = _json(capsys)
+    assert payload["state"] == "off"
+    assert payload["network"] is False
+    assert payload["agent"]["id"] == ""
+    assert not state.exists()
+
+    assert cli.main(["mesh", "ozma", "map", "--json"]) == 0
+    assert _json(capsys)["record"]["exists"] is False
+    assert not state.exists()
+
+    (repo / ".ozagia.toml").write_text("[ozma_mesh]\nbogus = 1\n",
+                                       encoding="utf-8")
+    assert cli.main(["mesh", "ozma", "status", "--json"]) == 2
+    assert _json(capsys)["code"] == "ozma_mesh_config"
+
+
+def test_ozma_map_save_and_check_exit_codes(env, capsys) -> None:
+    repo, state = env
+    card = repo / "card.json"
+    card.write_text('{"agent":"agent:reviewer"}\n', encoding="utf-8")
+    digest = "sha256:" + hashlib.sha256(card.read_bytes()).hexdigest()
+    (repo / ".ozagia.toml").write_text(
+        "[ozma_mesh]\nenabled = true\nmode = \"messages\"\n"
+        'transport = "native"\nagent_id = "agent:reviewer:wu1"\n'
+        'card_path = "card.json"\n'
+        f'card_fingerprint = "{digest}"\nverified_by = "host"\n',
+        encoding="utf-8")
+
+    assert cli.main(["mesh", "ozma", "map", "--save", "--json"]) == 2
+    assert _json(capsys)["code"] == "ozma_mesh_config"
+
+    assert cli.main(["mesh", "ozma", "map", "--save", "--harness", "opencode",
+                     "--session", "a", "--json"]) == 0
+    saved = _json(capsys)
+    assert saved["record"]["saved"] is True
+    path = Path(saved["record"]["path"])
+    assert path.is_file()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(
+        (state / "mesh" / "ozma" / "identities").stat().st_mode) == 0o700
+
+    assert cli.main(["mesh", "ozma", "check", "--require-ready",
+                     "--json"]) == 1
+    checked = _json(capsys)
+    assert checked["state"] == "host_declared"
+    assert checked["ready"] is False
+
+    assert cli.main(["mesh", "ozma", "check", "--live", "--json"]) == 0
+    live = _json(capsys)
+    assert live["live"]["state"] == "unavailable"
+    assert live["live"]["network"] is False
+
+
+def test_ozma_json_does_not_echo_the_auth_ref(env, capsys) -> None:
+    repo, _ = env
+    reference = "secret://ozma/canary-reference"
+    (repo / ".ozagia.toml").write_text(
+        "[ozma_mesh]\nenabled = true\nmode = \"status\"\n"
+        f'auth_ref = "{reference}"\n', encoding="utf-8")
+    for action in ("status", "map", "check"):
+        assert cli.main(["mesh", "ozma", action, "--json"]) == 0
+        output = capsys.readouterr().out
+        assert reference not in output
+        assert "secret://" not in output
 
 
 def test_lease_acquire_queue_and_release_exit_codes(env, capsys) -> None:
