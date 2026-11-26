@@ -31,6 +31,7 @@ from ozagia.config import (
     state_path,
 )
 from ozagia.core import owners as owners_module
+from ozagia.core import mesh as mesh_module
 from ozagia.core.files import (
     FileLedgerError,
     ledger_path,
@@ -96,6 +97,11 @@ OWNERSHIP_EDIT_SCAN = 2000
 OWNERSHIP_FILE_LIMIT = 16
 OWNERSHIP_ROW_LIMIT = 32
 OWNERSHIP_SESSION_LIMIT = 16
+MESH_SESSION_LIMIT = 32
+MESH_LEASE_LIMIT = 32
+MESH_LINK_LIMIT = 32
+MESH_DELEGATION_LIMIT = 16
+MESH_ERROR_LIMIT = 16
 
 
 def _now() -> str:
@@ -1308,6 +1314,98 @@ def _reviews_status(
     return _section("ok", report)
 
 
+def _mesh_session_row(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {"key": item.get("key"), "harness": item.get("harness"),
+            "session": item.get("session"),
+            "effective_state": item.get("effective_state"),
+            "exposure": item.get("exposure"), "role": item.get("role"),
+            "unread": item.get("unread"),
+            "active_leases": list(item.get("active_leases") or ())[:16]}
+
+
+def _mesh_lease_row(item: Mapping[str, Any], self_key: Any) -> dict[str, Any]:
+    resource = item.get("resource") or {}
+    holder = item.get("holder") or {}
+    return {"lease_id": item.get("lease_id"),
+            "resource": {"kind": resource.get("kind"),
+                         "id": resource.get("id"),
+                         "mode": resource.get("mode")},
+            "holder": {"harness": holder.get("harness"),
+                       "session": holder.get("session"),
+                       "key": holder.get("key")},
+            "effective_state": item.get("effective_state"),
+            "expires_at": item.get("expires_at"),
+            "queued": len(item.get("queue") or ()),
+            "holder_is_self": holder.get("key") == self_key}
+
+
+def _mesh_link_row(item: Mapping[str, Any]) -> dict[str, Any]:
+    peer = item.get("peer") or {}
+    return {"link_id": item.get("link_id"),
+            "peer": {"harness": peer.get("harness"),
+                     "session": peer.get("session"),
+                     "key": peer.get("key")},
+            "relation": item.get("relation"),
+            "reciprocal_relation": item.get("reciprocal_relation"),
+            "state": item.get("state"),
+            "expires_at": item.get("expires_at")}
+
+
+def _mesh_delegation_row(item: Mapping[str, Any]) -> dict[str, Any]:
+    return {"delegation_id": item.get("delegation_id"),
+            "grantor": item.get("grantor"),
+            "grantee": item.get("grantee"),
+            "actions": list(item.get("actions") or ()),
+            "scope": item.get("scope"),
+            "state": item.get("state"),
+            "expires_at": item.get("expires_at"),
+            "remaining_uses": item.get("remaining_uses")}
+
+
+def _mesh_status(root: Path) -> dict[str, Any]:
+    """Read-only session-mesh section; never creates state or a daemon."""
+    try:
+        configured = mesh_module.mesh_configured(root)
+        present = mesh_module.mesh_dir(root).is_dir()
+    except Exception as exc:  # noqa: BLE001 - a broken mesh is unknown
+        return _section("unknown", None, error=str(exc))
+    if not configured and not present:
+        return _section("absent", None)
+    try:
+        payload = mesh_module.status(
+            root, harness=os.environ.get("OZAGIA_MESH_HARNESS"),
+            session=os.environ.get("OZAGIA_MESH_SESSION"))
+    except Exception as exc:  # noqa: BLE001 - never fail the whole snapshot
+        return _section("unknown", None, error=str(exc))
+    self_row = payload.get("self") or {}
+    self_key = self_row.get("key")
+    sessions = [item for item in (payload.get("sessions") or ())
+                if item.get("key") != self_key]
+    report = {
+        "mesh_id": payload.get("mesh_id"),
+        "repo_id": payload.get("repo_id"),
+        "counts": {
+            "sessions": payload.get("session_counts") or {},
+            "leases": payload.get("lease_counts") or {},
+            "links": payload.get("link_counts") or {},
+            "delegations": payload.get("delegation_counts") or {},
+        },
+        "self": (_mesh_session_row(self_row) if self_row else None),
+        "peers": [_mesh_session_row(item)
+                  for item in sessions[:MESH_SESSION_LIMIT]],
+        "links": [_mesh_link_row(item)
+                  for item in (payload.get("links") or ())[:MESH_LINK_LIMIT]],
+        "leases": [_mesh_lease_row(item, self_key)
+                   for item in (payload.get("leases") or ())[:MESH_LEASE_LIMIT]],
+        "delegations": [_mesh_delegation_row(item)
+                        for item in (payload.get("delegations") or ())[
+                            :MESH_DELEGATION_LIMIT]],
+        "unread": int(self_row.get("unread") or 0),
+        "errors": list(payload.get("errors") or ())[:MESH_ERROR_LIMIT],
+    }
+    return _section("ok", report)
+
+
 def status(
     root: str | Path,
     *,
@@ -1354,6 +1452,7 @@ def status(
     sessions = _sessions_status(root_path, degraded)
     ownership = _ownership_status(root_path, degraded)
     reviews = _reviews_status(root_path, degraded)
+    mesh = _mesh_status(root_path)
 
     return {
         "schema": SCHEMA,
@@ -1377,6 +1476,7 @@ def status(
         "sessions": sessions,
         "ownership": ownership,
         "reviews": reviews,
+        "mesh": mesh,
         "config": config,
     }
 
@@ -1692,6 +1792,28 @@ def format_status(report: Mapping[str, Any]) -> str:
     else:
         lines.append(f"reviews: {reviews.get('state')} "
                      f"({_text(reviews.get('error'))})")
+
+    mesh = report.get("mesh") or {}
+    mesh_report = mesh.get("report")
+    if isinstance(mesh_report, Mapping):
+        counts = mesh_report.get("counts") or {}
+        session_counts = counts.get("sessions") or {}
+        lease_counts = counts.get("leases") or {}
+        self_row = mesh_report.get("self") or {}
+        lines.append(
+            f"mesh: {_text(mesh_report.get('mesh_id'))} "
+            f"self={_text(self_row.get('harness'))}:"
+            f"{_text(self_row.get('session'))} "
+            f"role={_text(self_row.get('role'))} "
+            f"sessions live={session_counts.get('live', 0)} "
+            f"stale={session_counts.get('stale', 0)} "
+            f"leases active={lease_counts.get('active', 0)} "
+            f"queued={lease_counts.get('queued', 0)} "
+            f"unread={mesh_report.get('unread', 0)}")
+    elif mesh.get("state") == "absent":
+        lines.append("mesh: off (no state or [mesh] configuration)")
+    else:
+        lines.append(f"mesh: {mesh.get('state')} ({_text(mesh.get('error'))})")
 
     config = report.get("config") or {}
     config_path_text = config.get("path") or "no configuration file"

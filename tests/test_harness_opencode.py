@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from ozagia.core import mesh as M
 from ozagia.core import temp_space as TS
 from ozagia.daemon import autostart as daemon_autostart
 from ozagia.harness import launch_status
@@ -42,7 +43,10 @@ rec = {"argv": sys.argv, "cwd": os.getcwd(), "pid": os.getpid(),
        "env": {k: os.environ.get(k) for k in ("OZAGIA_DAEMON_SOCK", "PWD", "OPENCODE_CONFIG",
                                               "OZAGIA_LAUNCH_STATUS",
                                               "OZAGIA_REPO_MAP_TOKENS", "TMPDIR", "TMP",
-                                              "TEMP", "OZAGIA_SCRATCH_ROOT")}}
+                                              "TEMP", "OZAGIA_SCRATCH_ROOT",
+                                              "OZAGIA_MESH_SUMMARY",
+                                              "OZAGIA_MESH_HARNESS",
+                                              "OZAGIA_MESH_SESSION")}}
 # `opencode run` reads its message from stdin; the TUI path has none.
 if sys.argv[1:2] == ["run"]:
     rec["stdin"] = sys.stdin.read()
@@ -863,3 +867,186 @@ def test_managed_run_acquires_and_releases_the_run_root_lease(
     assert leases[0][1].closed is True
     assert TS.lease_held(repo, res["tmp_id"]) is False
     assert (Path(res["run_root"]) / TS.LEASE_NAME).is_file()
+
+
+# --------------------------------------------------------------------------- #
+# session mesh (layer 0-1)
+# --------------------------------------------------------------------------- #
+def test_mesh_enabled_registers_heartbeats_and_unregisters(repo, stub,
+                                                           monkeypatch, tmp_path):
+    beats = []
+    original = M.heartbeat
+
+    def spy(*args, **kwargs):
+        beats.append(args)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(M, "heartbeat", spy)
+    monkeypatch.setattr(hop, "MESH_HEARTBEAT_S", 0.02)
+    monkeypatch.setenv("STUB_MODE", "sleep")
+    res = _run(repo, tmp_path, mesh=True, timeout_s=0.3)
+    rec = _record(stub)
+
+    assert res["mesh_enabled"] is True
+    assert res["mesh_registered"] is True
+    assert res["mesh_id"] == "default"
+    assert res["mesh_session"] == f"run:{Path(res['run_root']).name}"
+    assert not res["mesh_session"].startswith("ses_")
+    assert res["mesh_key"].startswith("sk_")
+    assert res["mesh_exposure"] == "read"
+    assert res["mesh_peer_count"] == 0
+    assert res["mesh_lease_ids"] == []
+    assert res["mesh_cleanup_errors"] == []
+    assert beats, "the heartbeat thread must run while the session is alive"
+
+    summary = rec["env"]["OZAGIA_MESH_SUMMARY"]
+    assert summary and len(summary) <= hop.MESH_SUMMARY_MAX_CHARS
+    assert res["mesh_key"] in summary
+    assert "role=peer" in summary and "exposure=read" in summary
+    assert rec["env"]["OZAGIA_MESH_HARNESS"] == "opencode-runner"
+    assert rec["env"]["OZAGIA_MESH_SESSION"] == res["mesh_session"]
+
+    status = M.status(repo, harness="opencode-runner",
+                      session=res["mesh_session"])
+    self_row = status["self"]
+    assert self_row["effective_state"] == "ended"
+    assert self_row["exposure"] == "read"
+    assert self_row["worktree"] == str(repo)
+    assert "mesh:" in hop._summary(res)
+
+
+def test_mesh_disabled_wins_over_env_and_creates_no_state(repo, stub,
+                                                          monkeypatch, tmp_path):
+    monkeypatch.setenv("OZAGIA_MESH", "1")
+    res = _run(repo, tmp_path, mesh=False)
+    rec = _record(stub)
+
+    assert res["mesh_enabled"] is False
+    assert res["mesh_registered"] is False
+    assert not (repo / ".ozagia" / "mesh").exists()
+    assert rec["env"]["OZAGIA_MESH_SUMMARY"] is None
+    assert "mesh: off" in hop._summary(res)
+
+
+def test_mesh_config_enabled_is_used_when_no_flag_is_given(repo, stub, tmp_path):
+    (repo / ".ozagia.toml").write_text("[mesh]\nenabled = true\n",
+                                       encoding="utf-8")
+    res = _run(repo, tmp_path)
+
+    assert res["mesh_enabled"] is True and res["mesh_registered"] is True
+
+
+def test_mesh_registration_failure_does_not_abort_the_run(repo, stub,
+                                                          monkeypatch, tmp_path):
+    def fail(*args, **kwargs):
+        raise RuntimeError("mesh registry unavailable")
+
+    monkeypatch.setattr(M, "register", fail)
+    res = _run(repo, tmp_path, mesh=True)
+    rec = _record(stub)
+
+    assert res["exit_code"] == 0 and res["timed_out"] is False
+    assert res["mesh_enabled"] is True
+    assert res["mesh_registered"] is False
+    assert "mesh registry unavailable" in res["mesh_warning"]
+    assert rec["env"]["OZAGIA_MESH_SUMMARY"] is None
+    assert "off/unavailable" in hop._summary(res)
+
+
+def test_mesh_cleanup_releases_leases_on_an_exception(repo, stub,
+                                                      monkeypatch, tmp_path):
+    def boom(exe, work, session, **kwargs):
+        run_root = Path(kwargs["log_dir"]).parent
+        name = f"run:{run_root.name}"
+        M.register(repo, "opencode-runner", name, exposure="coordinate")
+        M.lease_acquire(repo, "opencode-runner", name, kind="branch",
+                        resource_id="main", mode="read")
+        raise RuntimeError("stop after registration")
+
+    monkeypatch.setattr(hop, "_with_plugin", boom)
+    with pytest.raises(RuntimeError, match="stop after registration"):
+        _run(repo, tmp_path, mesh=True)
+
+    records = list((repo / ".ozagia" / "mesh" / "default" /
+                    "sessions").glob("*.json"))
+    assert len(records) == 1
+    session = json.loads(records[0].read_text(encoding="utf-8"))
+    assert session["state"] == "ended"
+    assert session["harness"] == "opencode-runner"
+
+    leases = M.lease_list(repo, include_all=True)["leases"]
+    mine = [item for item in leases
+            if item["holder"]["session"] == session["session"]]
+    assert mine and all(item["effective_state"] == "released" for item in mine)
+
+
+def test_mesh_clone_registers_under_the_source_state_dir(repo, stub, tmp_path):
+    res = _run(repo, tmp_path, mesh=True, clone=True)
+
+    assert res["mesh_registered"] is True
+    assert Path(res["workdir"]) != repo
+    source_sessions = repo / ".ozagia" / "mesh" / "default" / "sessions"
+    assert source_sessions.is_dir()
+    record = json.loads(next(source_sessions.glob("*.json")).read_text(
+        encoding="utf-8"))
+    assert record["worktree"] == res["workdir"]
+    assert not (Path(res["workdir"]) / ".ozagia" / "mesh").exists()
+
+
+def test_mesh_summary_counts_peers_and_carries_no_message_body(repo, stub,
+                                                               tmp_path):
+    M.register(repo, "peer", "a", pid=os.getpid(), exposure="coordinate")
+    M.register(repo, "peer", "b", pid=os.getpid(), exposure="read")
+    M.send(repo, "peer", "a", to="peer:b", kind="note", subject="SUBJECT CANARY",
+           body="BODY CANARY")
+    res = _run(repo, tmp_path, mesh=True)
+    summary = _record(stub)["env"]["OZAGIA_MESH_SUMMARY"]
+
+    assert res["mesh_peer_count"] == 2
+    assert "peers live=2 stale=0" in summary
+    assert "SUBJECT CANARY" not in summary
+    assert "BODY CANARY" not in summary
+
+
+def test_mesh_summary_text_is_bounded_and_keeps_the_unread_count():
+    leases = [{
+        "effective_state": "active",
+        "resource": {"kind": "worktree",
+                     "id": "/tmp/" + "x" * 300, "mode": "write"},
+        "holder": {"key": "sk_other"},
+        "expires_at": "2026-01-01T00:00:00+00:00",
+        "queue": [{"key": "sk_a"}, {"key": "sk_b"}],
+    } for _ in range(4)]
+    links = [{
+        "peer": {"harness": "opencode", "session": "s" * 100},
+        "relation": "peer", "state": "active",
+    } for _ in range(4)]
+    payload = {
+        "mesh_id": "default",
+        "self": {"key": "sk_self", "harness": "opencode-runner",
+                 "session": "run:abcdef", "role": "peer",
+                 "exposure": "read", "unread": 9, "links": links},
+        "sessions": [], "leases": leases,
+    }
+    text = hop._mesh_summary_text(payload)
+
+    assert len(text) <= hop.MESH_SUMMARY_MAX_CHARS
+    assert text.endswith("unread=9")
+    assert "mesh=default" in text
+
+
+def test_mesh_heartbeat_failure_is_advisory_not_fatal(repo, stub, monkeypatch,
+                                                      tmp_path):
+    monkeypatch.setattr(
+        M, "heartbeat",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("heartbeat unavailable")))
+    monkeypatch.setattr(hop, "MESH_HEARTBEAT_S", 0.02)
+    monkeypatch.setenv("STUB_MODE", "sleep")
+    res = _run(repo, tmp_path, mesh=True, timeout_s=0.3)
+
+    assert res["mesh_registered"] is True
+    assert "heartbeat unavailable" in res["mesh_warning"]
+    status = M.status(repo, harness="opencode-runner",
+                      session=res["mesh_session"])
+    assert status["self"]["effective_state"] == "ended"

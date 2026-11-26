@@ -86,6 +86,7 @@ from pathlib import Path
 from typing import Any, Iterator, Sequence
 
 from ozagia.config import config_path
+from ozagia.core import mesh as mesh_module
 from ozagia.core import temp_space as TS
 from ozagia.daemon.protocol import ENV_SOCK
 from ozagia.eval import agent as ea
@@ -107,6 +108,13 @@ REPO_MAP_MAX_TOKENS = 8000
 # Default lifetime of a managed run root (7 days).
 DEFAULT_TMP_TTL_S = 7 * 24 * 60 * 60
 SCRATCH_ENV = "OZAGIA_SCRATCH_ROOT"
+# The harness registers as a runner identity, never as an invented `ses_...`.
+MESH_SUMMARY_ENV = "OZAGIA_MESH_SUMMARY"
+MESH_HARNESS = "opencode-runner"
+MESH_EXPOSURE = "read"
+MESH_SUMMARY_MAX_CHARS = 700
+MESH_HEARTBEAT_S = mesh_module.HEARTBEAT_S
+
 # Seconds the TUI gets to exit after SIGTERM before SIGKILL.
 TUI_KILL_GRACE_S = ea.KILL_GRACE_S
 
@@ -483,6 +491,200 @@ def _tmp_line(res: dict[str, Any]) -> str:
             f"ozagia tmp release {res.get('tmp_id')} --delete")
 
 
+def _mesh_warn(res: dict[str, Any], message: Any) -> None:
+    """Record a non-fatal mesh problem without making the run fail."""
+    text = " ".join(str(message).split())[:300]
+    if not text:
+        return
+    old = res.get("mesh_warning")
+    res["mesh_warning"] = f"{old}; {text}" if old else text
+
+
+def _mesh_branch(work: Path) -> str | None:
+    """The checked-out branch, when git can name one cheaply."""
+    found = _git(["rev-parse", "--abbrev-ref", "HEAD"], work)
+    name = found.stdout.strip()
+    return name if found.returncode == 0 and name and name != "HEAD" else None
+
+
+def _mesh_text(value: Any, limit: int = 120) -> str:
+    text = " ".join(str(value if value is not None else "?").split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _mesh_summary_text(payload: dict[str, Any],
+                       max_chars: int = MESH_SUMMARY_MAX_CHARS) -> str:
+    """Bounded metadata for the OpenCode process; never a body or subject."""
+    self_row = payload.get("self") or {}
+    key = self_row.get("key")
+    parts = [
+        f"mesh={_mesh_text(payload.get('mesh_id'), 64)}",
+        f"self={_mesh_text(key, 32)}",
+        f"{_mesh_text(self_row.get('harness'), 32)}:{_mesh_text(self_row.get('session'), 80)}",
+        f"role={_mesh_text(self_row.get('role'), 16)}",
+        f"exposure={_mesh_text(self_row.get('exposure'), 16)}",
+    ]
+    sessions = [item for item in (payload.get("sessions") or [])
+                if item.get("key") != key]
+    live = sum(1 for item in sessions
+               if item.get("effective_state") == "live")
+    stale = sum(1 for item in sessions
+                if item.get("effective_state") == "stale")
+    parts.append(f"peers live={live} stale={stale}")
+    links = []
+    link_items = self_row.get("links")
+    if link_items is None:
+        link_items = payload.get("links") or []
+    for item in link_items[:4]:
+        peer = item.get("peer") or {}
+        if not isinstance(peer, dict):
+            peer = {}
+        links.append(
+            f"{_mesh_text(peer.get('harness'), 24)}:"
+            f"{_mesh_text(peer.get('session'), 60)}"
+            f" rel={_mesh_text(item.get('relation'), 8)}"
+            f" state={_mesh_text(item.get('state'), 12)}")
+    if links:
+        parts.append("links=[" + " | ".join(links) + "]")
+    leases = []
+    for item in (payload.get("leases") or []):
+        if item.get("effective_state") not in {"active", "stale"}:
+            continue
+        if len(leases) >= 4:
+            break
+        resource = item.get("resource") or {}
+        holder = item.get("holder") or {}
+        lease = (f"{_mesh_text(resource.get('kind'), 16)}:"
+                 f"{_mesh_text(resource.get('id'), 80)}"
+                 f" mode={_mesh_text(resource.get('mode'), 8)}"
+                 f" exp={_mesh_text(item.get('expires_at'), 32)}"
+                 f" queue={len(item.get('queue') or ())}")
+        if holder.get("key") == key:
+            lease += " holder=self"
+        leases.append(lease)
+    if leases:
+        parts.append("leases=[" + " | ".join(leases) + "]")
+    tail = f"unread={int(self_row.get('unread') or 0)}"
+    text = "; ".join(parts)
+    suffix = "; " + tail
+    room = max_chars - len(suffix) - 1
+    if len(text) > room:
+        text = text[:max(0, room)] + ("…" if room >= 0 else "")
+    text += suffix
+    return text[:max_chars]
+
+
+class _MeshHeartbeat:
+    """Refresh one mesh registration until stopped; failures are advisory."""
+
+    def __init__(self, root: Path, harness: str, session: str,
+                 on_error: Any, interval: float | None = None) -> None:
+        self.root = root
+        self.harness = harness
+        self.session = session
+        self.on_error = on_error
+        self.interval = max(0.01, float(
+            MESH_HEARTBEAT_S if interval is None else interval))
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="ozagia-mesh-heartbeat")
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            try:
+                mesh_module.heartbeat(self.root, self.harness, self.session)
+            except Exception as exc:  # noqa: BLE001 - heartbeat fails open
+                try:
+                    self.on_error(f"mesh heartbeat failed: {exc}")
+                except Exception:  # noqa: BLE001 - never kill the thread
+                    pass
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+
+
+def _mesh_start(source: Path, work: Path, run_root: Path,
+                res: dict[str, Any]) -> tuple[_MeshHeartbeat | None, str | None]:
+    """Register this runner under the source state dir and start heartbeat."""
+    harness = MESH_HARNESS
+    session = f"run:{run_root.name}"
+    res.update(mesh_session=session, mesh_exposure=MESH_EXPOSURE)
+    try:
+        view = mesh_module.register(
+            source, harness, session, pid=os.getpid(),
+            worktree=str(work), branch=_mesh_branch(work),
+            exposure=MESH_EXPOSURE, source="host")
+    except Exception as exc:  # noqa: BLE001 - registration fails open
+        _mesh_warn(res, f"mesh registration failed: {exc}")
+        return None, None
+    res.update(mesh_registered=True, mesh_id=view.get("mesh_id"),
+               mesh_key=view.get("key"), mesh_exposure=view.get("exposure"))
+    summary: str | None = None
+    try:
+        payload = mesh_module.status(source, harness=harness, session=session)
+        res["mesh_peer_count"] = sum(
+            1 for item in (payload.get("sessions") or ())
+            if item.get("key") != view.get("key")
+            and item.get("effective_state") in {"live", "stale"})
+        summary = _mesh_summary_text(payload)
+    except Exception as exc:  # noqa: BLE001 - summary is optional
+        _mesh_warn(res, f"mesh summary unavailable: {exc}")
+    beat: _MeshHeartbeat | None = None
+    try:
+        beat = _MeshHeartbeat(source, harness, session,
+                              lambda message: _mesh_warn(res, message))
+        beat.start()
+    except Exception as exc:  # noqa: BLE001 - heartbeat is best effort
+        _mesh_warn(res, f"mesh heartbeat unavailable: {exc}")
+        beat = None
+    return beat, summary
+
+
+def _mesh_finish(source: Path, res: dict[str, Any],
+                 heartbeat: _MeshHeartbeat | None) -> None:
+    """Stop heartbeat, release this runner's leases, then unregister."""
+    errors = res.setdefault("mesh_cleanup_errors", [])
+    try:
+        if heartbeat is not None:
+            heartbeat.stop()
+    except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+        errors.append(f"mesh heartbeat stop failed: {exc}")
+    if not res.get("mesh_registered"):
+        return
+    harness = MESH_HARNESS
+    session = str(res.get("mesh_session") or "")
+    held: list[str] = []
+    try:
+        records = mesh_module.lease_list(source, include_all=True).get(
+            "leases") or []
+        for item in records:
+            holder = item.get("holder") or {}
+            if (holder.get("harness"), holder.get("session")) != (harness,
+                                                                   session):
+                continue
+            if item.get("effective_state") not in {"active", "stale"}:
+                continue
+            held.append(str(item.get("lease_id")))
+        res["mesh_lease_ids"] = held
+        for lease_id in held:
+            try:
+                mesh_module.lease_release(source, harness, session, lease_id)
+            except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+                errors.append(f"mesh lease {lease_id} release failed: {exc}")
+    except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+        errors.append(f"mesh lease cleanup failed: {exc}")
+    try:
+        mesh_module.unregister(source, harness, session, release_leases=True)
+    except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+        errors.append(f"mesh unregister failed: {exc}")
+
+
 def _summary(res: dict[str, Any]) -> str:
     def yn(v: Any) -> str:
         return "unknown" if v is None else ("yes" if v else "no")
@@ -519,6 +721,17 @@ def _summary(res: dict[str, Any]) -> str:
     if prep.get("still_stale"):
         lines.append("  note: the snapshot was refreshed but HEAD moved since it was built; "
                      "`ozagia index --rebuild` updates git history")
+    if res.get("mesh_registered"):
+        lines.append(
+            f"  mesh: {res.get('mesh_id')} {res.get('mesh_session')} "
+            f"exposure={res.get('mesh_exposure')}; "
+            f"peers {res.get('mesh_peer_count', '?')}; "
+            f"leases {len(res.get('mesh_lease_ids') or [])}")
+    elif res.get("mesh_enabled"):
+        why = res.get("mesh_warning") or "not registered"
+        lines.append(f"  mesh: off/unavailable ({why})")
+    else:
+        lines.append("  mesh: off")
     if res.get("plugin_loaded") is False:
         lines.append("  warning: the plugin never connected to the daemon; OpenCode ran "
                      "with its built-in tools only")
@@ -549,6 +762,7 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
               background: bool | None = None,
               repo_map_tokens: int | None = None,
               opencode_config: str | Path | None = None,
+              mesh: bool | None = None,
               managed_tmp: bool = True,
               tmp_ttl_s: int | None = None,
               clean_logs: bool = False) -> dict[str, Any]:
@@ -583,7 +797,20 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
     root is not registered, the source state dir is not created for it, and
     scratch stays under `<run root>/scratch`. `clean_logs` (default off)
     removes an owned run root and scratch only after a successful run; a kept
-    clone, a failure or a timeout always keeps them."""
+    clone, a failure or a timeout always keeps them.
+
+    `mesh` is the layer 0-1 session-mesh opt-in: `None` follows `[mesh]
+    enabled` or `OZAGIA_MESH`, `True`/`False` (from `--mesh`/`--no-mesh`) win.
+    When on, the harness registers `opencode-runner` / `run:<run root name>`
+    under the source repository's state directory with exposure `read`,
+    heartbeats while the session runs, releases its leases and unregisters on
+    every exit path. Registration and heartbeat fail open: a mesh problem is
+    reported in `mesh_warning` and never aborts the run. A registered run
+    passes a bounded metadata summary (`OZAGIA_MESH_SUMMARY`) to the OpenCode
+    process only. The result carries `mesh_enabled`, `mesh_id`,
+    `mesh_session`, `mesh_key`, `mesh_exposure`, `mesh_registered`,
+    `mesh_peer_count`, `mesh_lease_ids`, `mesh_warning` and
+    `mesh_cleanup_errors`."""
     if repo_map_tokens is not None:
         repo_map_tokens = validate_repo_map_tokens(repo_map_tokens)
     provider_config = (load_provider_config(opencode_config)
@@ -636,7 +863,21 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
                            "tmp_registered": False, "tmp_ttl_s": tmp_ttl_s if managed else None,
                            "tmp_expires_at": None, "tmp_bytes": None, "tmp_files": None,
                            "tmpfs": None, "scratch_root": None, "tmp_cleaned": None,
-                           "tmp_leased": False, "tmp_warning": None}
+                           "tmp_leased": False, "tmp_warning": None,
+                           "mesh_enabled": False, "mesh_id": None,
+                           "mesh_session": None, "mesh_key": None,
+                           "mesh_exposure": None, "mesh_registered": False,
+                           "mesh_peer_count": None, "mesh_lease_ids": [],
+                           "mesh_warning": None, "mesh_cleanup_errors": []}
+    mesh_on = False
+    if mesh is None:
+        try:
+            mesh_on = mesh_module.mesh_enabled(source)
+        except Exception as exc:  # noqa: BLE001 - opt-in fails open
+            _mesh_warn(res, f"mesh opt-in failed: {exc}")
+    else:
+        mesh_on = bool(mesh)
+    res["mesh_enabled"] = mesh_on
     scratch_id: str | None = None
     tmp_env: dict[str, str] = {}
     lease: Any = None
@@ -681,47 +922,60 @@ def run_agent(workdir: str | Path, *, prompt: str | None = None, model: str | No
             except ea.HarnessError as exc:
                 raise AgentError(str(exc)) from exc
             res["workdir"] = str(work)
-        res["exclude"] = git_exclude(work)
-        config = write_opencode_config(
-            log_dir / "opencode_config.json", model=model if interactive else None,
-            provider_config=provider_config,
-            mcp=(mcp_server_entry(work, mcp_mode, tool_python=tool_python)
-                 if mcp_mode else None))
-        session = GraphSession(work, tool_python=tool_python, run_python=run_python,
-                               build=build, log_dir=log_dir, config=config_path(source),
-                               progress=progress, background=background,
-                               status_path=status_path)
-        if tmp_env:
-            session.env.update(tmp_env)
+        mesh_beat: _MeshHeartbeat | None = None
+        mesh_summary: str | None = None
         try:
-            with session:
-                res.update(sock=str(session.sock) if session.sock is not None else None,
-                           daemon_pid=session.pid)
-                if background:
-                    progress.note("opencode: starting the TUI "
-                                  "(the graph builds in the background)")
-                else:
-                    progress.note("opencode: starting the TUI" if interactive
-                                  else "opencode: starting")
-                res.update(_with_plugin(exe, work, session, prompt=prompt, model=model,
-                                        interactive=interactive, keep_plugin=keep_plugin,
-                                        timeout_s=timeout_s, extra_args=extra_args,
-                                        config=config, log_dir=log_dir,
-                                        repo_map_tokens=repo_map_tokens,
-                                        tmp_env=tmp_env,
-                                        scratch_root=res.get("scratch_root")))
+            if mesh_on:
+                mesh_beat, mesh_summary = _mesh_start(source, work, run_root, res)
+            res["exclude"] = git_exclude(work)
+            config = write_opencode_config(
+                log_dir / "opencode_config.json",
+                model=model if interactive else None,
+                provider_config=provider_config,
+                mcp=(mcp_server_entry(work, mcp_mode, tool_python=tool_python)
+                     if mcp_mode else None))
+            session = GraphSession(work, tool_python=tool_python,
+                                   run_python=run_python, build=build,
+                                   log_dir=log_dir, config=config_path(source),
+                                   progress=progress, background=background,
+                                   status_path=status_path)
+            if tmp_env:
+                session.env.update(tmp_env)
+            try:
+                with session:
+                    res.update(sock=str(session.sock) if session.sock is not None else None,
+                               daemon_pid=session.pid)
+                    if background:
+                        progress.note("opencode: starting the TUI "
+                                      "(the graph builds in the background)")
+                    else:
+                        progress.note("opencode: starting the TUI" if interactive
+                                      else "opencode: starting")
+                    res.update(_with_plugin(
+                        exe, work, session, prompt=prompt, model=model,
+                        interactive=interactive, keep_plugin=keep_plugin,
+                        timeout_s=timeout_s, extra_args=extra_args,
+                        config=config, log_dir=log_dir,
+                        repo_map_tokens=repo_map_tokens,
+                        tmp_env=tmp_env,
+                        scratch_root=res.get("scratch_root"),
+                        mesh_summary=mesh_summary,
+                        mesh_session=(res.get("mesh_session")
+                                      if mesh_summary else None)))
+            finally:
+                if not keep_plugin:
+                    with no_interrupt():
+                        res["exclude_removed"] = git_unexclude(res["exclude"])
+                res["daemon_stats"] = session.final_stats
+                res["daemon_stop_error"] = session.stop_error
+                res.update(ea.graph_stats_fields(session.final_stats))
+                res.update(prep=session.prep, build_s=session.build_s,
+                           ready_s=session.ready_s, launch_error=session.error)
+                if clone and not quiet and sys.exc_info()[0] is not None:
+                    print(f"ozagia agent: clone kept at {work}; remove it with: "
+                          f"rm -rf {run_root}", file=sys.stderr)
         finally:
-            if not keep_plugin:
-                with no_interrupt():
-                    res["exclude_removed"] = git_unexclude(res["exclude"])
-            res["daemon_stats"] = session.final_stats
-            res["daemon_stop_error"] = session.stop_error
-            res.update(ea.graph_stats_fields(session.final_stats))
-            res.update(prep=session.prep, build_s=session.build_s,
-                       ready_s=session.ready_s, launch_error=session.error)
-            if clone and not quiet and sys.exc_info()[0] is not None:
-                print(f"ozagia agent: clone kept at {work}; remove it with: rm -rf {run_root}",
-                      file=sys.stderr)
+            _mesh_finish(source, res, mesh_beat)
     _refresh_tmp_usage(source, res)
     if clean_logs:
         _clean_run_tmp(source, res, managed=managed, scratch_id=scratch_id)
@@ -735,7 +989,9 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
                  timeout_s: float | None, extra_args: Sequence[str], config: Path,
                  log_dir: Path, repo_map_tokens: int | None = None,
                  tmp_env: dict[str, str] | None = None,
-                 scratch_root: str | None = None) -> dict[str, Any]:
+                 scratch_root: str | None = None,
+                 mesh_summary: str | None = None,
+                 mesh_session: str | None = None) -> dict[str, Any]:
     """Install the plugin, run OpenCode, remove the plugin (in `finally`)."""
     path = plugin.plugin_path(work)
     existed = path.exists()
@@ -766,6 +1022,18 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
             env.pop(REPO_MAP_ENV, None)
         else:
             env[REPO_MAP_ENV] = str(repo_map_tokens)
+        if mesh_summary:
+            # Registered only: a bounded metadata summary and the identity the
+            # read-only MCP mesh tools may act for. A missing registration
+            # leaves the inherited variables out entirely.
+            env[MESH_SUMMARY_ENV] = mesh_summary
+            env["OZAGIA_MESH_HARNESS"] = MESH_HARNESS
+            if mesh_session:
+                env["OZAGIA_MESH_SESSION"] = mesh_session
+        else:
+            for name in (MESH_SUMMARY_ENV, "OZAGIA_MESH_HARNESS",
+                         "OZAGIA_MESH_SESSION"):
+                env.pop(name, None)
         if session.status_path is not None:
             env[launch_status.ENV_LAUNCH_STATUS] = str(session.status_path)
         if interactive:
@@ -801,8 +1069,9 @@ def _with_plugin(exe: str, work: Path, session: GraphSession, *, prompt: str | N
                 plugin.uninstall(work)
 
 
-__all__ = ["AgentError", "EXCLUDE_PATTERNS", "OPENCODE_CONFIG_KEYS",
-           "REPO_MAP_DEFAULT_TOKENS", "REPO_MAP_ENV", "REPO_MAP_MAX_TOKENS",
-           "REPO_MAP_MIN_TOKENS", "RUN_ARGV", "TUI_ARGV", "find_opencode",
-           "git_exclude", "git_unexclude", "load_provider_config", "run_agent",
-           "validate_repo_map_tokens", "write_opencode_config"]
+__all__ = ["AgentError", "EXCLUDE_PATTERNS", "MESH_HARNESS", "MESH_SUMMARY_ENV",
+           "OPENCODE_CONFIG_KEYS", "REPO_MAP_DEFAULT_TOKENS", "REPO_MAP_ENV",
+           "REPO_MAP_MAX_TOKENS", "REPO_MAP_MIN_TOKENS", "RUN_ARGV", "TUI_ARGV",
+           "find_opencode", "git_exclude", "git_unexclude",
+           "load_provider_config", "run_agent", "validate_repo_map_tokens",
+           "write_opencode_config"]

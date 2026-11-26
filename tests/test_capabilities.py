@@ -94,8 +94,10 @@ def test_builtin_mcp_and_graph_tools_are_declared():
     for name in ("dev_context", "dev_tools", "dev_capabilities",
                  "goal_list", "job_start", "federation_status",
                  "dev_tmp_list", "dev_tmp_status", "dev_assets_list",
-                 "dev_assets_status"):
+                 "dev_assets_status", "dev_mesh_status", "dev_mesh_inbox"):
         assert f"mcp:tool:{name}" in declared
+    assert "status:mesh" in declared
+    assert "cap:mesh.status" in K.surface_index()["mcp:tool:dev_mesh_status"]
 
 
 def test_cli_top_level_commands_are_declared():

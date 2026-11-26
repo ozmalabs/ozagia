@@ -358,3 +358,20 @@ def test_index_rebuilds_when_refresh_cannot_take_the_change_in(repo, capsys):
     assert rep["action"] == "built", rep
     assert cli.main(["index", "--root", str(repo)]) == 0
     assert capsys.readouterr().out.startswith("fresh ")
+
+
+def test_agent_mesh_flag_passes_an_explicit_choice(repo, monkeypatch):
+    from ozagia.harness import opencode as hop
+    seen: list = []
+
+    def fake(workdir, **kw):
+        seen.append(kw.get("mesh"))
+        return {"exit_code": 0, "timed_out": False}
+
+    monkeypatch.setattr(hop, "run_agent", fake)
+    assert cli.main(["agent", "--root", str(repo), "--prompt", "x"]) == 0
+    assert cli.main(["agent", "--root", str(repo), "--prompt", "x",
+                     "--mesh"]) == 0
+    assert cli.main(["agent", "--root", str(repo), "--prompt", "x",
+                     "--no-mesh"]) == 0
+    assert seen == [None, True, False]

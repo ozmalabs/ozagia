@@ -64,6 +64,11 @@ RATE_DIR = "rate"
 LEASE_LOCK = ".lock"
 
 DEFAULT_MESH_ID = "default"
+MESH_ID_ENV = "OZAGIA_MESH_ID"
+MESH_ENABLED_ENV = "OZAGIA_MESH"
+MESH_ENV_TRUE = frozenset({"1", "true", "yes", "on"})
+MESH_ENV_FALSE = frozenset({"0", "false", "no", "off"})
+MESH_CONFIG_KEYS = frozenset({"id", "enabled"})
 MESH_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
@@ -75,7 +80,7 @@ DELEGATION_RE = re.compile(r"^dlg_[0-9a-f]{16}$")
 
 EXPOSURES = ("none", "read", "coordinate", "supervise")
 COORDINATE = frozenset({"coordinate", "supervise"})
-SOURCES = ("cli", "harness", "model", "other")
+SOURCES = ("cli", "harness", "host", "model", "other")
 KINDS = ("hello", "request", "offer", "accept", "reject", "status", "release",
          "note")
 RESOURCE_KINDS = ("worktree", "branch", "merge", "path", "grant", "other")
@@ -263,19 +268,56 @@ def repo_id(root: str | Path) -> str:
     return _hash_id("r", base, 16)
 
 
-def mesh_id(root: str | Path) -> str:
-    """``[mesh] id`` from either config file, else ``default``."""
-    env = os.environ.get("OZAGIA_MESH_ID")
-    if env:
-        return validate_mesh_id(env)
+def _mesh_values(root: str | Path) -> dict[str, Any]:
+    """The validated ``[mesh]`` table from either config file (read-only)."""
     section = load_config_section(Path(root).resolve(), "mesh")
     if section.errors:
         first = section.errors[0]
         raise MeshConfigError(f"{first.path}: {first.message}")
-    unknown = sorted(set(section.values) - {"id"})
+    unknown = sorted(set(section.values) - MESH_CONFIG_KEYS)
     if unknown:
         raise MeshConfigError("unknown key(s) in [mesh]: " + ", ".join(unknown))
-    return validate_mesh_id(section.values.get("id", DEFAULT_MESH_ID))
+    return dict(section.values)
+
+
+def mesh_id(root: str | Path) -> str:
+    """``[mesh] id`` from either config file, else ``default``."""
+    env = os.environ.get(MESH_ID_ENV)
+    if env:
+        return validate_mesh_id(env)
+    return validate_mesh_id(_mesh_values(root).get("id", DEFAULT_MESH_ID))
+
+
+def mesh_enabled(root: str | Path) -> bool:
+    """Whether the harness should join the mesh: ``[mesh] enabled``, env first.
+
+    ``OZAGIA_MESH=1`` (or true/yes/on) enables it and ``0``/false/no/off
+    disables it.  The default is off; an unknown value or a non-boolean
+    ``enabled`` is a configuration error the caller may choose to fail open.
+    """
+    raw = os.environ.get(MESH_ENABLED_ENV)
+    if raw is not None and raw.strip():
+        flag = raw.strip().lower()
+        if flag in MESH_ENV_TRUE:
+            return True
+        if flag in MESH_ENV_FALSE:
+            return False
+        raise MeshConfigError(
+            f"{MESH_ENABLED_ENV} must be 1/0, true/false, yes/no or on/off")
+    value = _mesh_values(root).get("enabled", False)
+    if not isinstance(value, bool):
+        raise MeshConfigError("[mesh] enabled must be true or false")
+    return value
+
+
+def mesh_configured(root: str | Path) -> bool:
+    """Whether a ``[mesh]`` table or mesh environment variable exists.
+
+    Read-only and side-effect free: this never creates the state directory.
+    """
+    if os.environ.get(MESH_ID_ENV) or os.environ.get(MESH_ENABLED_ENV):
+        return True
+    return bool(_mesh_values(root))
 
 
 def validate_mesh_id(value: Any) -> str:

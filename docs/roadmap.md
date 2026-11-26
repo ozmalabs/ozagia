@@ -541,11 +541,22 @@ claim/release ledger and mandatory teardown. The read-only schema/readiness
 slice is in progress; host admission (`core.resources`) remains a separate
 capacity check.
 
-**Implementation status (2026-11-26, session mesh).** A separate
-[session-mesh plan](plans/2026-11-26_session_mesh.md) defines local peer
-discovery, bounded messages and worktree/branch/merge leases with no leader.
-The merge lease is advisory; existing worktree/commit/merge policy remains
-authoritative. The core filesystem slice is in progress.
+**Implementation status (2026-11-26, session mesh).** The
+[session-mesh plan](plans/2026-11-26_session_mesh.md) is implemented through
+the read-only awareness layer:
+
+- repo/mesh-scoped filesystem registry, PID/boot/heartbeat liveness, bounded
+  redacted mailboxes, durable advisory leases with queues/TTL/takeover;
+- worktree/merge requests over existing worktrees; merge remains advisory;
+- 1:1 `sub`/`peer`/`super` links with mutual accept/decline/revoke and
+  derived roles; separate scoped delegations;
+- `ozagia agent --mesh` registers a runner, heartbeats, cleans up and provides
+  a compact untrusted topology summary; no model send/lease tool yet;
+- read-only `status` mesh section and `dev_mesh_status`/`dev_mesh_inbox` MCP
+  tools.
+
+Layer 2/3 model coordination, conflict warnings citing live leases, a daemon
+`mesh` op and task/eval mesh records remain open.
 
 An [Ozma mesh bridge plan](plans/2026-11-26_ozma_mesh_bridge.md) follows it:
 flights of agents join the documented Ozma `COORDINATION` mesh through typed

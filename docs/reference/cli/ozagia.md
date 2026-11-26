@@ -13,6 +13,7 @@ The ozagia command: the graph, the daemon, the integrations and the agent.
                  [--mcp coding|research|combined | --research]
                  [--opencode-config PATH]
                  [--repo-map [--repo-map-tokens N]]
+                 [--mesh | --no-mesh]
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
                  [--python P] [--runs-dir D] [-- <extra opencode args>]
     ozagia daemon serve|ensure|ping|stats|shutdown ... (python -m ozagia.daemon)
@@ -136,7 +137,7 @@ usage: ozagia agent [-h] [--workdir WORKDIR] [--prompt PROMPT |
                     [--opencode OPENCODE] [--mcp {coding,research,combined}]
                     [--research] [--runs-dir RUNS_DIR] [--no-managed-tmp]
                     [--tmp-ttl D] [--clean-logs] [--repo-map]
-                    [--repo-map-tokens N]
+                    [--repo-map-tokens N] [--mesh | --no-mesh]
 ```
 
 | option | type | values | default | help |
@@ -160,6 +161,8 @@ usage: ozagia agent [-h] [--workdir WORKDIR] [--prompt PROMPT |
 | `--clean-logs` |  |  |  | after a successful run with no kept clone, delete the run root and scratch workspace (default: keep the logs) |
 | `--repo-map` |  |  |  | send a bounded, task-ranked repository map in the first model request (off by default) |
 | `--repo-map-tokens` | ozagia.cli._repo_map_budget |  |  | repo-map token budget with --repo-map, 200..8000 (default: 1500) |
+| `--mesh` |  |  |  | register this agent run in the local session mesh and pass a bounded metadata summary to the model context (default: [mesh] enabled or OZAGIA_MESH) |
+| `--no-mesh` |  |  |  | do not join the session mesh, even when [mesh] enabled or OZAGIA_MESH says so |
 
 ## `ozagia daemon`
 
@@ -1878,7 +1881,7 @@ usage: ozagia mesh register [-h] [--root ROOT] [--json] [--harness HARNESS]
                             [--session SESSION] [--pid PID]
                             [--worktree WORKTREE] [--branch BRANCH]
                             [--exposure {none,read,coordinate,supervise}]
-                            [--source {cli,harness,model,other}]
+                            [--source {cli,harness,host,model,other}]
                             [--capability CAPABILITY]
 ```
 

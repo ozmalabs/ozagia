@@ -6,6 +6,7 @@
                  [--mcp coding|research|combined | --research]
                  [--opencode-config PATH]
                  [--repo-map [--repo-map-tokens N]]
+                 [--mesh | --no-mesh]
                  [--clone [--base REV]] [--keep-plugin] [--timeout S]
                  [--python P] [--runs-dir D] [-- <extra opencode args>]
     ozagia daemon serve|ensure|ping|stats|shutdown ... (python -m ozagia.daemon)
@@ -405,6 +406,7 @@ def _cmd_agent(args: argparse.Namespace) -> int:
                         runs_dir=args.runs_dir, mcp_mode=args.mcp, progress=progress,
                         repo_map_tokens=args.repo_map_tokens,
                         opencode_config=args.opencode_config,
+                        mesh=args.mesh,
                         managed_tmp=args.managed_tmp, tmp_ttl_s=args.tmp_ttl,
                         clean_logs=args.clean_logs)
     except (AgentError, SessionError) as exc:
@@ -1521,6 +1523,16 @@ def build_parser() -> argparse.ArgumentParser:
                     metavar="N",
                     help="repo-map token budget with --repo-map, 200..8000 "
                          "(default: 1500)")
+    mesh_group = ag.add_mutually_exclusive_group()
+    mesh_group.add_argument("--mesh", dest="mesh", action="store_true",
+                            default=None,
+                            help="register this agent run in the local session "
+                                 "mesh and pass a bounded metadata summary to "
+                                 "the model context (default: [mesh] enabled or "
+                                 "OZAGIA_MESH)")
+    mesh_group.add_argument("--no-mesh", dest="mesh", action="store_false",
+                            help="do not join the session mesh, even when "
+                                 "[mesh] enabled or OZAGIA_MESH says so")
 
     for name, (_fn, text) in DELEGATES.items():
         sub.add_parser(name, help=text, add_help=False)
@@ -1957,7 +1969,8 @@ _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
                           "--root", "--clone", "--prompt", "--prompt-file",
-                          "--repo-map", "--repo-map-tokens", "--opencode-config"})
+                          "--repo-map", "--repo-map-tokens", "--opencode-config",
+                          "--mesh", "--no-mesh"})
 
 
 def _default_agent(argv: list[str]) -> list[str]:

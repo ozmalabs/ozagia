@@ -4,8 +4,8 @@
 workspace and worktrees, host resources, the created-file ledger, runtime
 services and tunnels, the graph daemon, its jobs and admission counters,
 secret-provider readiness, diagnostics, snapshot size/counts, metadata-only
-session profiles, cross-session dirty-file ownership, project configuration and
-the newest deep-review manifest.
+session profiles, cross-session dirty-file ownership, local session-mesh
+metadata, project configuration and the newest deep-review manifest.
 
 It composes checks that already exist. It is not a second service manager and
 it does not redefine runtime states. A configured service is `configured`, not
@@ -43,6 +43,7 @@ reported but does not by itself fail the command.
 | `sessions` | `<root>/.ozagia/session_profiles/*.json` | Bounded metadata summary: profile count, newest age, model names, token/tool/phase counters and capture diagnostics; no prompt, path, tool body, source content or full session id |
 | `ownership` | `ozagia.core.owners` and the edit/daemon journals | Bounded dirty files with uncommitted journaled edits by a session, liveness and age; only files a session journaled are attributed |
 | `reviews` | `<root>/.ozagia/reviews/*/manifest.json` | Newest deep-review directory, run status, `complete`/`exhaustive`/`truth_assessed` flags, finding and subject counts, bounded subject statuses |
+| `mesh` | `ozagia.core.mesh` under `<root>/.ozagia/mesh/` | Read-only local session-mesh metadata: counts, self, peers, links/roles, leases, delegations and unread. No message body, subject or daemon |
 | `config` | `ozagia.config` | Resolved config path, adapters, index directories, jobs flag, configured runtime names |
 
 Every section is an envelope:
@@ -58,11 +59,11 @@ Every section is an envelope:
 `report` is the source module's result, unmodified for the pass-through
 sections (`workspace`, `resources`, `files`, `runtime`, `daemon`, `doctor` and
 `config`) and a bounded extraction for `integrations`, `capabilities`,
-`reviews`, `jobs`, `admissions`, `providers`, `snapshot`, `sessions` and
-`ownership`. On an unavailable component the envelope still exists and `report`
-is `null`; it is never an empty object. A section that can still name what is
-missing keeps its partial report (daemon, reviews, jobs, providers, snapshot,
-sessions and ownership).
+`reviews`, `jobs`, `admissions`, `providers`, `snapshot`, `sessions`,
+`ownership` and `mesh`. On an unavailable component the envelope still exists
+and `report` is `null`; it is never an empty object. A section that can still
+name what is missing keeps its partial report (daemon, reviews, jobs, providers,
+snapshot, sessions, ownership and mesh).
 
 `reviews.report` contains `root` (the reviewed repository), `reviews_root`,
 `latest`, `manifest`, `manifest_root`, `age_s` when a manifest was read,
@@ -132,6 +133,15 @@ newest dirty candidate files and copies at most 32 rows. Only files that a
 session journaled are attributed; a dirty file with no journal entry is not
 guessed.
 
+`mesh.report` contains `mesh_id`, `repo_id`, `counts` (sessions, leases, links,
+delegations), `self` (resolved from `OZAGIA_MESH_HARNESS`/`OZAGIA_MESH_SESSION`
+when set), bounded `peers`, `links` with derived relations, `leases` with
+resource/mode/expiry/queue and `holder_is_self`, bounded `delegations`,
+`unread` and mesh read errors. Message bodies, subjects, reasons, history and
+credentials are not copied. The section reads the same filesystem registry as
+`ozagia mesh status`; it never creates `.ozagia/mesh`, starts a daemon, opens a
+network connection or changes a lease.
+
 ## States
 
 Section states describe whether the section could be read, not whether the
@@ -142,8 +152,8 @@ repository is healthy.
 | `ok` | The component was read completely (for `reviews`, a valid manifest was read) |
 | `degraded` | It was read, but a secondary fact is missing or stale (the graph snapshot, or the snapshot metrics section when its manifest is stale) |
 | `unavailable` | It could not be read; `error` says why |
-| `absent` | It is known not to exist (daemon: nothing listens on the socket; reviews: no review directory or no `deep-*` directory; sessions: no profile directory; ownership: no edit journal; snapshot: no snapshot file) |
-| `unknown` | It exists or may exist but could not be determined (daemon timeout or bad reply; jobs/providers: failed daemon reply; sessions: unreadable or malformed profile; ownership: unreadable journal; reviews: the newest manifest is missing, unreadable, malformed, ambiguous or outside the reviews directory) |
+| `absent` | It is known not to exist (daemon: nothing listens on the socket; reviews: no review directory or no `deep-*` directory; sessions: no profile directory; ownership: no edit journal; mesh: no mesh state and no `[mesh]` configuration; snapshot: no snapshot file) |
+| `unknown` | It exists or may exist but could not be determined (daemon timeout or bad reply; jobs/providers: failed daemon reply; sessions: unreadable or malformed profile; ownership: unreadable journal; mesh: unreadable or invalid mesh state/configuration; reviews: the newest manifest is missing, unreadable, malformed, ambiguous or outside the reviews directory) |
 | `configured` | Project configuration file was loaded |
 | `defaults` | No project configuration file; built-in defaults apply |
 | `invalid` | Project configuration is malformed |
@@ -187,8 +197,9 @@ degraded:
 
 Absent sections are facts rather than degradation: no daemon means `jobs`,
 `admissions` and `providers` are `absent`; no profile directory means
-`sessions` is `absent`; no edit journal means `ownership` is `absent`; no
-snapshot file means `snapshot` is `absent`. An empty profile directory is `ok`
+`sessions` is `absent`; no edit journal means `ownership` is `absent`; no mesh
+state and no `[mesh]` configuration means `mesh` is `absent`; no snapshot file
+means `snapshot` is `absent`. An empty profile directory is `ok`
 with zero profiles, which is not the same as a missing directory.
 
 The `degraded` list uses `{"component", "code", "message"}` objects, as does

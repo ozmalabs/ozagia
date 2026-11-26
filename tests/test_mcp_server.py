@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -712,3 +713,57 @@ def test_server_without_memory_still_builds_the_coding_tool_list() -> None:
     names = {tool["name"] for tool in listed["result"]["tools"]}
     assert "dev_capabilities" in names
     assert "dev_context" in names
+
+
+# --------------------------------------------------------------------------- #
+# session mesh (read-only layer 1)
+# --------------------------------------------------------------------------- #
+def test_mesh_mcp_tools_are_read_only_and_metadata_only(server, monkeypatch):
+    from ozagia.core import mesh as M
+
+    root = Path(server.mem.raw_repo_root)
+    names = {tool["name"] for tool in server._tools}
+    assert {"dev_mesh_status", "dev_mesh_inbox"} <= names
+    assert not ({"dev_mesh_send", "dev_mesh_lease", "dev_mesh_release",
+                 "dev_mesh_claim", "dev_mesh_approve"} & names)
+    graph = DevMemoryServer(server.mem, surface="graph")
+    assert not ({"dev_mesh_status", "dev_mesh_inbox"}
+                & {tool["name"] for tool in graph._tools})
+
+    reply = server.handle(_call("dev_mesh_status", {}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True and payload["state"] == "absent"
+    assert not (root / ".ozagia" / "mesh").exists()
+
+    M.register(root, "opencode", "a", pid=os.getpid(),
+               exposure="coordinate")
+    me = M.register(root, "opencode", "b", pid=os.getpid(), exposure="read")
+    M.send(root, "opencode", "a", to="opencode:b", kind="note",
+           subject="SUBJECT CANARY", body="BODY CANARY")
+    monkeypatch.setenv("OZAGIA_MESH_HARNESS", "opencode")
+    monkeypatch.setenv("OZAGIA_MESH_SESSION", "b")
+
+    reply = server.handle(_call("dev_mesh_status", {}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True and payload["state"] == "ok"
+    assert payload["self"]["key"] == me["key"]
+    assert payload["counts"]["sessions"]["live"] == 2
+    assert [row["session"] for row in payload["peers"]] == ["a"]
+    assert "SUBJECT CANARY" not in json.dumps(payload)
+    assert "BODY CANARY" not in json.dumps(payload)
+
+    reply = server.handle(_call("dev_mesh_inbox", {}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True and payload["count"] == 1
+    row = payload["messages"][0]
+    assert set(row) == {"id", "from", "kind", "created", "expires",
+                        "read", "acked"}
+    assert row["from"]["session"] == "a"
+    assert row["read"] is False and row["acked"] is False
+    assert "SUBJECT CANARY" not in json.dumps(payload)
+    assert "BODY CANARY" not in json.dumps(payload)
+
+    monkeypatch.delenv("OZAGIA_MESH_SESSION")
+    reply = server.handle(_call("dev_mesh_inbox", {}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is False and "identity" in payload["error"]

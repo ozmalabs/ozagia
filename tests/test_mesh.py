@@ -21,6 +21,7 @@ def env(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     monkeypatch.setenv("OZAGIA_ROOT", str(repo))
     monkeypatch.setenv("OZAGIA_STATE_DIR", str(state))
     monkeypatch.delenv("OZAGIA_MESH_ID", raising=False)
+    monkeypatch.delenv("OZAGIA_MESH", raising=False)
     return repo, state
 
 
@@ -449,3 +450,36 @@ def test_lease_queue_is_bounded(env, monkeypatch) -> None:
                         resource_id="cpu", mode="write")
     assert full.value.code == "queue_full"
     assert held["lease"]["lease_id"]
+
+
+def test_mesh_opt_in_defaults_off_and_validates_config(env, monkeypatch) -> None:
+    repo, state = env
+    assert M.mesh_enabled(repo) is False
+    assert M.mesh_configured(repo) is False
+    assert not (state / "mesh").exists()
+
+    (repo / ".ozagia.toml").write_text(
+        '[mesh]\nid = "team"\nenabled = true\n', encoding="utf-8")
+    assert M.mesh_enabled(repo) is True
+    assert M.mesh_configured(repo) is True
+    assert M.mesh_id(repo) == "team"
+    assert not (state / "mesh").exists()
+
+    monkeypatch.setenv("OZAGIA_MESH", "0")
+    assert M.mesh_enabled(repo) is False
+    monkeypatch.setenv("OZAGIA_MESH", "1")
+    assert M.mesh_enabled(repo) is True
+    monkeypatch.setenv("OZAGIA_MESH", "maybe")
+    with pytest.raises(M.MeshConfigError):
+        M.mesh_enabled(repo)
+    monkeypatch.delenv("OZAGIA_MESH")
+
+    (repo / ".ozagia.toml").write_text("[mesh]\nenabled = 'yes'\n",
+                                       encoding="utf-8")
+    with pytest.raises(M.MeshConfigError):
+        M.mesh_enabled(repo)
+    (repo / ".ozagia.toml").write_text("[mesh]\nextra = 1\n",
+                                       encoding="utf-8")
+    with pytest.raises(M.MeshConfigError):
+        M.mesh_configured(repo)
+    assert not (state / "mesh").exists()

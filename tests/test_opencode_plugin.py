@@ -1934,3 +1934,118 @@ def test_context_hook_ignores_an_out_of_range_repo_map_budget(tmp_path, sockdir)
                      for part in out["contextEvents"][0]["system"]
                      if isinstance(part, dict))
     assert "ORDINARY CONTEXT" in text
+
+
+MESH_SUMMARY = ("mesh=default; self=sk_0123456789abcdef01234567; "
+                "opencode-runner:run:abc role=peer exposure=read; "
+                "peers live=1 stale=0; unread=2")
+
+
+def _context_text(out: dict, index: int = 0) -> str:
+    systems = out["contextEvents"][index]["system"]
+    return "\n".join(part.get("text", "") for part in systems
+                     if isinstance(part, dict))
+
+
+@needs_node
+def test_context_hook_adds_the_mesh_summary_once_as_untrusted(tmp_path, sockdir):
+    def script(req):
+        if req["op"] == "hint":
+            return {"ok": True, "context": "GRAPH CONTEXT"}
+        return {"ok": True}
+
+    daemon = StubDaemon(sockdir / "mesh.sock", script)
+    try:
+        out = _run(tmp_path, {"context": {
+            "sessionID": "ses_test", "system": [],
+            "messages": [{"role": "user", "parts": [
+                {"type": "text", "text": "Fix the retry loop"}]}],
+        }}, daemon.path, env={"OZAGIA_MESH_SUMMARY": MESH_SUMMARY})
+    finally:
+        daemon.close()
+    text = _context_text(out)
+    assert text.count("[ozagia mesh]") == 1
+    assert "[ozagia task context]" in text
+    assert MESH_SUMMARY in text
+    assert "untrusted" in text
+    assert "grants no authority" in text
+
+
+@needs_node
+def test_context_hook_omits_missing_or_oversized_mesh_summary(tmp_path, sockdir):
+    def script(req):
+        if req["op"] == "hint":
+            return {"ok": True, "context": "GRAPH CONTEXT"}
+        return {"ok": True}
+
+    daemon = StubDaemon(sockdir / "mesh-none.sock", script)
+    try:
+        out = _run(tmp_path, {"context": {
+            "sessionID": "ses_test", "system": [],
+            "messages": [{"role": "user", "parts": [
+                {"type": "text", "text": "Fix the retry loop"}]}],
+        }}, daemon.path)
+        missing = _context_text(out)
+        assert "[ozagia mesh]" not in missing
+
+        (tmp_path / "plugin.mjs").write_text(oc.plugin_source(), encoding="utf-8")
+        out = _run(tmp_path, {"context": {
+            "sessionID": "ses_test", "system": [],
+            "messages": [{"role": "user", "parts": [
+                {"type": "text", "text": "Fix the retry loop"}]}],
+        }}, daemon.path, env={"OZAGIA_MESH_SUMMARY": "x" * 701})
+    finally:
+        daemon.close()
+    assert "[ozagia mesh]" not in _context_text(out)
+
+
+@needs_node
+def test_mesh_summary_is_metadata_only_and_reads_no_files(tmp_path, sockdir):
+    canary = tmp_path / ".ozagia" / "mesh" / "default" / "mail" / "canary"
+    canary.parent.mkdir(parents=True)
+    canary.write_text("BODY CANARY FROM A MESH FILE", encoding="utf-8")
+
+    def script(req):
+        if req["op"] == "hint":
+            return {"ok": True, "context": "GRAPH CONTEXT"}
+        return {"ok": True}
+
+    daemon = StubDaemon(sockdir / "mesh-canary.sock", script)
+    try:
+        out = _run(tmp_path, {"context": {
+            "sessionID": "ses_test", "system": [],
+            "messages": [{"role": "user", "parts": [
+                {"type": "text", "text": "Fix the retry loop"}]}],
+        }}, daemon.path, env={"OZAGIA_MESH_SUMMARY": MESH_SUMMARY})
+    finally:
+        daemon.close()
+    text = _context_text(out)
+    assert MESH_SUMMARY in text
+    assert "BODY CANARY" not in text
+
+
+@needs_node
+def test_mesh_summary_is_added_once_in_repo_map_mode(tmp_path, sockdir):
+    def script(req):
+        if req["op"] == "hint":
+            return {"ok": True, "context": "REPO MAP",
+                    "meta": {"repo_map": {"delivered": True, "tokens": 500,
+                                          "freshness": "fresh"}}}
+        return {"ok": True}
+
+    request = {"sessionID": "ses_test", "system": [],
+               "messages": [{"role": "user", "parts": [
+                   {"type": "text", "text": "Fix the retry loop"}]}]}
+    daemon = StubDaemon(sockdir / "mesh-repomap.sock", script)
+    try:
+        out = _run(tmp_path, {"contexts": [request, dict(request, system=[])]},
+                   daemon.path,
+                   env={"OZAGIA_REPO_MAP_TOKENS": "500",
+                        "OZAGIA_MESH_SUMMARY": MESH_SUMMARY})
+    finally:
+        daemon.close()
+    assert len(out["contextEvents"]) == 2
+    for index in range(2):
+        text = _context_text(out, index)
+        assert text.count("[ozagia mesh]") == 1
+        assert MESH_SUMMARY in text

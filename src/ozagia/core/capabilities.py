@@ -1573,6 +1573,27 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         tests=_tests("mesh", "mesh_cli", "mesh_links"),
         docs=_docs("mesh"),
     ),
+    _def(
+        id="cap:mesh.status",
+        domain="actions",
+        purpose=("Read-only layer-1 session-mesh awareness: local sessions, "
+                 "derived peer/sub/super roles, active and queued leases, "
+                 "links, delegations and unread counts as metadata."),
+        owner="ozagia.core.mesh",
+        side_effect="read",
+        exposure=["mcp"],
+        impl=["impl:ozagia.core.mesh.status",
+              "impl:ozagia.core.mesh.inbox"],
+        surfaces=["mcp:tool:dev_mesh_status", "mcp:tool:dev_mesh_inbox"],
+        prerequisites=["a repository root", "optional registered local mesh sessions"],
+        limits=["metadata only; message subjects and bodies are never returned",
+                "never sends, acks, acquires or releases a lease, takes over "
+                "or starts a daemon",
+                "never creates mesh state; an absent mesh is reported absent"],
+        authorization="read-only; MCP exposes no mesh write, lease or approve tool",
+        tests=_tests("mesh", "mesh_links"),
+        docs=_docs("mesh"),
+    ),
     # toolchain ------------------------------------------------------------
     _def(
         id="cap:toolchain.plan",
@@ -1736,7 +1757,7 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
                   "status:config", "status:reviews", "status:integrations",
                   "status:capabilities", "status:jobs", "status:admissions",
                   "status:providers", "status:snapshot", "status:sessions",
-                  "status:ownership"],
+                  "status:ownership", "status:mesh"],
         prerequisites=["the repository root"],
         limits=["absence and unknown are distinct; no service is started"],
         authorization=_READ,

@@ -27,7 +27,7 @@ KEYS = {
     "schema", "checked_at", "root", "ok", "errors", "degraded",
     "workspace", "resources", "files", "runtime", "daemon", "jobs",
     "admissions", "providers", "doctor", "integrations", "capabilities",
-    "snapshot", "sessions", "ownership", "config", "reviews",
+    "snapshot", "sessions", "ownership", "config", "reviews", "mesh",
 }
 
 
@@ -250,6 +250,9 @@ def components(tmp_path: Path, monkeypatch) -> SimpleNamespace:
         lambda value: _doctor_report(root, state["snapshot"]))
     monkeypatch.setattr(status_module, "DaemonClient",
                         _daemon_class(state, calls))
+    for name in ("OZAGIA_MESH", "OZAGIA_MESH_ID", "OZAGIA_MESH_HARNESS",
+                 "OZAGIA_MESH_SESSION"):
+        monkeypatch.delenv(name, raising=False)
     return SimpleNamespace(root=root, cfg_path=cfg_path, state=state,
                            calls=calls, config=config)
 
@@ -296,6 +299,8 @@ def test_status_all_present(components: SimpleNamespace) -> None:
     assert report["integrations"]["state"] == "unknown"
     assert report["capabilities"]["state"] == "unknown"
     assert report["reviews"]["state"] == "absent"
+    assert report["mesh"] == {"state": "absent", "error": None, "report": None}
+    assert not (components.root / ".ozagia" / "mesh").exists()
     assert report["config"]["state"] == "configured"
     assert report["config"]["path"] == str(components.cfg_path)
     assert report["config"]["report"]["runtime_services"] == ["api"]
@@ -881,3 +886,60 @@ def test_status_sessions_absent_does_not_create_state(
 
     assert section["state"] == "absent"
     assert not (root / ".ozagia").exists()
+
+
+# --------------------------------------------------------------------------- #
+# session mesh (read-only)
+# --------------------------------------------------------------------------- #
+def test_status_mesh_is_absent_and_creates_nothing(components) -> None:
+    report = status_module.status(components.root, timeout=0.5)
+
+    assert report["mesh"]["state"] == "absent"
+    assert report["mesh"]["report"] is None
+    assert "mesh: off" in status_module.format_status(report)
+    assert not (components.root / ".ozagia" / "mesh").exists()
+
+
+def test_status_mesh_ok_is_metadata_only(components, monkeypatch) -> None:
+    from ozagia.core import mesh as mesh_module
+
+    root = components.root
+    mesh_module.register(root, "opencode", "a", pid=os.getpid(),
+                        exposure="coordinate")
+    second = mesh_module.register(root, "opencode", "b", pid=os.getpid(),
+                                  exposure="read")
+    mesh_module.send(root, "opencode", "a", to="opencode:b", kind="note",
+                     subject="SUBJECT CANARY", body="BODY CANARY")
+    monkeypatch.setenv("OZAGIA_MESH_HARNESS", "opencode")
+    monkeypatch.setenv("OZAGIA_MESH_SESSION", "b")
+
+    report = status_module.status(root, timeout=0.5)
+    mesh = report["mesh"]
+
+    assert mesh["state"] == "ok"
+    assert mesh["report"]["self"]["key"] == second["key"]
+    assert mesh["report"]["self"]["role"] == "peer"
+    assert mesh["report"]["unread"] == 1
+    assert mesh["report"]["counts"]["sessions"]["live"] == 2
+    assert [row["session"] for row in mesh["report"]["peers"]] == ["a"]
+    assert "SUBJECT CANARY" not in json.dumps(mesh)
+    assert "BODY CANARY" not in json.dumps(mesh)
+    assert "mesh: default" in status_module.format_status(report)
+
+
+def test_status_mesh_read_error_is_unknown_without_creating_state(
+        components, monkeypatch) -> None:
+    from ozagia.core import mesh as mesh_module
+
+    monkeypatch.setattr(mesh_module, "mesh_configured", lambda root: True)
+    monkeypatch.setattr(
+        mesh_module, "status",
+        _raise(mesh_module.MeshIOError("mesh directory is unreadable")))
+
+    report = status_module.status(components.root, timeout=0.5)
+    mesh = report["mesh"]
+
+    assert mesh["state"] == "unknown"
+    assert mesh["report"] is None
+    assert "unreadable" in mesh["error"]
+    assert not (components.root / ".ozagia" / "mesh").exists()

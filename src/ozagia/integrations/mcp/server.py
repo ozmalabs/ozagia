@@ -959,6 +959,39 @@ _TOOLS.append({
     }),
 })
 
+# The session mesh (`ozagia.core.mesh`): read-only layer 1. These tools list
+# metadata only; they never send, ack, lease, take over, start a daemon or read
+# a message body/subject. With no mesh state they report absent and create
+# nothing.
+_TOOLS.extend([
+    {
+        "name": "dev_mesh_status",
+        "description": (
+            "Read-only local session-mesh status for this repository: mesh id, "
+            "session counts (live/stale), peers, links/derived roles, active and "
+            "queued leases, delegations and unread counts. Self is resolved from "
+            "OZAGIA_MESH_HARNESS/OZAGIA_MESH_SESSION when set. Metadata only: no "
+            "message bodies or subjects, and it never sends, leases, starts a "
+            "daemon or changes state."),
+        "inputSchema": _schema({
+            "include_all": {"type": "boolean", "default": False,
+                            "description": "Also list ended, dead and foreign sessions in peers."},
+        }),
+    },
+    {
+        "name": "dev_mesh_inbox",
+        "description": (
+            "Read-only metadata rows from this session's local mesh mailbox: "
+            "id, from, kind, created/expires, read/acked. Subject and body are "
+            "never returned here; use `ozagia mesh read` for a body. Needs "
+            "OZAGIA_MESH_HARNESS/OZAGIA_MESH_SESSION and never acks, sends or "
+            "changes a message."),
+        "inputSchema": _schema({
+            "unread": {"type": "boolean", "default": False,
+                       "description": "Only unread messages."},
+        }),
+    },
+])
 
 # The created-file ledger (`ozagia.core.files`): read-only over
 # `.ozagia/files/ledger.jsonl`. It records metadata, never file content.
@@ -1570,6 +1603,8 @@ class DevMemoryServer:
             "job_stop": self._job_stop,
             "dev_secrets": self._secrets,
             "dev_working_set": self._working_set,
+            "dev_mesh_status": self._mesh_status,
+            "dev_mesh_inbox": self._mesh_inbox,
             "dev_files_list": self._files_list,
             "dev_files_explain": self._files_explain,
             "dev_tmp_list": self._tmp_list,
@@ -2650,6 +2685,115 @@ class DevMemoryServer:
                              "seen no edits, test runs or reads for it (it "
                              "keeps them only while it runs).")
         return reply
+
+    # -- local session mesh (`ozagia.core.mesh`): read-only layer 1 --------- #
+    def _mesh_identity(self) -> tuple[str | None, str | None]:
+        return (os.environ.get("OZAGIA_MESH_HARNESS"),
+                os.environ.get("OZAGIA_MESH_SESSION"))
+
+    def _mesh_status(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import mesh as M
+        root = self._files_root()
+        try:
+            configured = M.mesh_configured(root)
+            present = M.mesh_dir(root).is_dir()
+        except M.MeshError as e:
+            return {"ok": False, "state": "unknown", "error": str(e)}
+        harness, session = self._mesh_identity()
+        try:
+            payload = M.status(root, harness=harness, session=session)
+        except M.MeshError as e:
+            return {"ok": False, "state": "unknown", "error": str(e)}
+        self_row = payload.get("self")
+        self_key = (self_row or {}).get("key")
+        sessions = [item for item in (payload.get("sessions") or ())
+                    if item.get("key") != self_key]
+        if a.get("include_all") is not True:
+            sessions = [item for item in sessions
+                        if item.get("effective_state") in {"live", "stale"}]
+        peers = [{"key": item.get("key"), "harness": item.get("harness"),
+                  "session": item.get("session"),
+                  "effective_state": item.get("effective_state"),
+                  "exposure": item.get("exposure"), "role": item.get("role"),
+                  "unread": item.get("unread")}
+                 for item in sessions[:32]]
+        leases = []
+        for item in (payload.get("leases") or ())[:32]:
+            resource = item.get("resource") or {}
+            holder = item.get("holder") or {}
+            leases.append({
+                "lease_id": item.get("lease_id"),
+                "resource": {"kind": resource.get("kind"),
+                             "id": resource.get("id"),
+                             "mode": resource.get("mode")},
+                "holder": {"harness": holder.get("harness"),
+                           "session": holder.get("session"),
+                           "key": holder.get("key")},
+                "effective_state": item.get("effective_state"),
+                "expires_at": item.get("expires_at"),
+                "queued": len(item.get("queue") or ()),
+                "holder_is_self": holder.get("key") == self_key})
+        links = []
+        for item in (payload.get("links") or ())[:32]:
+            peer = item.get("peer") or {}
+            links.append({"link_id": item.get("link_id"),
+                          "peer": {"harness": peer.get("harness"),
+                                   "session": peer.get("session"),
+                                   "key": peer.get("key")},
+                          "relation": item.get("relation"),
+                          "reciprocal_relation": item.get("reciprocal_relation"),
+                          "state": item.get("state"),
+                          "expires_at": item.get("expires_at")})
+        if not configured and not present:
+            state = "absent"
+        else:
+            state = "ok"
+        return {"ok": True, "state": state,
+                "mesh_id": payload.get("mesh_id"),
+                "repo_id": payload.get("repo_id"),
+                "self": ({"key": self_key,
+                          "harness": (self_row or {}).get("harness"),
+                          "session": (self_row or {}).get("session"),
+                          "role": (self_row or {}).get("role"),
+                          "exposure": (self_row or {}).get("exposure"),
+                          "unread": (self_row or {}).get("unread")}
+                         if self_row else None),
+                "counts": {"sessions": payload.get("session_counts") or {},
+                           "leases": payload.get("lease_counts") or {},
+                           "links": payload.get("link_counts") or {},
+                           "delegations": payload.get("delegation_counts") or {}},
+                "peers": peers, "leases": leases, "links": links,
+                "delegations": list(payload.get("delegations") or ())[:16],
+                "unread": int((self_row or {}).get("unread") or 0),
+                "errors": list(payload.get("errors") or ())[:16]}
+
+    def _mesh_inbox(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import mesh as M
+        harness, session = self._mesh_identity()
+        if not harness or not session:
+            return {"ok": False, "state": "unavailable",
+                    "error": "no mesh identity: set OZAGIA_MESH_HARNESS and "
+                             "OZAGIA_MESH_SESSION"}
+        try:
+            payload = M.inbox(self._files_root(), harness, session,
+                              unread=a.get("unread") is True)
+        except M.MeshError as e:
+            return {"ok": False, "state": "unknown", "error": str(e)}
+        rows = []
+        for item in payload.get("messages") or ():
+            sender = item.get("from") or {}
+            read = bool(item.get("read_at"))
+            rows.append({"id": item.get("msg_id"),
+                         "from": {"harness": sender.get("harness"),
+                                  "session": sender.get("session"),
+                                  "key": sender.get("key")},
+                         "kind": item.get("kind"),
+                         "created": item.get("created_at"),
+                         "expires": item.get("expires_at"),
+                         "read": read, "acked": read})
+        return {"ok": True, "mesh_id": payload.get("mesh_id"),
+                "messages": rows, "count": len(rows),
+                "unread": payload.get("unread", 0)}
 
     # -- created-file ledger (`ozagia.core.files`) -------------------------- #
     def _files_root(self) -> Path:

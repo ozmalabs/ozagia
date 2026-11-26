@@ -46,6 +46,7 @@ ozagia agent                                                       # the TUI
 | `--clean-logs` | after a successful run with no kept clone, delete the run root and scratch workspace (default: keep the logs) |
 | `--repo-map` | send a bounded, task-ranked repository map in the first model request; off by default |
 | `--repo-map-tokens N` | repo-map budget for `--repo-map`, 200..8000 (default 1500); needs `--repo-map` |
+| `--mesh` / `--no-mesh` | join the local session mesh and pass a bounded metadata summary to the model context; the explicit flag wins over `[mesh] enabled` and `OZAGIA_MESH`. No model send/lease tool is added |
 | `-- ARGS` | passed to opencode before the prompt |
 
 Exit status: opencode's exit code; 124 after a timeout; 130 after Ctrl-C; 2
@@ -89,7 +90,10 @@ daemon failure).
    commands reach that built-in shell, where OpenCode's permission service
    remains authoritative. With `--repo-map`, `OZAGIA_REPO_MAP_TOKENS` carries
    the budget; without it the variable is absent from the OpenCode process's
-   environment even when the caller's environment sets it.
+   environment even when the caller's environment sets it. With mesh enabled
+   and registered, `OZAGIA_MESH_SUMMARY` carries the bounded metadata summary
+   and `OZAGIA_MESH_HARNESS`/`OZAGIA_MESH_SESSION` name the runner identity;
+   when registration fails none of them is set.
    A managed run also sets `TMPDIR`, `TMP` and `TEMP` to `<run root>/tmp`
    (mode 0700) and `OZAGIA_SCRATCH_ROOT` to a disk-backed scratch workspace
    under `<state dir>/tmp/workspaces/agent/<run>`. The graph daemon and the
@@ -181,6 +185,7 @@ The summary:
 ozagia agent: exit 0 after 41.2 s in /path/repo
   graph: refreshed (5321 nodes) in 0.8 s; daemon ready in 2.1 s
   plugin loaded: yes; captured calls: 37; passthrough: 9; fallbacks: 0
+  mesh: off
   transcript: /tmp/ozagia_agent/.../logs/transcript.txt
   logs: /tmp/ozagia_agent/.../logs
   managed tmp: tmp_1a2b3c4d5e6f  /tmp/ozagia_agent/...  (tmpfs)  TTL 604800s (expires 2026-12-03T12:00:00Z); ozagia tmp release tmp_1a2b3c4d5e6f --delete
@@ -191,6 +196,43 @@ ozagia agent: exit 0 after 41.2 s in /path/repo
 `fallbacks` its `stats.fallbacks` (the plugin's fallback reports, expired
 requests and failed requests; the `eval.agent.graph_stats_fields` fields). `run_agent` returns these and the
 paths as a dict.
+
+### Session mesh
+
+Mesh membership is opt-in and read-only in the harness. `--mesh` (or
+`[mesh] enabled = true`, or `OZAGIA_MESH=1`) registers the run as
+`harness=opencode-runner`, `session=run:<run root name>` under the **source**
+repository's state directory with `exposure=read`, `source=host`, the harness
+PID, the workdir (the clone when `--clone`) and the branch when git can name
+one. It never invents an OpenCode `ses_...` id. `--no-mesh` disables it even
+when the environment or configuration enables it, and an explicit flag wins.
+
+A heartbeat refreshes the registration every 15 seconds while the run is
+alive. On every exit path (normal, timeout, error, Ctrl-C) the harness releases
+the leases held by that identity, cancels its queued requests and unregisters.
+Registration, heartbeat and cleanup are best effort: a failure is recorded in
+`mesh_warning`/`mesh_cleanup_errors` and the agent run continues.
+
+A registered run passes one `OZAGIA_MESH_SUMMARY` string (at most 700
+characters) to the OpenCode process: self key/harness/session/role/exposure,
+live/stale peer counts, at most four link summaries, at most four active lease
+resource/mode/expiry/queue entries and the unread count. It carries no message
+subjects or bodies, credentials, source text or unrelated paths. The plugin
+adds it as one `[ozagia mesh]` block marked untrusted metadata; missing or
+oversized values add nothing. It is a snapshot; `ozagia mesh status` is the
+live view.
+
+```console
+$ ozagia agent --mesh --prompt "fix the retry loop"
+...
+  mesh: default run:20261126-... exposure=read; peers 1; leases 0
+```
+
+The result carries `mesh_enabled`, `mesh_id`, `mesh_session`, `mesh_key`,
+`mesh_exposure`, `mesh_registered`, `mesh_peer_count`, `mesh_lease_ids`,
+`mesh_warning` and `mesh_cleanup_errors`. The summary prints
+`mesh: off/unavailable (<reason>)` when mesh was requested but registration
+failed, and `mesh: off` when it was not enabled.
 
 ### Managed run roots
 

@@ -2,7 +2,7 @@
 
 > **Generated file.** Built by `scripts/docs/generate_docs.py` from `src/ozagia/integrations/mcp/server.py`, `src/ozagia/integrations/mcp/graph_surface.py`, `src/ozagia/integrations/mcp/sre.py`, `src/ozagia/research/mcp.py` (ozagia `0.1.5.dev0`). Do not edit by hand: change the source code and regenerate.
 
-200 tools.
+202 tools.
 
 > The coding and research sets together, plus the `research_dev_context` bridge tool.
 
@@ -287,6 +287,20 @@ Read-only, bounded, versioned model-facing maps of this repository: graph, outli
 | `model` | string |  |  | host model label used for cache partition. |
 | `trace_id` | string |  |  | bounded redacted trace label. |
 | `strict` | boolean |  | false | fail instead of using an explicit fallback. |
+### `dev_mesh_inbox`
+
+Read-only metadata rows from this session's local mesh mailbox: id, from, kind, created/expires, read/acked. Subject and body are never returned here; use `ozagia mesh read` for a body. Needs OZAGIA_MESH_HARNESS/OZAGIA_MESH_SESSION and never acks, sends or changes a message.
+
+| parameter | type | required | default | description |
+|---|---|---|---|---|
+| `unread` | boolean |  | false | Only unread messages. |
+### `dev_mesh_status`
+
+Read-only local session-mesh status for this repository: mesh id, session counts (live/stale), peers, links/derived roles, active and queued leases, delegations and unread counts. Self is resolved from OZAGIA_MESH_HARNESS/OZAGIA_MESH_SESSION when set. Metadata only: no message bodies or subjects, and it never sends, leases, starts a daemon or changes state.
+
+| parameter | type | required | default | description |
+|---|---|---|---|---|
+| `include_all` | boolean |  | false | Also list ended, dead and foreign sessions in peers. |
 ### `dev_migration`
 
 Read-only Python-to-Rust migration overlay. view=status inventories the configured [migration] trees and reports per-status totals, top gaps/divergences, inference candidates (never accepted), freshness and explicit omissions; view=tasks emits a checklist for planned, in-progress or diverged symbols without creating a goal or running anything; view=scaffold renders a bounded skeleton preview for a simple dataclass/function. The MCP tool never writes: use `ozagia migration scaffold --write` for an explicit transaction.
