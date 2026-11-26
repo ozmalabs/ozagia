@@ -379,6 +379,7 @@ _DOCS = {
     "eval_agent": "doc:docs/eval_agent.md",
     "eval_retrieval": "doc:docs/eval_retrieval.md",
     "temp": "doc:docs/temp.md",
+    "assets": "doc:docs/assets.md",
     "install": "doc:docs/install.md",
 }
 
@@ -448,6 +449,8 @@ _TESTS = {
     "temp_space": "test:tests/test_temp_space.py",
     "temp_cli": "test:tests/test_temp_cli.py",
     "daemon_tmp": "test:tests/test_daemon_tmp.py",
+    "assets": "test:tests/test_assets.py",
+    "assets_cli": "test:tests/test_assets_cli.py",
 }
 
 
@@ -1433,6 +1436,44 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         authorization=_EXEC,
         tests=_tests("resources"),
         docs=_docs("resources"),
+    ),
+    _def(
+        id="cap:resources.assets",
+        domain="resources",
+        purpose=("Catalog durable external assets (datasets, models, corpora, "
+                 "installs, caches and tools) with ownership, provenance, "
+                 "licence, size and verification state, and plan safe GC "
+                 "without deleting anything."),
+        owner="ozagia.core.assets",
+        side_effect="write",
+        exposure=["cli"],
+        impl=["impl:ozagia.core.assets.register",
+              "impl:ozagia.core.assets.adopt",
+              "impl:ozagia.core.assets.list_assets",
+              "impl:ozagia.core.assets.status",
+              "impl:ozagia.core.assets.verify",
+              "impl:ozagia.core.assets.scan",
+              "impl:ozagia.core.assets.gc_plan",
+              "impl:ozagia.core.assets.pin",
+              "impl:ozagia.core.assets.forget",
+              "impl:ozagia.assets_cli.run"],
+        surfaces=["cli:ozagia.assets"],
+        prerequisites=["a repository root",
+                       "a writable user data home or state directory",
+                       "an explicit path or an owned .ozagia-asset.json marker"],
+        limits=["metadata only; never stores file contents, prompts or secrets",
+                "measurement never follows symlinks and reports partial walks",
+                "hashing only with an explicit verify --hash",
+                "no network in list, status, scan, verify or gc",
+                "scan only explicit paths or markers; never $HOME by default",
+                "a marker is written only for owner=ozagia with --mark",
+                "gc is a dry run; apply is refused in this stage",
+                "only owner=ozagia, deletable, unpinned present/verified "
+                "assets are candidates"],
+        authorization=("writes only the user-level or state asset registry and "
+                       "an explicitly marked owned marker"),
+        tests=_tests("assets", "assets_cli"),
+        docs=_docs("assets"),
     ),
     _def(
         id="cap:resources.temp_space",

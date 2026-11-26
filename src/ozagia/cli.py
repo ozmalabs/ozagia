@@ -1898,6 +1898,8 @@ def build_parser() -> argparse.ArgumentParser:
     _migration_parser(sub)
     from ozagia.temp_cli import add_parser as _temp_parser
     _temp_parser(sub)
+    from ozagia.assets_cli import add_parser as _assets_parser
+    _assets_parser(sub)
     return p
 
 
@@ -1943,7 +1945,7 @@ _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
                        "review-repo", "goal", "capabilities", "engine",
                        "profile-run", "task-preflight", "overview", "shape",
                        "languages", "supply-chain", "migration", "tmp",
-                       *DELEGATES})
+                       "assets", *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
                           "--root", "--clone", "--prompt", "--prompt-file",
@@ -2055,6 +2057,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "tmp":
         from ozagia.temp_cli import run as _temp_run
         return _temp_run(args)
+    if args.command == "assets":
+        from ozagia.assets_cli import run as _assets_run
+        return _assets_run(args)
     parser.error(f"unknown command {args.command}")  # pragma: no cover
     return 2
 

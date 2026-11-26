@@ -238,7 +238,8 @@ long-lived caches are **not** temp entries.  `ozagia tmp audit`, `clean`,
 registry; they must not adopt or delete an external asset.  Ocelot's own data
 (for example a Wikipedia parquet set) is external/unowned and is never a temp
 candidate.  See the
-[external-assets plan](plans/2026-11-26_external_assets.md) and the
+[external-assets plan](plans/2026-11-26_external_assets.md),
+[the assets catalog](assets.md) and the
 [prior-art survey](research/temp_managers.md).
 
 `/tmp` remains ephemeral.  Use `ozagia tmp path` (or the `default_scratch_root`
