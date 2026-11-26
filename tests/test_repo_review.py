@@ -198,6 +198,27 @@ def test_security_section(repo: Path) -> None:
     assert "not a security audit" in packet["sections"]["security"]["data"]["note"]
 
 
+def test_sensitive_file_names_allow_only_observed_safe_npmrc_setting(repo: Path) -> None:
+    _write(repo, ".npmrc", "package-lock=false\n")
+    _write(repo, "support/maintainers.gpg.key",
+           "-----BEGIN PGP PUBLIC KEY BLOCK-----\n"
+           "Version: GnuPG v2\n\n"
+           "mQEFZXhhbXBsZXBheWxvYWQxMjM0NTY3ODkwYWJjZA==\n"
+           "-----END PGP PUBLIC KEY BLOCK-----\n")
+    _write(repo, "support/private.key",
+           "-----BEGIN PGP PRIVATE KEY BLOCK-----\nprivate material\n")
+    _write(repo, "deploy/.npmrc", "//registry.example/:_authToken=${NPM_TOKEN}\n")
+    _commit(repo, "credential-shaped files")
+
+    packet = RR.review_repo(repo, sections=["security"])
+
+    assert _keys(packet, "sensitive_file") == {
+        "file:keys/id_ed25519", "file:support/private.key",
+        "file:support/maintainers.gpg.key",
+        "file:deploy/.npmrc",
+    }
+
+
 def test_ops_and_dependencies(repo: Path) -> None:
     packet = RR.review_repo(repo, sections=["ops", "dependencies"])
     web = "ops:compose/deploy/compose.yaml#service/web"
