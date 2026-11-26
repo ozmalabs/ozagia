@@ -63,6 +63,10 @@ def test_create_json_list_and_status(env, capsys) -> None:
     assert entry["expires_at"] == entry["created_at"] + 3600
     assert Path(entry["path"]).is_relative_to(state / "tmp" / "workspaces")
     assert entry["bytes"] >= 0
+    assert entry["apparent_bytes"] >= 0
+    assert entry["inodes"] >= 1
+    assert entry["hardlinks"] == 0
+    assert entry["allocation"] in ("blocks", "apparent-fallback")
 
     assert cli.main(["tmp", "list", "--json"]) == 0
     listed = _json(capsys)
@@ -79,6 +83,41 @@ def test_create_json_list_and_status(env, capsys) -> None:
     assert status["totals"]["entries"] == 1
     assert status["by_kind"]["check"]["entries"] == 1
     assert status["registry_errors"] == []
+
+
+def test_list_sort_and_status_top(env, capsys) -> None:
+    repo, state = env
+    created = []
+    for reason, size in (("small", 10), ("medium", 9000), ("large", 20000)):
+        assert cli.main(["tmp", "create", "--reason", reason, "--json"]) == 0
+        entry = _json(capsys)["entry"]
+        _write(Path(entry["path"]) / "blob.bin", size)
+        created.append(entry)
+    small, medium, large = created
+
+    assert cli.main(["tmp", "list", "--json", "--sort", "apparent"]) == 0
+    listed = _json(capsys)
+    assert [row["id"] for row in listed["entries"]] == [
+        large["id"], medium["id"], small["id"]]
+    assert all("apparent_bytes" in row and "inodes" in row
+               for row in listed["entries"])
+
+    assert cli.main(["tmp", "status", "--json", "--top", "2"]) == 0
+    status = _json(capsys)
+    assert [row["id"] for row in status["top"]] == [
+        large["id"], medium["id"]]
+    assert status["top"][0]["bytes"] >= status["top"][1]["bytes"]
+    for row in status["top"]:
+        assert row["kind"] == "scratch"
+        assert row["session"] is None
+        assert row["reason"] in {"medium", "large"}
+        assert Path(row["path"]).is_dir()
+        assert row["apparent_bytes"] >= 0
+
+    assert cli.main(["tmp", "status", "--top", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "top 1 by allocated:" in out
+    assert "allocated=" in out and "apparent=" in out
 
 
 def test_list_plain_is_short_and_stable(env, capsys) -> None:

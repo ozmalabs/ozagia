@@ -61,6 +61,16 @@ def _short_socket_dir() -> Path:
     return path
 
 
+def _usage_stub(**changes) -> dict:
+    usage = {
+        "allocated_bytes": 0, "apparent_bytes": 0, "files": 0, "inodes": 0,
+        "hardlinks": 0, "walk": "complete", "unknown": False, "errors": 0,
+        "allocation": "blocks", "cross_device": False,
+    }
+    usage.update(changes)
+    return usage
+
+
 def _rows(plan: dict) -> dict[str, dict]:
     return {row["path"]: row for row in plan["artifacts"]}
 
@@ -111,6 +121,16 @@ def test_create_list_status_round_trip(root: Path) -> None:
     }
     assert record["path"] == entry["path"]
     assert record["session"] == marker["session"]
+    usage = TS.walk_usage(path)
+    assert entry["bytes"] == usage["allocated_bytes"]
+    assert entry["apparent_bytes"] == usage["apparent_bytes"]
+    assert entry["files"] == usage["files"]
+    assert entry["inodes"] == usage["inodes"]
+    assert entry["hardlinks"] == 0
+    assert entry["allocation"] in ("blocks", "apparent-fallback")
+    for field in ("apparent_bytes", "files", "inodes", "hardlinks",
+                  "allocation"):
+        assert record[field] == entry[field]
     for payload in (marker, record):
         assert "content" not in payload
         assert "contents" not in payload
@@ -124,10 +144,131 @@ def test_create_list_status_round_trip(root: Path) -> None:
     report = TS.status(root)
     assert report["totals"]["entries"] == 1
     assert report["totals"]["bytes"] == listed[0]["bytes"]
+    assert report["totals"]["apparent_bytes"] == listed[0]["apparent_bytes"]
+    assert report["totals"]["inodes"] == listed[0]["inodes"]
     assert report["by_kind"]["scratch"]["entries"] == 1
     assert report["by_kind"]["scratch"]["owned"] == 1
     assert report["by_ownership"]["owned"]["entries"] == 1
     assert report["filesystems"]
+
+
+def test_old_registry_record_is_recomputed_with_new_fields(
+        root: Path) -> None:
+    entry = TS.create(root, reason="old record")
+    _write(Path(entry["path"]) / "blob.bin", 100)
+    record = _record(root, entry["id"])
+    for field in ("apparent_bytes", "inodes", "hardlinks", "allocation"):
+        record.pop(field, None)
+    record["bytes"] = 123_456
+    (TS.registry_dir(root) / f"{entry['id']}.json").write_text(
+        json.dumps(record), encoding="utf-8")
+
+    got = TS.get(root, entry["id"])
+    usage = TS.walk_usage(Path(entry["path"]))
+    assert got["bytes"] == usage["allocated_bytes"]
+    assert got["bytes"] != 123_456
+    assert got["apparent_bytes"] == usage["apparent_bytes"]
+    assert got["apparent_bytes"] > 100
+    assert got["files"] == 2
+    assert got["inodes"] == 3
+    assert got["hardlinks"] == 0
+    assert got["allocation"] in ("blocks", "apparent-fallback")
+
+
+def test_status_reports_inode_capacity_and_pressure(root: Path,
+                                                    monkeypatch) -> None:
+    TS.create(root, reason="inode pressure")
+
+    class FakeVFS:
+        f_blocks = 1000
+        f_bavail = 900
+        f_frsize = 4096
+        f_files = 100
+        f_ffree = 5
+
+    monkeypatch.setattr(TS.os, "statvfs", lambda path: FakeVFS())
+    report = TS.status(root)
+    filesystem = report["filesystems"][0]
+    assert filesystem["total_inodes"] == 100
+    assert filesystem["free_inodes"] == 5
+    assert filesystem["inode_percent"] == 95.0
+    assert filesystem["inode_warning"] is not None
+    assert any("free inodes below 10%" in warning
+               for warning in report["warnings"])
+
+
+def test_status_skips_inode_warning_without_inode_accounting(
+        root: Path, monkeypatch) -> None:
+    TS.create(root, reason="no inode accounting")
+
+    class FakeVFS:
+        f_blocks = 1000
+        f_bavail = 900
+        f_frsize = 4096
+        f_files = 0
+        f_ffree = 0
+
+    monkeypatch.setattr(TS.os, "statvfs", lambda path: FakeVFS())
+    report = TS.status(root)
+    filesystem = report["filesystems"][0]
+    assert filesystem["total_inodes"] == 0
+    assert filesystem["free_inodes"] == 0
+    assert filesystem["inode_percent"] is None
+    assert filesystem["inode_warning"] is None
+    assert not any("inodes" in warning for warning in report["warnings"])
+
+
+def test_list_entries_sorts_by_size_files_inodes_and_age(root: Path) -> None:
+    small = TS.create(root, reason="small")
+    medium = TS.create(root, reason="medium")
+    large = TS.create(root, reason="large")
+    _write(Path(small["path"]) / "a.bin", 10)
+    _write(Path(medium["path"]) / "a.bin", 9000)
+    for index in range(3):
+        _write(Path(large["path"]) / f"{index}.bin", 20_000)
+    _rewrite(root, small["id"], last_used_at=100)
+    _rewrite(root, medium["id"], last_used_at=200)
+    _rewrite(root, large["id"], last_used_at=300)
+
+    for sort, field in (("allocated", "bytes"),
+                        ("apparent", "apparent_bytes"),
+                        ("files", "files"),
+                        ("inodes", "inodes")):
+        entries = TS.list_entries(root, sort=sort)
+        values = [entry[field] for entry in entries]
+        assert values == sorted(values, reverse=True)
+        assert entries[0]["id"] == large["id"]
+
+    by_age = TS.list_entries(root, sort="age")
+    assert [entry["id"] for entry in by_age] == [
+        small["id"], medium["id"], large["id"]]
+    assert [entry["id"] for entry in TS.list_entries(root, sort="created")] \
+        == [entry["id"] for entry in TS.list_entries(root)]
+
+
+def test_status_top_n_returns_the_largest_by_allocated(root: Path) -> None:
+    small = TS.create(root, reason="small")
+    medium = TS.create(root, reason="medium")
+    large = TS.create(root, reason="large")
+    _write(Path(small["path"]) / "a.bin", 10)
+    _write(Path(medium["path"]) / "a.bin", 9000)
+    _write(Path(large["path"]) / "a.bin", 20_000)
+
+    assert "top" not in TS.status(root)
+    report = TS.status(root, top=2)
+    rows = report["top"]
+    assert [row["id"] for row in rows] == [large["id"], medium["id"]]
+    assert rows[0]["bytes"] >= rows[1]["bytes"]
+    for row in rows:
+        assert row["reason"]
+        assert row["path"].startswith(str(TS.state_dir(root)))
+        assert row["session"] is None
+        assert row["allocated_bytes"] == row["bytes"]
+        assert row["apparent_bytes"] >= 0
+        assert row["files"] >= 1
+        assert row["inodes"] >= 1
+
+    assert TS.status(root, top=0)["top"] == []
 
 
 def test_default_path_is_under_the_state_dir_not_tmp(root: Path) -> None:
@@ -405,18 +546,14 @@ def test_clean_rejects_a_resolved_dotdot_escape(root: Path, tmp_path: Path,
     link.symlink_to("/etc", target_is_directory=True)
     escaped = str(link / ".." / "etc")
     _rewrite(root, entry["id"], path=escaped)
-    monkeypatch.setattr(TS, "walk_usage", lambda *a, **k: {
-        "bytes": 0, "files": 0, "walk": "complete", "unknown": False,
-        "errors": 0})
+    monkeypatch.setattr(TS, "walk_usage", lambda *a, **k: _usage_stub())
     plan = TS.clean(root, ids=[entry["id"]])
     assert _kept_reason(plan, entry["id"]) == "outside-allowed-root"
 
 
 def test_clean_refuses_home_and_filesystem_root(root: Path, monkeypatch) -> None:
     entry = TS.create(root, reason="home")
-    monkeypatch.setattr(TS, "walk_usage", lambda *a, **k: {
-        "bytes": 0, "files": 0, "walk": "complete", "unknown": False,
-        "errors": 0})
+    monkeypatch.setattr(TS, "walk_usage", lambda *a, **k: _usage_stub())
     _rewrite(root, entry["id"], path=str(Path.home()))
     monkeypatch.setattr(
         TS, "allowed_temp_roots",
@@ -439,8 +576,229 @@ def test_walk_usage_counts_files_and_ignores_symlinks(tmp_path: Path) -> None:
     os.symlink(tree / "nested", tree / "linkdir")
 
     usage = TS.walk_usage(tree)
-    assert usage == {"bytes": 12, "files": 2, "walk": "complete",
-                     "unknown": False, "errors": 0}
+    assert usage["files"] == 2
+    assert usage["apparent_bytes"] == 12
+    assert usage["allocated_bytes"] > 0
+    # tree, a.txt, nested, b.txt, link.bin and linkdir each have an inode.
+    assert usage["inodes"] == 6
+    assert usage["hardlinks"] == 0
+    assert usage["walk"] == "complete"
+    assert usage["unknown"] is False
+    assert usage["errors"] == 0
+    assert usage["allocation"] == "blocks"
+
+
+def test_walk_usage_reports_sparse_allocated_and_apparent(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    sparse = tree / "sparse.bin"
+    with sparse.open("wb") as handle:
+        handle.seek(8 * 1024 * 1024)
+        handle.write(b"x")
+    apparent = sparse.stat().st_size
+
+    usage = TS.walk_usage(tree)
+    assert usage["files"] == 1
+    assert usage["apparent_bytes"] == apparent
+    assert usage["allocation"] == "blocks"
+    assert usage["allocated_bytes"] < usage["apparent_bytes"]
+    assert usage["allocated_bytes"] > 0
+
+
+def test_walk_usage_counts_a_hard_link_once(tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    first = tree / "first.bin"
+    first.write_bytes(b"y" * 32)
+    second = tree / "second.bin"
+    os.link(first, second)
+
+    usage = TS.walk_usage(tree)
+    assert usage["files"] == 2
+    assert usage["apparent_bytes"] == 32
+    assert usage["hardlinks"] == 1
+    # The tree directory plus the shared regular-file inode.
+    assert usage["inodes"] == 2
+    stat_result = first.stat()
+    if stat_result.st_blocks:
+        assert usage["allocation"] == "blocks"
+        assert usage["allocated_bytes"] == stat_result.st_blocks * 512
+
+
+def test_walk_usage_counts_symlink_inodes_without_following(
+        tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "regular.bin").write_bytes(b"z" * 5)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"o" * 8192)
+    os.symlink(outside, tree / "outside-link")
+    os.symlink(tree, tree / "self-link")
+
+    usage = TS.walk_usage(tree)
+    assert usage["files"] == 1
+    assert usage["apparent_bytes"] == 5
+    assert usage["hardlinks"] == 0
+    # tree, regular.bin and the two symlinks.
+    assert usage["inodes"] == 4
+    assert usage["allocated_bytes"] < 8192
+
+
+def test_walk_usage_counts_directory_and_empty_file_inodes(
+        tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "empty-a").write_bytes(b"")
+    (tree / "sub" / "empty-b").write_bytes(b"")
+
+    usage = TS.walk_usage(tree)
+    assert usage["files"] == 2
+    assert usage["apparent_bytes"] == 0
+    assert usage["allocated_bytes"] == 0
+    # tree, empty-a, sub and empty-b.
+    assert usage["inodes"] == 4
+
+
+def test_walk_usage_reports_many_empty_files_as_inodes(
+        tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    for index in range(900):
+        (tree / f"lock-{index}").write_bytes(b"")
+
+    usage = TS.walk_usage(tree, max_entries=1000)
+    assert usage["files"] == 900
+    assert usage["inodes"] == 901
+    assert usage["allocated_bytes"] == 0
+    assert usage["apparent_bytes"] == 0
+
+
+def test_walk_usage_skips_a_cross_device_child(tmp_path: Path,
+                                              monkeypatch) -> None:
+    import types
+
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "local.bin").write_bytes(b"abc")
+    root_stat = os.lstat(tree)
+    foreign_stat = types.SimpleNamespace(
+        st_mode=stat.S_IFREG | 0o600, st_dev=root_stat.st_dev + 1,
+        st_ino=999_999_999, st_size=5000, st_blocks=16)
+    real_scandir = os.scandir
+
+    class ForeignEntry:
+        path = str(tree / "foreign.bin")
+
+        @staticmethod
+        def stat(*, follow_symlinks: bool = True):
+            return foreign_stat
+
+    class FakeScan:
+        def __init__(self, entries):
+            self.entries = entries
+
+        def __iter__(self):
+            return iter(self.entries)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+    def fake_scandir(path):
+        if Path(path) == tree:
+            with real_scandir(tree) as iterator:
+                local = list(iterator)
+            return FakeScan([*local, ForeignEntry()])
+        return real_scandir(path)
+
+    monkeypatch.setattr(TS.os, "scandir", fake_scandir)
+    usage = TS.walk_usage(tree)
+    assert usage["cross_device"] is True
+    assert usage["walk"] == "partial"
+    assert usage["unknown"] is True
+    assert usage["files"] == 1
+    assert usage["apparent_bytes"] == 3
+    assert usage["inodes"] == 2
+
+
+def test_walk_usage_falls_back_when_blocks_are_unavailable(
+        tmp_path: Path, monkeypatch) -> None:
+    tree = tmp_path / "tree"
+    _write(tree / "a.bin", 10)
+    monkeypatch.setattr(TS, "_allocated_blocks", lambda info: None)
+
+    usage = TS.walk_usage(tree)
+    assert usage["allocation"] == "apparent-fallback"
+    assert usage["allocated_bytes"] == 10
+    assert usage["apparent_bytes"] == 10
+
+
+def test_walk_usage_treats_zero_blocks_as_sparse_on_posix(
+        tmp_path: Path, monkeypatch) -> None:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    _write(tree / "a.bin", 10)
+    _write(tree / "b.bin", 20)
+    monkeypatch.setattr(TS, "_allocated_blocks", lambda info: 0)
+    monkeypatch.setattr(TS, "TRUST_ST_BLOCKS", True)
+
+    usage = TS.walk_usage(tree)
+    assert usage["allocation"] == "blocks"
+    assert usage["allocated_bytes"] == 0
+    assert usage["apparent_bytes"] == 30
+
+
+def test_walk_usage_falls_back_when_non_posix_blocks_are_all_zero(
+        tmp_path: Path, monkeypatch) -> None:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    _write(tree / "a.bin", 10)
+    _write(tree / "b.bin", 20)
+    monkeypatch.setattr(TS, "_allocated_blocks", lambda info: 0)
+    monkeypatch.setattr(TS, "TRUST_ST_BLOCKS", False)
+
+    usage = TS.walk_usage(tree)
+    assert usage["allocation"] == "apparent-fallback"
+    assert usage["allocated_bytes"] == 30
+    assert usage["apparent_bytes"] == 30
+
+
+def test_walk_usage_reports_a_fully_sparse_file_as_zero_allocated(
+        tmp_path: Path) -> None:
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    sparse = tree / "fully-sparse.bin"
+    with sparse.open("wb") as handle:
+        handle.truncate(8 * 1024 * 1024)
+    if sparse.stat().st_blocks != 0:
+        pytest.skip("filesystem does not create fully sparse files")
+
+    usage = TS.walk_usage(tree)
+    assert usage["allocation"] == "blocks"
+    assert usage["allocated_bytes"] == 0
+    assert usage["apparent_bytes"] == 8 * 1024 * 1024
+
+
+def test_walk_usage_unreadable_entry_is_partial(tmp_path: Path,
+                                                monkeypatch) -> None:
+    tree = tmp_path / "tree"
+    _write(tree / "a.bin", 5)
+    real_scandir = os.scandir
+
+    def deny(path):
+        if Path(path) == tree:
+            raise PermissionError("simulated denial")
+        return real_scandir(path)
+
+    monkeypatch.setattr(TS.os, "scandir", deny)
+    usage = TS.walk_usage(tree)
+    assert usage["walk"] == "partial"
+    assert usage["unknown"] is True
+    assert usage["errors"] == 1
+    assert usage["files"] == 0
+    assert usage["inodes"] == 1
 
 
 def test_walk_usage_marks_partial_at_a_low_bound(tmp_path: Path) -> None:
@@ -450,13 +808,22 @@ def test_walk_usage_marks_partial_at_a_low_bound(tmp_path: Path) -> None:
     usage = TS.walk_usage(tree, max_entries=2)
     assert usage["walk"] == "partial"
     assert usage["files"] <= 2
-    assert usage["bytes"] <= 2
+    assert usage["apparent_bytes"] <= 2
+    assert usage["allocated_bytes"] >= usage["apparent_bytes"]
 
 
 def test_walk_usage_missing_path_is_zero_and_complete(tmp_path: Path) -> None:
     usage = TS.walk_usage(tmp_path / "absent")
-    assert usage == {"bytes": 0, "files": 0, "walk": "complete",
-                     "unknown": False, "errors": 0}
+    assert usage["allocated_bytes"] == 0
+    assert usage["apparent_bytes"] == 0
+    assert usage["files"] == 0
+    assert usage["inodes"] == 0
+    assert usage["hardlinks"] == 0
+    assert usage["allocation"] == "blocks"
+    assert usage["walk"] == "complete"
+    assert usage["unknown"] is False
+    assert usage["errors"] == 0
+    assert usage["cross_device"] is False
 
 
 def test_audit_reports_legacy_artifacts_read_only(root: Path,
@@ -528,7 +895,8 @@ def test_audit_never_follows_symlinks_and_honours_bounds(root: Path,
     link = by_path[str(scan / "ozagia-native-link")]
     assert link["kind"] == "symlink"
     assert link["bytes"] == 0 and link["files"] == 0
-    assert result["totals"]["bytes"] == 2
+    assert result["totals"]["bytes"] >= 2
+    assert result["totals"]["apparent_bytes"] == 2
 
     truncated = TS.audit(root, roots=[scan], max_artifacts=1)
     assert truncated["truncated"] is True

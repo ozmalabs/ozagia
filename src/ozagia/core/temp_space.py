@@ -88,6 +88,20 @@ MAX_WALK_ENTRIES = 200_000
 MAX_WALK_SECONDS = 5.0
 MAX_WALK_DEPTH = 64
 
+#: ``st_blocks`` is measured in 512-byte units on POSIX.
+ALLOCATION_BLOCK_SIZE = 512
+#: ``allocation`` value when the platform reports usable block counts.
+ALLOCATION_BLOCKS = "blocks"
+#: ``allocation`` value when allocated space fell back to ``st_size``.
+ALLOCATION_APPARENT_FALLBACK = "apparent-fallback"
+#: POSIX reports meaningful ``st_blocks``; zero is a valid fully sparse file,
+#: not evidence that block accounting is unavailable.  A non-POSIX platform
+#: that reports zero for every non-empty file falls back to apparent size.
+TRUST_ST_BLOCKS = os.name == "posix"
+
+DEFAULT_LIST_SORT = "created"
+LIST_SORT_KEYS = ("created", "allocated", "apparent", "files", "inodes", "age")
+
 AUDIT_MAX_ARTIFACTS = 5_000
 AUDIT_MAX_SECONDS = 5.0
 AUDIT_PATTERNS = (
@@ -243,33 +257,159 @@ def make_session(harness: str | None, session_id: str | None) -> dict[str, str] 
     return {"harness": clean_harness, "id": clean_id}
 
 
+def _allocated_blocks(info: os.stat_result) -> int | None:
+    """Allocated bytes from one ``stat`` result, or ``None`` when unavailable.
+
+    POSIX reports ``st_blocks`` in 512-byte units.  A platform without the
+    attribute, or a nonsensical negative value, is *unavailable* rather than
+    zero, so the caller can fall back to apparent size explicitly.
+    """
+    blocks = getattr(info, "st_blocks", None)
+    if not isinstance(blocks, int) or blocks < 0:
+        return None
+    return blocks * ALLOCATION_BLOCK_SIZE
+
+
+def _empty_usage(*, inodes: int = 0) -> dict[str, Any]:
+    """A complete zero usage result (also used for non-walked artifact kinds)."""
+    return {
+        "allocated_bytes": 0,
+        "apparent_bytes": 0,
+        "files": 0,
+        "inodes": inodes,
+        "hardlinks": 0,
+        "walk": "complete",
+        "unknown": False,
+        "errors": 0,
+        "allocation": ALLOCATION_BLOCKS,
+        "cross_device": False,
+    }
+
+
+def _usage_record(usage: Mapping[str, Any]) -> dict[str, Any]:
+    """Registry fields derived from one walk, with ``bytes`` = allocated."""
+    return {
+        "bytes": int(usage["allocated_bytes"]),
+        "apparent_bytes": int(usage["apparent_bytes"]),
+        "files": int(usage["files"]),
+        "inodes": int(usage["inodes"]),
+        "hardlinks": int(usage["hardlinks"]),
+        "allocation": usage["allocation"],
+        "walk": usage["walk"],
+        "cross_device": bool(usage.get("cross_device")),
+    }
+
+
+def _cleared_usage_record() -> dict[str, Any]:
+    """The registry usage fields for a released, missing or deleted entry."""
+    return {
+        "bytes": 0,
+        "apparent_bytes": 0,
+        "files": 0,
+        "inodes": 0,
+        "hardlinks": 0,
+        "allocation": None,
+        "walk": "complete",
+        "cross_device": False,
+    }
+
+
 def walk_usage(path: str | Path, *, max_entries: int = MAX_WALK_ENTRIES,
                max_seconds: float = MAX_WALK_SECONDS,
                max_depth: int = MAX_WALK_DEPTH) -> dict[str, Any]:
     """Bounded usage walk of a directory tree.
 
-    Directory symlinks are never followed.  ``st_size`` is summed for regular
-    files and files are counted; file contents are never read.  A bound that
-    stops the walk, or an unreadable entry, marks the result ``partial`` and
-    ``unknown`` rather than silently reporting zero.
+    The walk never follows symlinks and never reads file contents.  It reports:
+
+    ``allocated_bytes``
+        ``st_blocks * 512`` summed once per regular-file inode.
+    ``apparent_bytes``
+        ``st_size`` summed once per regular-file inode.
+    ``files``
+        Regular-file entries, including every hard link.
+    ``inodes``
+        Unique ``(st_dev, st_ino)`` values for regular files, directories and
+        symlinks visited (the root directory and symlinks count).
+    ``hardlinks``
+        Duplicate regular-file links; their bytes and inode are not counted
+        twice.
+    ``allocation``
+        ``blocks`` when block counts were usable, or ``apparent-fallback``
+        when the platform did not report blocks.  On POSIX a zero block count
+        is valid (a fully sparse file); the fallback is only used when the
+        platform has no meaningful block accounting, or a non-POSIX platform
+        reports zero for every non-empty file.
+
+    A bound that stops the walk, an unreadable entry, or a child on another
+    filesystem marks the result ``partial`` and ``unknown`` rather than
+    silently reporting a complete total.  A cross-device child is skipped and
+    sets ``cross_device``.
     """
     path = Path(path)
     if max_entries < 0 or max_seconds < 0 or max_depth < 0:
         raise TempSpaceError("walk bounds must not be negative")
-    result = {"bytes": 0, "files": 0, "walk": "complete", "unknown": False,
-              "errors": 0}
+    result = _empty_usage()
     try:
         root_stat = os.lstat(path)
     except FileNotFoundError:
         return result
     except OSError:
         return {**result, "walk": "partial", "unknown": True, "errors": 1}
-    if not stat.S_ISDIR(root_stat.st_mode):
-        if stat.S_ISREG(root_stat.st_mode):
-            result["bytes"] = root_stat.st_size
-            result["files"] = 1
+
+    device = root_stat.st_dev
+    seen: set[tuple[int, int]] = set()
+    allocated = 0
+    apparent = 0
+    files = 0
+    hardlinks = 0
+    saw_nonempty = False
+    saw_nonzero_blocks = False
+    blocks_available = True
+
+    def account_file(info: os.stat_result) -> None:
+        nonlocal allocated, apparent, files, hardlinks
+        nonlocal saw_nonempty, saw_nonzero_blocks, blocks_available
+        blocks = _allocated_blocks(info)
+        size = int(info.st_size)
+        if blocks is None:
+            blocks_available = False
+        if size > 0:
+            saw_nonempty = True
+            if blocks is not None and blocks > 0:
+                saw_nonzero_blocks = True
+        key = (info.st_dev, info.st_ino)
+        files += 1
+        if key in seen:
+            hardlinks += 1
+            return
+        seen.add(key)
+        apparent += size
+        if blocks is not None:
+            allocated += blocks
+
+    def finish() -> dict[str, Any]:
+        fallback = (not blocks_available
+                    or (not TRUST_ST_BLOCKS and saw_nonempty
+                        and not saw_nonzero_blocks))
+        result.update({
+            "allocated_bytes": apparent if fallback else allocated,
+            "apparent_bytes": apparent,
+            "files": files,
+            "inodes": len(seen),
+            "hardlinks": hardlinks,
+            "allocation": (ALLOCATION_APPARENT_FALLBACK if fallback
+                           else ALLOCATION_BLOCKS),
+        })
         return result
 
+    if not stat.S_ISDIR(root_stat.st_mode):
+        if stat.S_ISREG(root_stat.st_mode):
+            account_file(root_stat)
+        elif stat.S_ISLNK(root_stat.st_mode):
+            seen.add((root_stat.st_dev, root_stat.st_ino))
+        return finish()
+
+    seen.add((root_stat.st_dev, root_stat.st_ino))
     deadline = time.monotonic() + max_seconds
     entries = 0
     stack: list[tuple[Path, int]] = [(path, 0)]
@@ -300,19 +440,26 @@ def walk_usage(path: str | Path, *, max_entries: int = MAX_WALK_ENTRIES,
                     result["unknown"] = True
                     result["walk"] = "partial"
                     continue
+                if info.st_dev != device:
+                    result["cross_device"] = True
+                    result["walk"] = "partial"
+                    result["unknown"] = True
+                    continue
                 if stat.S_ISREG(info.st_mode):
-                    result["bytes"] += info.st_size
-                    result["files"] += 1
+                    account_file(info)
                 elif stat.S_ISDIR(info.st_mode):
+                    seen.add((info.st_dev, info.st_ino))
                     if depth + 1 > max_depth:
                         result["walk"] = "partial"
                     else:
                         stack.append((Path(entry.path), depth + 1))
-                # Symlinks and special files are counted as visited but never
-                # followed and never added to the byte/file totals.
+                elif stat.S_ISLNK(info.st_mode):
+                    seen.add((info.st_dev, info.st_ino))
+                # Special files are visited but do not count as files, bytes
+                # or inodes; symlinks are counted as inodes but never followed.
             if stopped:
                 break
-    return result
+    return finish()
 
 
 def tmpfs_for(path: str | Path, *, mountinfo: str | None = None) -> bool | None:
@@ -431,8 +578,8 @@ def create(root: str | Path, *, kind: str = DEFAULT_SCRATCH_KIND, reason: str,
         os.chmod(target, 0o700)
         _write_json(target / MARKER_NAME, marker)
         usage = walk_usage(target)
-        record.update({"bytes": usage["bytes"], "files": usage["files"],
-                       "walk": usage["walk"], "tmpfs": tmpfs_for(target)})
+        record.update(_usage_record(usage))
+        record.update({"tmpfs": tmpfs_for(target)})
         _write_json(_record_path(root_path, entry_id), record)
     except BaseException:
         _remove_marker_and_empty_dir(target, entry_id,
@@ -531,8 +678,8 @@ def adopt(root: str | Path, path: str | Path, *, reason: str,
         }
         _write_json(target / MARKER_NAME, marker)
     usage = walk_usage(target)
-    record.update({"bytes": usage["bytes"], "files": usage["files"],
-                   "walk": usage["walk"], "tmpfs": tmpfs_for(target)})
+    record.update(_usage_record(usage))
+    record.update({"tmpfs": tmpfs_for(target)})
     try:
         _write_json(_record_path(root_path, entry_id), record)
     except BaseException:
@@ -568,9 +715,18 @@ def touch(root: str | Path, entry_id: str) -> dict[str, Any]:
 
 def list_entries(root: str | Path, *, kind: str | None = None,
                  session: str | None = None, owned: bool | None = None,
-                 include_all: bool = False) -> list[dict[str, Any]]:
-    """Entries, newest first is not assumed: sorted by ``created_at`` then id."""
+                 include_all: bool = False,
+                 sort: str = DEFAULT_LIST_SORT) -> list[dict[str, Any]]:
+    """Entries with their current usage.
+
+    The default order is created-at ascending (then id), the historical
+    order.  ``sort`` also accepts ``allocated``, ``apparent``, ``files`` and
+    ``inodes`` (largest first) or ``age`` (least recently used first).
+    """
     root_path = Path(root).resolve()
+    if sort not in LIST_SORT_KEYS:
+        raise TempSpaceError(
+            "sort must be one of " + ", ".join(LIST_SORT_KEYS))
     if kind is not None:
         kind = _validate_kind(kind)
     result: list[dict[str, Any]] = []
@@ -586,59 +742,109 @@ def list_entries(root: str | Path, *, kind: str | None = None,
         if session is not None and not _session_matches(entry, session):
             continue
         result.append(entry)
-    result.sort(key=lambda item: (item["created_at"], item["id"]))
+    result.sort(key=lambda item: _list_sort_key(item, sort))
     return result
 
 
-def status(root: str | Path) -> dict[str, Any]:
-    """Totals by kind/session/ownership plus capacity for each filesystem."""
+def _list_sort_key(entry: Mapping[str, Any],
+                   sort: str) -> tuple[Any, ...]:
+    created = int(entry.get("created_at") or 0)
+    ident = str(entry.get("id") or "")
+    if sort == "created":
+        return (created, ident)
+    if sort == "age":
+        used = int(entry.get("last_used_at") or 0)
+        return (used, created, ident)
+    field = {"allocated": "bytes", "apparent": "apparent_bytes",
+             "files": "files", "inodes": "inodes"}[sort]
+    value = entry.get(field)
+    if not isinstance(value, int):
+        value = 0
+    return (-value, created, ident)
+
+
+def status(root: str | Path, *, top: int | None = None) -> dict[str, Any]:
+    """Totals by kind/session/ownership plus capacity for each filesystem.
+
+    ``bytes`` in every bucket is allocated space.  ``apparent_bytes`` is the
+    sum of ``st_size``.  ``top`` (when not ``None``) adds the ``N`` largest
+    entries by allocated bytes.
+    """
+    if top is not None and top < 0:
+        raise TempSpaceError("top must not be negative")
     root_path = Path(root).resolve()
     errors: list[str] = []
     entries = [_entry(root_path, record)
                for record in _load_records(root_path, errors=errors)]
+
+    def amount(entry: Mapping[str, Any], field: str) -> int:
+        value = entry.get(field)
+        return value if isinstance(value, int) else 0
+
     by_kind: dict[str, dict[str, int]] = {}
     by_session: dict[str, dict[str, int]] = {}
     by_ownership = {
-        "owned": {"entries": 0, "bytes": 0, "files": 0},
-        "unowned": {"entries": 0, "bytes": 0, "files": 0},
+        "owned": {"entries": 0, "bytes": 0, "apparent_bytes": 0,
+                  "files": 0, "inodes": 0},
+        "unowned": {"entries": 0, "bytes": 0, "apparent_bytes": 0,
+                    "files": 0, "inodes": 0},
     }
-    totals = {"entries": len(entries), "bytes": 0, "files": 0,
-              "partial": 0, "unknown": 0}
+    totals = {"entries": len(entries), "bytes": 0, "apparent_bytes": 0,
+              "files": 0, "inodes": 0, "hardlinks": 0,
+              "partial": 0, "unknown": 0, "cross_device": 0}
     filesystems: dict[int, dict[str, Any]] = {}
     for entry in entries:
-        size = entry["bytes"] if isinstance(entry["bytes"], int) else 0
-        count = entry["files"] if isinstance(entry["files"], int) else 0
+        size = amount(entry, "bytes")
+        apparent = amount(entry, "apparent_bytes")
+        count = amount(entry, "files")
+        inodes = amount(entry, "inodes")
         totals["bytes"] += size
+        totals["apparent_bytes"] += apparent
         totals["files"] += count
+        totals["inodes"] += inodes
+        totals["hardlinks"] += amount(entry, "hardlinks")
         if entry["walk"] == "partial":
             totals["partial"] += 1
         if entry.get("unknown"):
             totals["unknown"] += 1
+        if entry.get("cross_device"):
+            totals["cross_device"] += 1
         bucket = by_kind.setdefault(
-            entry["kind"], {"entries": 0, "bytes": 0, "files": 0,
+            entry["kind"], {"entries": 0, "bytes": 0, "apparent_bytes": 0,
+                            "files": 0, "inodes": 0,
                             "owned": 0, "unowned": 0})
         bucket["entries"] += 1
         bucket["bytes"] += size
+        bucket["apparent_bytes"] += apparent
         bucket["files"] += count
+        bucket["inodes"] += inodes
         bucket["owned" if entry["owned"] else "unowned"] += 1
         label = _session_label(entry)
         session_bucket = by_session.setdefault(
-            label, {"entries": 0, "bytes": 0, "files": 0, "harness": None})
+            label, {"entries": 0, "bytes": 0, "apparent_bytes": 0,
+                    "files": 0, "inodes": 0, "harness": None})
         session_bucket["entries"] += 1
         session_bucket["bytes"] += size
+        session_bucket["apparent_bytes"] += apparent
         session_bucket["files"] += count
+        session_bucket["inodes"] += inodes
         if entry["session"] is not None:
             session_bucket["harness"] = entry["session"].get("harness")
         ownership = by_ownership["owned" if entry["owned"] else "unowned"]
         ownership["entries"] += 1
         ownership["bytes"] += size
+        ownership["apparent_bytes"] += apparent
         ownership["files"] += count
+        ownership["inodes"] += inodes
         if entry["state"] == "missing":
             continue
         path = Path(entry["path"])
+        statvfs = getattr(os, "statvfs", None)
+        if statvfs is None:
+            continue
         try:
             device = os.stat(path).st_dev
-            usage = os.statvfs(path)
+            usage = statvfs(path)
         except OSError:
             continue
         if device not in filesystems:
@@ -646,12 +852,22 @@ def status(root: str | Path) -> dict[str, Any]:
             free = usage.f_bavail * usage.f_frsize
             used = max(0, total - free)
             percent = round(used * 100.0 / total, 1) if total else None
+            inode_total = int(getattr(usage, "f_files", 0) or 0)
+            inode_free = int(getattr(usage, "f_ffree", 0) or 0)
+            inode_used = max(0, inode_total - inode_free)
+            inode_percent = (round(inode_used * 100.0 / inode_total, 1)
+                             if inode_total else None)
             is_tmpfs = entry.get("tmpfs")
             warning = None
             if total and free * 10 < total:
                 warning = f"free space below 10% ({free} of {total} bytes)"
             elif is_tmpfs and percent is not None and percent > 80.0:
                 warning = f"tmpfs above 80% used ({percent}%)"
+            inode_warning = None
+            if inode_total and inode_free * 10 < inode_total:
+                inode_warning = (
+                    "free inodes below 10% "
+                    f"({inode_free} of {inode_total} inodes)")
             filesystems[device] = {
                 "device": device,
                 "path": str(path),
@@ -659,11 +875,20 @@ def status(root: str | Path) -> dict[str, Any]:
                 "free_bytes": free,
                 "used_bytes": used,
                 "percent": percent,
+                "total_inodes": inode_total,
+                "free_inodes": inode_free,
+                "inode_percent": inode_percent,
                 "tmpfs": is_tmpfs,
                 "warning": warning,
+                "inode_warning": inode_warning,
             }
-    warnings = [fs["warning"] for fs in filesystems.values() if fs["warning"]]
-    return {
+    warnings = []
+    for filesystem in filesystems.values():
+        if filesystem["warning"]:
+            warnings.append(filesystem["warning"])
+        if filesystem["inode_warning"]:
+            warnings.append(filesystem["inode_warning"])
+    payload = {
         "root": str(root_path),
         "registry": str(registry_dir(root_path)),
         "totals": totals,
@@ -677,6 +902,27 @@ def status(root: str | Path) -> dict[str, Any]:
                    "max_seconds": MAX_WALK_SECONDS,
                    "max_depth": MAX_WALK_DEPTH},
     }
+    if top is not None:
+        ranked = sorted(entries, key=lambda item: _list_sort_key(item,
+                                                                 "allocated"))
+        rows = []
+        for entry in ranked[:top]:
+            rows.append({
+                "id": entry["id"],
+                "kind": entry["kind"],
+                "session": entry["session"],
+                "session_label": _session_label(entry),
+                "reason": entry["reason"],
+                "path": entry["path"],
+                "state": entry["state"],
+                "bytes": amount(entry, "bytes"),
+                "allocated_bytes": amount(entry, "bytes"),
+                "apparent_bytes": amount(entry, "apparent_bytes"),
+                "files": amount(entry, "files"),
+                "inodes": amount(entry, "inodes"),
+            })
+        payload["top"] = rows
+    return payload
 
 
 # --------------------------------------------------------------------------- #
@@ -795,9 +1041,14 @@ def audit(root: str | Path, *, roots: Iterable[str | Path] | None = None,
                          if not item["registered"]
                          and not item["registered_ancestor"]),
         "bytes": sum(item["bytes"] for item in artifacts),
+        "apparent_bytes": sum(item["apparent_bytes"] for item in artifacts),
         "files": sum(item["files"] for item in artifacts),
+        "inodes": sum(item["inodes"] for item in artifacts),
+        "hardlinks": sum(item["hardlinks"] for item in artifacts),
         "partial": sum(1 for item in artifacts if item["walk"] == "partial"),
         "unknown": sum(1 for item in artifacts if item["unknown"]),
+        "cross_device": sum(1 for item in artifacts
+                            if item.get("cross_device")),
     }
     return {
         "root": str(root_path),
@@ -806,7 +1057,9 @@ def audit(root: str | Path, *, roots: Iterable[str | Path] | None = None,
         "excluded_roots": [str(path) for path in _audit_excluded_roots()],
         "count": len(artifacts),
         "bytes": totals["bytes"],
+        "apparent_bytes": totals["apparent_bytes"],
         "files": totals["files"],
+        "inodes": totals["inodes"],
         "totals": totals,
         "age": {
             "oldest_s": oldest["age_s"] if oldest else None,
@@ -845,8 +1098,8 @@ def release(root: str | Path, entry_id: str, *, delete: bool = False) -> dict[st
                 return _entry(root_path, record)
             raise TempPathError(f"refusing to delete {entry['path']}: {why}")
         _delete_tree(_guarded_delete_path(entry))
-        record.update({"state": "released", "bytes": 0, "files": 0,
-                       "walk": "complete", "tmpfs": None,
+        record.update(_cleared_usage_record())
+        record.update({"state": "released", "tmpfs": None,
                        "last_used_at": int(time.time())})
     else:
         record["state"] = "released"
@@ -952,8 +1205,8 @@ def clean(root: str | Path, *, dry_run: bool = True, expired: bool = False,
                                    why=f"delete-failed: {exc.strerror or exc}"))
             continue
         record = dict(_load_single(root_path, entry["id"]))
-        record.update({"state": "released", "bytes": 0, "files": 0,
-                       "walk": "complete", "tmpfs": None,
+        record.update(_cleared_usage_record())
+        record.update({"state": "released", "tmpfs": None,
                        "last_used_at": int(time.time())})
         _write_json(_record_path(root_path, entry["id"]), record)
         candidates.append(_clean_row(entry, action="deleted",
@@ -968,7 +1221,10 @@ def clean(root: str | Path, *, dry_run: bool = True, expired: bool = False,
             "deleted": len(deleted),
             "kept": len(kept),
             "bytes": sum(row["bytes"] for row in candidates),
+            "apparent_bytes": sum(row["apparent_bytes"]
+                                  for row in candidates),
             "files": sum(row["files"] for row in candidates),
+            "inodes": sum(row["inodes"] for row in candidates),
         },
         "candidates": candidates,
         "kept": kept,
@@ -1059,7 +1315,9 @@ def clean_legacy(root: str | Path, *,
         "deleted": len(deleted),
         "kept": len(kept),
         "bytes": sum(row["bytes"] for row in candidates),
+        "apparent_bytes": sum(row["apparent_bytes"] for row in candidates),
         "files": sum(row["files"] for row in candidates),
+        "inodes": sum(row["inodes"] for row in candidates),
         "errors": len(errors),
         "truncated": truncated,
     }
@@ -1326,8 +1584,8 @@ def _entry(root: Path, record: Mapping[str, Any]) -> dict[str, Any]:
         state = "missing"
     entry["state"] = state
     if existing is None or not stat.S_ISDIR(existing.st_mode):
-        entry.update({"bytes": 0, "files": 0, "walk": "complete",
-                      "unknown": False, "errors": 0, "tmpfs": None,
+        entry.update(_cleared_usage_record())
+        entry.update({"unknown": False, "errors": 0, "tmpfs": None,
                       "marker": False})
         return entry
     resolved = _try_resolve(path)
@@ -1340,12 +1598,23 @@ def _entry(root: Path, record: Mapping[str, Any]) -> dict[str, Any]:
         and not _is_protected(root, resolved, allowed)
     )
     if not view_safe:
-        entry.update({"bytes": 0, "files": 0, "walk": "complete",
-                      "unknown": False, "errors": 0, "tmpfs": None,
+        entry.update(_cleared_usage_record())
+        entry.update({"unknown": False, "errors": 0, "tmpfs": None,
                       "marker": False})
         return entry
     usage = walk_usage(path)
-    entry.update(usage)
+    entry.update({
+        "bytes": int(usage["allocated_bytes"]),
+        "apparent_bytes": int(usage["apparent_bytes"]),
+        "files": int(usage["files"]),
+        "inodes": int(usage["inodes"]),
+        "hardlinks": int(usage["hardlinks"]),
+        "allocation": usage["allocation"],
+        "walk": usage["walk"],
+        "unknown": bool(usage["unknown"]),
+        "errors": int(usage["errors"]),
+        "cross_device": bool(usage.get("cross_device")),
+    })
     entry["tmpfs"] = tmpfs_for(path)
     entry["marker"] = _marker_matches(path, str(entry["id"]))
     return entry
@@ -1421,20 +1690,18 @@ def _audit_artifact(path: Path, pattern: str, info: os.stat_result,
                     now: int, deadline: float) -> dict[str, Any]:
     if stat.S_ISLNK(info.st_mode):
         kind = "symlink"
-        usage = {"bytes": 0, "files": 0, "walk": "complete",
-                 "unknown": False, "errors": 0}
+        usage = _empty_usage(inodes=1)
     elif stat.S_ISDIR(info.st_mode):
         kind = "directory"
         remaining = max(0.0, deadline - time.monotonic())
         usage = walk_usage(path, max_seconds=remaining)
     elif stat.S_ISREG(info.st_mode):
         kind = "file"
-        usage = {"bytes": info.st_size, "files": 1, "walk": "complete",
-                 "unknown": False, "errors": 0}
+        remaining = max(0.0, deadline - time.monotonic())
+        usage = walk_usage(path, max_seconds=remaining)
     else:
         kind = "other"
-        usage = {"bytes": 0, "files": 0, "walk": "complete",
-                 "unknown": False, "errors": 0}
+        usage = _empty_usage()
     rendered = str(path)
     exact = registry.get(rendered)
     ancestor: Mapping[str, Any] | None = None
@@ -1453,8 +1720,13 @@ def _audit_artifact(path: Path, pattern: str, info: os.stat_result,
         "path": rendered,
         "pattern": pattern,
         "kind": kind,
-        "bytes": usage["bytes"],
+        "bytes": usage["allocated_bytes"],
+        "apparent_bytes": usage["apparent_bytes"],
         "files": usage["files"],
+        "inodes": usage["inodes"],
+        "hardlinks": usage["hardlinks"],
+        "allocation": usage["allocation"],
+        "cross_device": bool(usage.get("cross_device")),
         "walk": usage["walk"],
         "unknown": usage["unknown"],
         "errors": usage["errors"],
@@ -1497,7 +1769,14 @@ def _clean_row(entry: Mapping[str, Any], *, action: str, why: str
         "model": entry.get("model"),
         "run_id": entry.get("run_id"),
         "bytes": entry["bytes"] if isinstance(entry["bytes"], int) else 0,
+        "apparent_bytes": (entry["apparent_bytes"]
+                           if isinstance(entry.get("apparent_bytes"), int)
+                           else 0),
         "files": entry["files"] if isinstance(entry["files"], int) else 0,
+        "inodes": entry["inodes"] if isinstance(entry.get("inodes"), int) else 0,
+        "hardlinks": (entry["hardlinks"]
+                      if isinstance(entry.get("hardlinks"), int) else 0),
+        "allocation": entry.get("allocation"),
         "marker": bool(entry.get("marker")),
         "action": action,
         "why": why,
@@ -1672,7 +1951,10 @@ def _legacy_row(item: Mapping[str, Any], *, action: str,
         "pattern": item.get("pattern"),
         "kind": item.get("kind"),
         "bytes": int(item.get("bytes") or 0),
+        "apparent_bytes": int(item.get("apparent_bytes") or 0),
         "files": int(item.get("files") or 0),
+        "inodes": int(item.get("inodes") or 0),
+        "hardlinks": int(item.get("hardlinks") or 0),
         "age_s": int(item.get("age_s") or 0),
         "mtime": item.get("mtime"),
         "registered": bool(item.get("registered")),
@@ -1961,10 +2243,12 @@ def _unescape(value: str) -> str:
 
 
 __all__ = [
-    "AGENT_DIRNAME", "AUDIT_MAX_ARTIFACTS", "AUDIT_MAX_SECONDS",
-    "AUDIT_PATTERNS", "DEFAULT_KIND", "DEFAULT_SCRATCH_KIND", "KINDS",
-    "LEGACY_CACHE_PATTERNS", "LEGACY_DEFAULT_OLDER_THAN_S",
-    "LEGACY_DIR_PATTERNS", "LEGACY_FILE_PATTERNS", "LEGACY_SOCKET_TIMEOUT_S",
+    "AGENT_DIRNAME", "ALLOCATION_APPARENT_FALLBACK", "ALLOCATION_BLOCKS",
+    "ALLOCATION_BLOCK_SIZE", "AUDIT_MAX_ARTIFACTS", "AUDIT_MAX_SECONDS",
+    "AUDIT_PATTERNS", "DEFAULT_KIND", "DEFAULT_LIST_SORT",
+    "DEFAULT_SCRATCH_KIND", "KINDS", "LEGACY_CACHE_PATTERNS",
+    "LEGACY_DEFAULT_OLDER_THAN_S", "LEGACY_DIR_PATTERNS",
+    "LEGACY_FILE_PATTERNS", "LEGACY_SOCKET_TIMEOUT_S", "LIST_SORT_KEYS",
     "MARKER_NAME", "MAX_REASON", "MAX_TTL_S", "MAX_WALK_DEPTH",
     "MAX_WALK_ENTRIES", "MAX_WALK_SECONDS", "MIN_TTL_S", "REGISTRY_DIRNAME",
     "STATES", "TMP_DIRNAME", "TempMarkerError", "TempNotFound",

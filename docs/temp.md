@@ -37,12 +37,42 @@ An entry records:
 * a short `reason` label (at most 200 characters, no control characters);
 * the owning repository `root`, when any;
 * `created_at`, `last_used_at`, optional `ttl_s` and derived `expires_at`;
-* `pid`, `owned`, `state`, `bytes`, `files`, `walk` and `tmpfs`.
+* `pid`, `owned`, `state`, `bytes` (**allocated** space), `apparent_bytes`,
+  `files`, `inodes`, `hardlinks`, `allocation`, `walk` and `tmpfs`.
 
-States are `active`, `released`, `expired` and `missing`.  `walk` is `complete`
-or `partial`: a bounded walk that stops at its entry, time or depth budget, or
-that meets an unreadable entry, reports `partial` and `unknown` rather than a
-silent zero.  `tmpfs` is `true`, `false` or `null`; it is detected from
+States are `active`, `released`, `expired` and `missing`.
+
+Usage accounting separates allocated space from apparent length:
+
+* `bytes` is **allocated** space: `st_blocks * 512` for each regular-file inode.
+  It was previously `st_size`, so old plans, JSON consumers and docs that
+  compared "bytes" to apparent size see a semantic change.
+* `apparent_bytes` is the sum of `st_size` for regular files. A sparse file can
+  have a large apparent size and a small allocated size.
+* `files` counts regular-file entries, including every hard link.
+* `inodes` counts unique `(st_dev, st_ino)` values for regular files,
+  directories and symlinks visited. The entry directory and its marker count;
+  a directory of empty lock files therefore shows many inodes and little space.
+* `hardlinks` counts duplicate regular-file links. A hard-linked pair is one
+  inode and one allocation but two `files` entries.
+* `allocation` is `blocks` when block counts were usable, or
+  `apparent-fallback` when the platform did not report `st_blocks`. On POSIX a
+  zero block count is valid: it means a fully sparse file, so it is still
+  `blocks`. The fallback uses `st_size` for `bytes` rather than silently
+  claiming exact allocation. For a missing (or deleted) path the usage fields
+  are zero and `allocation` is `None`.
+
+Symlinks are never followed and never contribute file bytes; their own inode
+is counted. Special files are ignored for bytes, files and inodes. The walk never
+crosses a filesystem boundary: a child on a different `st_dev` is skipped and
+marks the result `partial`, `unknown` and `cross_device`. A bounded walk that
+stops at its entry, time or depth budget, or that meets an unreadable entry,
+reports `partial` and `unknown` rather than a silent zero. `walk` is `complete`
+or `partial`. Registry records store the same fields; `bytes`, `apparent_bytes`,
+`files`, `inodes`, `hardlinks` and `allocation` are recomputed on read, so a
+record written by an older version still gets the new view.
+
+`tmpfs` is `true`, `false` or `null`; it is detected from
 `/proc/self/mountinfo` (falling back to `/proc/mounts`) and is `null` on
 non-Linux hosts or when the mount table is unavailable.
 
@@ -74,39 +104,63 @@ $ ozagia tmp adopt /tmp/experiment --reason "external tool output"
 tmp_1a2b3c4d5e6f  /tmp/experiment
 
 $ ozagia tmp list --kind scratch --owned
-tmp_8f2c1a9d4e6b  scratch  active   owned=yes  bytes=18240  files=7  session=unknown  ...
+tmp_8f2c1a9d4e6b  scratch  active   owned=yes  allocated=18240  apparent=9216  files=7  inodes=8  session=unknown  ...
+
+$ ozagia tmp list --sort allocated
+tmp_...  scratch  active   owned=yes  allocated=...  apparent=...  files=...  inodes=...  session=...  ...
+tmp_...  check    active   owned=yes  allocated=...  apparent=...  files=...  inodes=...  session=...  ...
 
 $ ozagia tmp status
-entries=3  bytes=42100  files=19  partial=0  unknown=0
-filesystem /tmp (tmpfs): total=8589934592 free=734003200 used=7855931392 (91.5%)
+entries=3  allocated=42100  apparent=30000  files=19  inodes=22  partial=0  unknown=0
+registry: /home/me/project/.ozagia/tmp/registry
+by kind:
+  scratch  entries=2 allocated=... apparent=... files=... inodes=... owned=2 unowned=0
+filesystem /tmp (tmpfs): total=8589934592 free=734003200 used=7855931392 (91.5%) inodes=12000/65536 (81.7% used)
 warning: tmpfs above 80% used (91.5%)
 
+$ ozagia tmp status --top 3
+...the status above...
+top 3 by allocated:
+  allocated=... apparent=... files=... inodes=...  scratch  opencode:ses_...  parse fixture dump  ...
+
 $ ozagia tmp clean --expired
-plan: 1 candidate(s), 18240 bytes, 7 files, 0 deleted, 2 kept
-  delete tmp_...  scratch  18240 bytes  parse fixture dump  ...
+plan: 1 candidate(s), 18240 allocated, 9216 apparent, 7 files, 8 inodes, 0 deleted, 2 kept
+  delete tmp_...  scratch  18240 allocated  9216 apparent  parse fixture dump  ...
 
 $ ozagia tmp clean --expired --apply
 ```
+
+`list --sort` accepts `allocated` (the default discovery order for size),
+`apparent`, `files` and `inodes` (largest first), or `age` (least recently used
+first: `last_used_at`, then `created_at`). With no `--sort`, entries keep the
+historical created-at order. `status --top N` adds the N largest entries by
+allocated bytes, with kind, session, reason, path, allocated and apparent bytes,
+files and inodes. `status` itself is the usage view: totals, per-kind and
+per-session buckets report allocated and apparent bytes, files and inodes.
+Filesystem capacity includes `total_inodes`, `free_inodes` and `inode_percent`
+(used inodes, like the byte percent), with a warning when free inodes fall below
+10% on a filesystem that reports a nonzero inode count.
 
 `audit` scans the allowed temp roots for conservative legacy ozagia names
 without creating, rewriting or deleting anything:
 
 ```console
 $ ozagia tmp audit
-artifacts=...  registered=0  untracked=...  bytes=...  files=...  partial=0  truncated=no
+artifacts=...  registered=0  untracked=...  allocated=...  apparent=...  files=...  inodes=...  partial=0  truncated=no
 oldest: ...s  /tmp/ozagia_agent/.../stdout.log
 newest: ...s  /tmp/ozagia-eval-....sock.lock
-  untracked   0B 0f age=...s /tmp/ozagia-eval-....sock.lock  [ozagia-eval-*.sock.lock]
+  untracked   4096B 0f age=...s /tmp/ozagia-eval-....sock.lock  [ozagia-eval-*.sock.lock]
 ```
 
 It matches only `ozagia_agent/*`, `ozagia-eval-*.sock.lock`,
 `ozagia-eval-*.sock`, `oz-idle-*.sock.lock`, `oz-jobidle-*.sock.lock`,
 `ozagia_check_*`, `ozagia-native-*`, `ozagia_eval/*`,
 `ozagia_index_bench/*` and `ozagia_iac_bench/*`.  Each artifact reports its
-bytes, files, age and whether its exact path (or a registered ancestor) is in
-the registry.  Audit never follows symlinks and skips `/tmp/opencode` and
-`~/.local/share/opencode`.  Untracked artifacts are only reported; `clean`
-still deletes only owned, marker-matched registry entries.
+allocated and apparent bytes, files, inodes, age and whether its exact path (or
+a registered ancestor) is in the registry.  Audit never follows symlinks and
+skips `/tmp/opencode` and `~/.local/share/opencode`.  Untracked artifacts are
+only reported; `clean` still deletes only owned, marker-matched registry
+entries.
 
 `clean` is always a plan unless `--apply` is given.  Selection options:
 
@@ -114,7 +168,7 @@ still deletes only owned, marker-matched registry entries.
 * `--older-than D`: entries unused for `D` (a bare number means days; `s`, `m`,
   `h` and `d` suffixes are accepted);
 * `--max-total-bytes B`: delete the oldest eligible owned entries until the
-  total is at most `B`;
+  allocated total is at most `B`;
 * `--id ID` (repeatable): restrict to named entries.
 
 With no selection option, cleanup considers released, missing and TTL-expired
@@ -150,9 +204,31 @@ a refusal or error.
 ## What is tracked and what is not
 
 Tracked: identity, kind, session, reason, owning root, pid, ownership, TTL,
-state, byte/file totals, walk completeness, tmpfs membership, and per-filesystem
-capacity.  Not tracked: file contents, environment variables, prompts, source
-text, credentials, or the output of whatever ran in the directory.
+state, allocated and apparent byte totals, file and inode counts, hard-link
+duplicates, walk completeness/cross-device marks, tmpfs membership, and
+per-filesystem byte and inode capacity.  Not tracked: file contents,
+environment variables, prompts, source text, credentials, or the output of
+whatever ran in the directory.
+
+### Accounting limits
+
+* Hard links are deduplicated only within one walked tree. A link elsewhere on
+  the filesystem is invisible, so deleting this tree may reclaim less than the
+  reported allocated bytes.
+* A nested mount is skipped and marks the result `partial`/`cross_device`; data
+  hidden behind a mount shadow is not counted. A bind mount of the same
+  filesystem keeps the same `st_dev` and is therefore walked, not detected as a
+  boundary.
+* Deleted-but-open files have no directory entry; they consume blocks that this
+  walk cannot see.
+* The `apparent-fallback` mode uses `st_size`, so it is an approximation, not
+  an allocation measurement. On POSIX, zero blocks is not a fallback: a fully
+  sparse file correctly reports zero allocated bytes and a large apparent
+  size. A non-POSIX platform that reports zero for every non-empty file is
+  treated as fallback because it cannot be distinguished from absent block
+  accounting.
+* Directory and symlink `st_size` values are not added to byte totals; those
+  entries contribute inodes only.
 
 `/tmp` remains ephemeral.  Use `ozagia tmp path` (or the `default_scratch_root`
 API) to place work under the state directory when it must outlive a boot or a
@@ -171,7 +247,9 @@ entry = TS.adopt(root, "/tmp/tool-output", reason="tool output", owned=True,
 entry = TS.get(root, entry["id"])
 entry = TS.touch(root, entry["id"])             # moves last_used_at only
 entries = TS.list_entries(root, kind="scratch", owned=True)
-report = TS.status(root)
+entries = TS.list_entries(root, sort="allocated")  # or apparent/files/inodes/age
+report = TS.status(root)                        # totals, buckets, filesystems
+report = TS.status(root, top=5)                 # plus the 5 largest by allocated
 audit = TS.audit(root)                          # read-only legacy scan
 entry = TS.release(root, entry["id"], delete=True)
 plan = TS.clean(root, expired=True)             # dry run
@@ -198,6 +276,9 @@ create scratch without a shell or a caller-supplied path:
 | `list` | no | `{ok, entries, count, truncated, limit}` |
 | `status` | no | `{ok, ...temp_space.status(root)}` |
 
+Here `bytes` is allocated space. `info` and `list` return the full entry view,
+including `apparent_bytes`, `inodes`, `hardlinks` and `allocation`.
+
 The answers above show the handler fields. On the socket the JSON envelope's
 `id` is the request id, so the entry id also travels as `entry_id` (and is
 `null` for `preflight`); clients keep `entry_id`.
@@ -220,9 +301,10 @@ It takes only `{purpose, ttl_s?}`:
 The tool preflights, asserts the harness's **write** permission for the
 returned path, then creates at that same path (the daemon recomputes the
 suggestion; the caller never supplies it). It returns only `{ok, id, path,
-expires_at, bytes, files}`. It fails closed: no session, a denied permission or
-a down daemon returns a typed `refused`/`unavailable` result and creates
-nothing. There is **no `/tmp` fallback**, and no file contents or prompt text
+expires_at, bytes, files}` where `bytes` is allocated space. It fails closed: no
+session, a denied permission or a down daemon returns a typed
+`refused`/`unavailable` result and creates nothing. There is **no `/tmp`
+fallback**, and no file contents or prompt text
 are returned or stored.
 
 The MCP full surface adds only the read-only views `dev_tmp_list` and
@@ -373,10 +455,11 @@ the systems this design borrows from:
 - **ncdu/agedu** — allocated versus apparent size, hard links, inodes and
   age-by-size discovery.
 
-The survey's main gaps for this implementation are recorded there: allocated
-bytes and inodes are not yet reported, there is no lease or per-session size
-budget, and cleanup is still an explicit command rather than an idle/end-of-
-session hook.  Those are design inputs, not claims about the current code.
+The survey's main remaining gaps for this implementation are recorded there:
+there is no lease or per-session size budget, and cleanup is still an explicit
+command rather than an idle/end-of-session hook.  Accounting now reports
+allocated and apparent bytes, files, inodes and free-inode pressure.  Those are
+design inputs, not claims about the current code.
 The follow-up [improvements plan](plans/2026-11-26_temp_space_improvements.md)
 sequences the work: accounting and discovery, then leases/pinning/budgets,
 then lifecycle/cache/hardening.

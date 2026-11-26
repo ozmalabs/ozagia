@@ -1,7 +1,8 @@
 """``ozagia tmp``: manage provenanced temporary space.
 
     ozagia tmp list    [--json] [--all] [--kind K] [--session S] [--owned|--unowned]
-    ozagia tmp status  [--json]
+                       [--sort allocated|apparent|files|inodes|age]
+    ozagia tmp status  [--json] [--top N]
     ozagia tmp audit   [--json]
     ozagia tmp create  --reason TEXT [--kind K] [--session S] [--harness H]
                        [--ttl-s N] [--path P] [--model NAME] [--run-id ID] [--json]
@@ -68,8 +69,17 @@ def _add_actions(children: Any) -> None:
                            default=None, help="only owned entries")
     ownership.add_argument("--unowned", dest="owned", action="store_false",
                            help="only unowned entries")
+    listed.add_argument("--sort", default=None,
+                        choices=tuple(key for key in TS.LIST_SORT_KEYS
+                                       if key != TS.DEFAULT_LIST_SORT),
+                        help="order: largest allocated/apparent/files/inodes, "
+                             "or least recently used (age); default created-at")
 
-    common(children.add_parser("status", help="usage and filesystem capacity"))
+    status_parser = common(
+        children.add_parser("status", help="usage and filesystem capacity"))
+    status_parser.add_argument("--top", type=int, default=None, metavar="N",
+                               help="also list the N largest entries by "
+                                    "allocated bytes")
     common(children.add_parser(
         "audit",
         help="read-only scan for untracked legacy temp artifacts"))
@@ -202,15 +212,18 @@ def _session_label(entry: dict[str, Any]) -> str:
 def _format_entry(entry: dict[str, Any]) -> str:
     return (f"{entry['id']}  {entry['kind']:<8} {entry['state']:<8} "
             f"owned={'yes' if entry['owned'] else 'no'}  "
-            f"bytes={entry['bytes']}  files={entry['files']}  "
+            f"allocated={entry['bytes']}  "
+            f"apparent={entry.get('apparent_bytes', 0)}  "
+            f"files={entry['files']}  inodes={entry.get('inodes', 0)}  "
             f"session={_session_label(entry)}  {entry['path']}")
 
 
 def _format_status(result: dict[str, Any]) -> str:
     totals = result["totals"]
     lines = [
-        f"entries={totals['entries']}  bytes={totals['bytes']}  "
-        f"files={totals['files']}  partial={totals['partial']}  "
+        f"entries={totals['entries']}  allocated={totals['bytes']}  "
+        f"apparent={totals['apparent_bytes']}  files={totals['files']}  "
+        f"inodes={totals['inodes']}  partial={totals['partial']}  "
         f"unknown={totals['unknown']}",
         f"registry: {result['registry']}",
     ]
@@ -218,23 +231,46 @@ def _format_status(result: dict[str, Any]) -> str:
         lines.append("by kind:")
         for kind, row in result["by_kind"].items():
             lines.append(
-                f"  {kind:<8} entries={row['entries']} bytes={row['bytes']} "
-                f"files={row['files']} owned={row['owned']} "
-                f"unowned={row['unowned']}")
+                f"  {kind:<8} entries={row['entries']} "
+                f"allocated={row['bytes']} apparent={row['apparent_bytes']} "
+                f"files={row['files']} inodes={row['inodes']} "
+                f"owned={row['owned']} unowned={row['unowned']}")
     if result["by_session"]:
         lines.append("by session:")
         for label, row in result["by_session"].items():
-            lines.append(f"  {label}  entries={row['entries']} "
-                         f"bytes={row['bytes']} files={row['files']}")
+            lines.append(
+                f"  {label}  entries={row['entries']} "
+                f"allocated={row['bytes']} apparent={row['apparent_bytes']} "
+                f"files={row['files']} inodes={row['inodes']}")
     for filesystem in result["filesystems"]:
         percent = ("unknown" if filesystem["percent"] is None
                    else f"{filesystem['percent']:.1f}%")
         kind = ("tmpfs" if filesystem["tmpfs"] else
                 "unknown" if filesystem["tmpfs"] is None else "disk")
+        inodes = ""
+        if filesystem["total_inodes"]:
+            inode_percent = (filesystem["inode_percent"]
+                             if filesystem["inode_percent"] is not None
+                             else "unknown")
+            inodes = (f" inodes={filesystem['free_inodes']}/"
+                      f"{filesystem['total_inodes']} "
+                      f"({inode_percent}% used)")
         lines.append(
             f"filesystem {filesystem['path']} ({kind}): "
             f"total={filesystem['total_bytes']} free={filesystem['free_bytes']} "
-            f"used={filesystem['used_bytes']} ({percent})")
+            f"used={filesystem['used_bytes']} ({percent}){inodes}")
+    if "top" in result:
+        rows = result["top"]
+        if not rows:
+            lines.append("top 0 by allocated: (none)")
+        else:
+            lines.append(f"top {len(rows)} by allocated:")
+            for row in rows:
+                lines.append(
+                    f"  allocated={row['bytes']} apparent={row['apparent_bytes']} "
+                    f"files={row['files']} inodes={row['inodes']}  "
+                    f"{row['kind']}  {row['session_label']}  "
+                    f"{row['reason']}  {row['path']}")
     for warning in result["warnings"]:
         lines.append(f"warning: {warning}")
     for error in result["registry_errors"]:
@@ -248,7 +284,8 @@ def _format_audit(result: dict[str, Any]) -> str:
     lines = [
         f"artifacts={totals['artifacts']}  registered={totals['registered']}  "
         f"covered={totals['covered']}  untracked={totals['untracked']}  "
-        f"bytes={totals['bytes']}  files={totals['files']}  "
+        f"allocated={totals['bytes']}  apparent={totals['apparent_bytes']}  "
+        f"files={totals['files']}  inodes={totals['inodes']}  "
         f"partial={totals['partial']}  "
         f"truncated={'yes' if result['truncated'] else 'no'}",
     ]
@@ -275,19 +312,21 @@ def _format_clean(result: dict[str, Any]) -> str:
     mode = "plan" if result["dry_run"] else "apply"
     lines = [
         f"{mode}: {totals['candidates']} candidate(s), "
-        f"{totals['bytes']} bytes, {totals['files']} files, "
+        f"{totals['bytes']} allocated, {totals['apparent_bytes']} apparent, "
+        f"{totals['files']} files, {totals['inodes']} inodes, "
         f"{totals['deleted']} deleted, {totals['kept']} kept",
     ]
     for row in result["candidates"]:
         verb = "delete" if result["dry_run"] else "deleted"
         lines.append(
-            f"  {verb} {row['id']}  {row['kind']}  {row['bytes']} bytes  "
+            f"  {verb} {row['id']}  {row['kind']}  {row['bytes']} allocated  "
+            f"{row['apparent_bytes']} apparent  "
             f"{row['reason']}  {row['path']}")
     for row in result["kept"]:
         if row["why"] in ("not-selected", "missing"):
             continue
         lines.append(
-            f"  keep   {row['id']}  {row['kind']}  {row['bytes']} bytes  "
+            f"  keep   {row['id']}  {row['kind']}  {row['bytes']} allocated  "
             f"{row['why']}  {row['path']}")
     return "\n".join(lines)
 
@@ -297,7 +336,8 @@ def _format_clean_legacy(result: dict[str, Any]) -> str:
     mode = "plan" if result["dry_run"] else "apply"
     lines = [
         f"{mode}: {totals['candidates']} artifact(s), "
-        f"{totals['bytes']} bytes, {totals['files']} files, "
+        f"{totals['bytes']} allocated, {totals['apparent_bytes']} apparent, "
+        f"{totals['files']} files, {totals['inodes']} inodes, "
         f"{totals['deleted']} deleted, {totals['kept']} kept, "
         f"{totals['errors']} error(s), "
         f"truncated={'yes' if result['truncated'] else 'no'}",
@@ -329,7 +369,8 @@ def run(args: argparse.Namespace) -> int:
                 root, kind=getattr(args, "kind", None),
                 session=getattr(args, "session", None),
                 owned=getattr(args, "owned", None),
-                include_all=bool(getattr(args, "all", False)))
+                include_all=bool(getattr(args, "all", False)),
+                sort=getattr(args, "sort", None) or TS.DEFAULT_LIST_SORT)
             if as_json:
                 _print_json({"ok": True, "count": len(entries),
                              "entries": entries})
@@ -339,7 +380,8 @@ def run(args: argparse.Namespace) -> int:
                 print("no managed temporary entries")
             return 0
         if action == "status":
-            result = TS.status(root)
+            result = TS.status(
+                root, top=getattr(args, "top", None))
             if as_json:
                 _print_json({"ok": True, **result})
             else:
