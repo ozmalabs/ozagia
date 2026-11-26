@@ -3,11 +3,15 @@ from __future__ import annotations
 
 import json
 import os
+import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from ozagia import cli
+from ozagia import temp_cli
 from ozagia.core import temp_space as TS
 
 
@@ -466,3 +470,177 @@ def test_gc_cli_defaults_to_released_entries(env, capsys) -> None:
     assert [row["id"] for row in plan["candidates"]] == [released["id"]]
     assert any(row["id"] == active["id"] and row["why"] == "not-selected"
                for row in plan["kept"])
+
+
+# --------------------------------------------------------------------------- #
+# lifecycle, cache semantics and hardening (Stage C)
+# --------------------------------------------------------------------------- #
+
+
+def test_touch_cli_moves_lru_without_clearing_pin_or_lease(env, capsys) -> None:
+    repo, state = env
+    assert cli.main(["tmp", "create", "--reason", "touch", "--json"]) == 0
+    entry = _json(capsys)["entry"]
+    assert cli.main(["tmp", "pin", entry["id"], "--json"]) == 0
+    _json(capsys)
+    record_path = state / "tmp" / "registry" / f"{entry['id']}.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["last_used_at"] = 1
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    lease = TS.acquire_lease(repo, entry["id"])
+    try:
+        assert cli.main(["tmp", "touch", entry["id"], "--json"]) == 0
+        touched = _json(capsys)["entry"]
+        assert touched["last_used_at"] > 1
+        assert touched["pinned"] is True
+        assert TS.lease_held(repo, entry["id"]) is True
+    finally:
+        lease.close()
+
+
+def test_create_cache_cli_writes_the_tag(env, capsys) -> None:
+    repo, state = env
+    assert cli.main(["tmp", "create", "--reason", "cache",
+                     "--kind", "cache", "--json"]) == 0
+    entry = _json(capsys)["entry"]
+    tag = Path(entry["path"]) / TS.CACHEDIR_TAG_NAME
+    assert entry["kind"] == "cache"
+    assert tag.is_file()
+    assert stat.S_IMODE(tag.stat().st_mode) == 0o644
+
+
+def test_run_success_sets_env_cleans_and_releases_lease(
+        env, tmp_path, capsys) -> None:
+    repo, state = env
+    captured = tmp_path / "env.json"
+    script = (
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "keys = ('TMPDIR', 'TMP', 'TEMP', 'OZAGIA_SCRATCH_ROOT')\n"
+        "Path(sys.argv[1]).write_text(json.dumps(\n"
+        "    {key: os.environ.get(key) for key in keys}))\n"
+        "Path(os.environ['TMPDIR'], 'probe').write_text('ok')\n"
+    )
+    code = cli.main(["tmp", "run", "--reason", "probe", "--json", "--",
+                     sys.executable, "-c", script, str(captured)])
+    assert code == 0
+    payload = _json(capsys)
+    assert payload["ok"] is True
+    assert payload["exit_code"] == 0
+    assert payload["kept"] is False
+    assert payload["cleaned"] is True
+    assert payload["usage"]["files"] >= 1
+    entry = payload["entry"]
+    path = Path(entry["path"])
+    values = json.loads(captured.read_text(encoding="utf-8"))
+    assert set(values.values()) == {str(path)}
+    assert all(value.startswith(str(state / "tmp" / "workspaces"))
+               for value in values.values())
+    assert not path.exists()
+    assert TS.lease_held(repo, entry["id"]) is False
+    assert TS.list_entries(repo) == []
+    assert TS.list_entries(repo, include_all=True)[0]["state"] == "released"
+
+
+def test_run_failure_and_keep_keep_the_entry(env, capsys) -> None:
+    repo, state = env
+    code = cli.main(["tmp", "run", "--reason", "failure", "--json", "--",
+                     sys.executable, "-c", "raise SystemExit(7)"])
+    assert code == 7
+    failed = _json(capsys)
+    assert failed["exit_code"] == 7
+    assert failed["kept"] is True
+    assert failed["cleaned"] is False
+    assert failed["reason"] == "exit 7"
+    failed_path = Path(failed["entry"]["path"])
+    assert failed_path.is_dir()
+    assert TS.lease_held(repo, failed["entry"]["id"]) is False
+
+    code = cli.main(["tmp", "run", "--reason", "keep", "--keep", "--json",
+                     "--", sys.executable, "-c", "pass"])
+    assert code == 0
+    kept = _json(capsys)
+    assert kept["exit_code"] == 0
+    assert kept["kept"] is True
+    assert kept["cleaned"] is False
+    assert kept["reason"] == "--keep"
+    assert Path(kept["entry"]["path"]).is_dir()
+    TS.release(repo, failed["entry"]["id"], delete=True)
+    TS.release(repo, kept["entry"]["id"], delete=True)
+
+
+def test_run_timeout_keeps_the_entry(env, capsys, monkeypatch) -> None:
+    repo, state = env
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 1)
+
+    monkeypatch.setattr(temp_cli.subprocess, "run", timeout)
+    code = cli.main(["tmp", "run", "--reason", "timeout", "--json", "--",
+                     sys.executable, "-c", "pass"])
+    assert code == 124
+    payload = _json(capsys)
+    assert payload["kept"] is True
+    assert payload["cleaned"] is False
+    assert payload["reason"] == "timeout"
+    assert Path(payload["entry"]["path"]).is_dir()
+    TS.release(repo, payload["entry"]["id"], delete=True)
+
+
+def test_run_budget_refusal_creates_nothing(env, capsys) -> None:
+    repo, state = env
+    code = cli.main(["tmp", "run", "--reason", "too big",
+                     "--max-total-bytes", "0", "--json", "--",
+                     sys.executable, "-c", "pass"])
+    assert code == 1
+    payload = _json(capsys)
+    assert payload["ok"] is False
+    assert payload["code"] == "budget"
+    assert TS.list_entries(repo) == []
+    scratch = state / "tmp" / "workspaces" / "scratch"
+    assert not scratch.exists() or not list(scratch.glob("tmp_*"))
+
+
+def test_run_passes_stdout_and_argv_without_a_shell(
+        env, tmp_path, capfd) -> None:
+    repo, state = env
+    code = cli.main(["tmp", "run", "--reason", "echo", "--keep", "--",
+                     sys.executable, "-c",
+                     "import sys; sys.stdout.write('child-out')"])
+    assert code == 0
+    captured = capfd.readouterr().out
+    assert "child-out" in captured
+    assert "exit=0" in captured
+    entry = TS.list_entries(repo)[0]
+    assert str(entry["path"]) in captured
+    TS.release(repo, entry["id"], delete=True)
+
+    literal = "$(printf injected); `id`"
+    output = tmp_path / "argv.txt"
+    script = ("import sys\n"
+              "from pathlib import Path\n"
+              "Path(sys.argv[1]).write_text(sys.argv[2])\n")
+    code = cli.main(["tmp", "run", "--reason", "noshell", "--json", "--",
+                     sys.executable, "-c", script, str(output), literal])
+    assert code == 0
+    assert json.loads(capfd.readouterr().out)["cleaned"] is True
+    assert output.read_text(encoding="utf-8") == literal
+
+
+def test_run_passes_stdin_through_to_the_child(env, tmp_path) -> None:
+    repo, state = env
+    output = tmp_path / "stdin.bin"
+    script = ("import sys\n"
+              "from pathlib import Path\n"
+              "Path(sys.argv[1]).write_bytes(sys.stdin.buffer.read())\n")
+    completed = subprocess.run(
+        [sys.executable, "-m", "ozagia.cli", "tmp", "run",
+         "--reason", "stdin", "--json", "--",
+         sys.executable, "-c", script, str(output)],
+        input=b"stdin-payload", capture_output=True, env=os.environ.copy(),
+        timeout=60)
+    assert completed.returncode == 0, completed.stderr.decode()
+    payload = json.loads(completed.stdout.decode())
+    assert payload["exit_code"] == 0
+    assert payload["cleaned"] is True
+    assert output.read_bytes() == b"stdin-payload"

@@ -1519,3 +1519,159 @@ def test_gc_refuses_unowned_mismatched_symlink_pinned_leased_and_missing(
     finally:
         lease.close()
         shutil.rmtree(external, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# lifecycle, cache semantics and hardening (Stage C)
+# --------------------------------------------------------------------------- #
+
+
+def test_cache_kind_writes_the_standard_tag_only_once(root: Path) -> None:
+    cache = TS.create(root, kind="cache", reason="cache")
+    tag = Path(cache["path"]) / TS.CACHEDIR_TAG_NAME
+    assert tag.is_file()
+    assert stat.S_IMODE(tag.stat().st_mode) == 0o644
+    text = tag.read_text(encoding="utf-8")
+    assert text.startswith(TS.CACHEDIR_TAG_SIGNATURE + "\n")
+    assert "cache directory tag" in text
+    assert TS.CACHEDIR_TAG_SIGNATURE in TS.CACHEDIR_TAG_CONTENT
+
+    scratch = TS.create(root, kind="scratch", reason="scratch")
+    assert not (Path(scratch["path"]) / TS.CACHEDIR_TAG_NAME).exists()
+
+
+def test_cache_budget_refusal_removes_the_tagged_directory(root: Path) -> None:
+    with pytest.raises(TS.TempBudgetError):
+        TS.create(root, kind="cache", reason="too big",
+                  budget=TS.TempBudget(max_total_bytes=0))
+    assert TS.list_entries(root) == []
+    cache_root = TS.default_kind_root(root, "cache")
+    assert not cache_root.exists() or not list(cache_root.glob("tmp_*"))
+
+
+def test_gc_evicts_cache_before_scratch(root: Path) -> None:
+    cache = TS.create(root, kind="cache", reason="cache")
+    scratch = TS.create(root, kind="scratch", reason="scratch")
+    plan = TS.gc(root, budget=TS.TempBudget(max_total_bytes=0))
+    assert [row["id"] for row in plan["candidates"]] == [
+        cache["id"], scratch["id"]]
+
+
+def test_touch_moves_lru_without_clearing_pin_or_lease(root: Path) -> None:
+    entry = TS.create(root, reason="touch")
+    _rewrite(root, entry["id"], last_used_at=1)
+    TS.pin(root, entry["id"], until=1234567890)
+    lease = TS.acquire_lease(root, entry["id"])
+    try:
+        touched = TS.touch(root, entry["id"])
+        record = _record(root, entry["id"])
+        assert record["last_used_at"] > 1
+        assert record["pinned"] is True
+        assert record["pinned_until"] == 1234567890
+        assert touched["pinned"] is True
+        assert TS.lease_held(root, entry["id"]) is True
+        assert touched["leased"] is True
+    finally:
+        lease.close()
+
+
+def test_audit_and_clean_legacy_skip_a_tagged_cache(
+        root: Path, tmp_path: Path, monkeypatch) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    tagged_cache = scan / "ozagia_index_bench" / "run"
+    _write(tagged_cache / "report.json", 12)
+    (tagged_cache / TS.CACHEDIR_TAG_NAME).write_text(
+        TS.CACHEDIR_TAG_CONTENT, encoding="utf-8")
+    _old(tagged_cache)
+    tagged_plain = scan / "ozagia-native-cache"
+    _write(tagged_plain / "out", 7)
+    (tagged_plain / TS.CACHEDIR_TAG_NAME).write_text(
+        TS.CACHEDIR_TAG_CONTENT, encoding="utf-8")
+    _old(tagged_plain)
+    monkeypatch.setattr(TS, "allowed_temp_roots", lambda value: (scan,))
+
+    report = TS.audit(root)
+    paths = {item["path"] for item in report["artifacts"]}
+    assert str(tagged_cache) not in paths
+    assert str(tagged_plain) not in paths
+
+    plan = TS.clean_legacy(root, older_than_s=0, include_caches=True)
+    assert all(row["path"] not in {str(tagged_cache), str(tagged_plain)}
+               for row in plan["artifacts"])
+    assert plan["candidates"] == []
+    done = TS.clean_legacy(root, older_than_s=0, include_caches=True,
+                           apply=True)
+    assert done["deleted"] == []
+    assert tagged_cache.is_dir() and tagged_plain.is_dir()
+
+
+@pytest.mark.parametrize("replacement", ["symlink", "directory"])
+def test_clean_refuses_a_path_replaced_after_planning(
+        root: Path, tmp_path: Path, monkeypatch, replacement: str) -> None:
+    entry = TS.create(root, reason="swap", ttl_s=60)
+    _rewrite(root, entry["id"], expires_at=1)
+    path = Path(entry["path"])
+    target = tmp_path / "outside"
+    target.mkdir()
+    _write(target / "payload", 5)
+    real_identity = TS._path_identity
+    swapped = False
+
+    def capture_then_swap(value):
+        nonlocal swapped
+        identity = real_identity(value)
+        if Path(value) == path and not swapped:
+            swapped = True
+            if replacement == "symlink":
+                shutil.rmtree(path)
+                os.symlink(target, path)
+            else:
+                path.rename(tmp_path / "original")
+                path.mkdir()
+                _write(path / "new", 1)
+        return identity
+
+    monkeypatch.setattr(TS, "_path_identity", capture_then_swap)
+    done = TS.clean(root, expired=True, apply=True)
+    assert done["deleted"] == []
+    assert any(row["id"] == entry["id"] and row["why"] == "changed"
+               for row in done["kept"])
+    if replacement == "symlink":
+        assert path.is_symlink()
+        assert (target / "payload").is_file()
+    else:
+        assert path.is_dir()
+        assert (path / "new").is_file()
+        assert not (path / TS.MARKER_NAME).exists()
+
+
+def test_clean_legacy_refuses_a_path_replaced_after_planning(
+        root: Path, tmp_path: Path, monkeypatch) -> None:
+    scan = tmp_path / "scan"
+    scan.mkdir()
+    artifact = scan / "ozagia-native-old"
+    _write(artifact / "log", 5)
+    _old(artifact)
+    target = tmp_path / "outside"
+    target.mkdir()
+    _write(target / "payload", 5)
+    real_row = TS._legacy_row
+    swapped = False
+
+    def row_then_swap(item, *, action, why):
+        nonlocal swapped
+        row = real_row(item, action=action, why=why)
+        if action == "delete" and row["path"] == str(artifact) and not swapped:
+            swapped = True
+            shutil.rmtree(artifact)
+            os.symlink(target, artifact)
+        return row
+
+    monkeypatch.setattr(TS, "_legacy_row", row_then_swap)
+    done = TS.clean_legacy(root, roots=[scan], older_than_s=0, apply=True)
+    assert done["deleted"] == []
+    assert any(row["path"] == str(artifact) and row["why"] == "changed"
+               for row in done["kept"])
+    assert artifact.is_symlink()
+    assert (target / "payload").is_file()

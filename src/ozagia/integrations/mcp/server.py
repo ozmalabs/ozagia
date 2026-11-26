@@ -1002,7 +1002,7 @@ _TOOLS.extend([
             "MCP tool creates or deletes an entry."),
         "inputSchema": _schema({
             "kind": {"type": "string",
-                     "description": "Only this kind (scratch, agent, check, eval, engine, other)."},
+                     "description": "Only this kind (scratch, agent, check, eval, engine, cache, other)."},
             "session": {"type": "string",
                         "description": "Only entries of this harness session id."},
             "owned": {"type": "boolean",

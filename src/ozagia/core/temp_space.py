@@ -20,6 +20,11 @@ Each entry is a directory plus two records:
     An optional advisory ``flock`` file for a live cooperative owner.  It is
     not a record; the lock dies with the process.
 
+``CACHEDIR.TAG``
+    Written only for a ``cache`` entry.  It carries the conventional cache
+    directory signature so other tools (and this module's audit) recognize the
+    tree as a disposable cache rather than an untracked legacy artifact.
+
 ``<state dir>/tmp/registry/<id>.json``
     The authoritative record.  One file per entry means concurrent creates do
     not need a global lock.  Registry directories are 0700 and files 0600.
@@ -33,9 +38,10 @@ Roots
 -----
 
 ``<state dir>/tmp/workspaces/`` holds ``scratch``, ``check``, ``eval``,
-``engine`` and ``other`` entries.  ``<state dir>/tmp/agent/`` is reserved for
-agent run roots (wired by a later slice).  ``adopt`` may additionally track
-existing paths under the resolved ``TMPDIR``, ``/tmp`` and ``/var/tmp``.
+``engine``, ``cache`` and ``other`` entries.  ``<state dir>/tmp/agent/`` is
+reserved for agent run roots (wired by a later slice).  ``adopt`` may
+additionally track existing paths under the resolved ``TMPDIR``, ``/tmp`` and
+``/var/tmp``.
 
 Safety
 ------
@@ -44,7 +50,12 @@ Paths are resolved with :meth:`Path.resolve` (``strict=False``) and must stay
 inside an allowed root.  Cleanup only considers ``owned`` entries whose marker
 id matches, refuses symlinks, filesystem roots, the repository root, the home
 directory and any allowed root itself, and never follows a symlink out of an
-entry.  Deletion is a dry-run plan unless ``apply=True``.
+entry.  Deletion is a dry-run plan unless ``apply=True``.  A plan records the
+entry directory's ``(st_dev, st_ino)`` and rechecks it (and the marker) just
+before deletion, so a path replaced by a symlink, another inode or a
+non-directory is kept rather than followed.  That narrows but does not close
+the name-resolution race; ``openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS)`` is
+the documented future direction.
 
 The module uses the standard library only.  It does not import the target
 project or execute target code.  The read-only views do not open sockets or read
@@ -81,10 +92,19 @@ TMP_DIRNAME = "tmp"
 WORKSPACES_DIRNAME = "workspaces"
 AGENT_DIRNAME = "agent"
 
-KINDS = ("scratch", "agent", "check", "eval", "engine", "other")
+KINDS = ("scratch", "agent", "check", "eval", "engine", "cache", "other")
 STATES = ("active", "released", "expired", "missing")
 DEFAULT_KIND = "other"
 DEFAULT_SCRATCH_KIND = "scratch"
+
+CACHEDIR_TAG_NAME = "CACHEDIR.TAG"
+CACHEDIR_TAG_SIGNATURE = "Signature: 8a477f597d28d172789f06886806bc55"
+CACHEDIR_TAG_CONTENT = (
+    f"{CACHEDIR_TAG_SIGNATURE}\n"
+    "# This file is a cache directory tag created by ozagia.\n"
+    "# For information about cache directory tags, see:\n"
+    "#\thttps://bford.info/cachedir/\n"
+)
 
 MIN_TTL_S = 60
 MAX_TTL_S = 90 * 24 * 60 * 60
@@ -915,10 +935,14 @@ def create(root: str | Path, *, kind: str = DEFAULT_SCRATCH_KIND, reason: str,
         "owned": True,
     }
 
+    wrote_tag = False
+    preexisting = os.path.lexists(target)
     try:
-        preexisting = os.path.lexists(target)
         target.mkdir(parents=True, exist_ok=True)
         os.chmod(target, 0o700)
+        if kind == "cache":
+            wrote_tag = True
+            _write_cachedir_tag(target)
         _write_json(target / MARKER_NAME, marker)
         usage = walk_usage(target)
         _enforce_budget(
@@ -929,6 +953,11 @@ def create(root: str | Path, *, kind: str = DEFAULT_SCRATCH_KIND, reason: str,
         record.update({"tmpfs": tmpfs_for(target)})
         _write_json(_record_path(root_path, entry_id), record)
     except BaseException:
+        if wrote_tag:
+            try:
+                (target / CACHEDIR_TAG_NAME).unlink()
+            except OSError:
+                pass
         _remove_marker_and_empty_dir(target, entry_id,
                                      remove_dir=created_target or not preexisting)
         raise
@@ -1054,7 +1083,11 @@ def get(root: str | Path, entry_id: str) -> dict[str, Any]:
 
 
 def touch(root: str | Path, entry_id: str) -> dict[str, Any]:
-    """Move ``last_used_at`` to now without changing state or usage."""
+    """Move ``last_used_at`` to now without changing state or usage.
+
+    A touch is the use-recency signal for LRU collection.  It never clears a
+    pin and never removes or releases a lease.
+    """
     root_path = Path(root).resolve()
     record = _read_record(root_path, _validate_id(entry_id))
     record["last_used_at"] = int(time.time())
@@ -1358,6 +1391,11 @@ def audit(root: str | Path, *, roots: Iterable[str | Path] | None = None,
         except OSError as exc:
             warnings.append(f"cannot inspect {path}: {exc.strerror or exc}")
             return
+        if stat.S_ISDIR(info.st_mode) and _has_cachedir_tag(path):
+            # A tagged cache is not a legacy artifact.  Only the tag file was
+            # read; the cache tree itself is not walked.
+            seen.add(rendered)
+            return
         seen.add(rendered)
         artifacts.append(_audit_artifact(path, pattern, info, registry,
                                          current, deadline))
@@ -1548,8 +1586,10 @@ def clean(root: str | Path, *, dry_run: bool = True, expired: bool = False,
                 selected.add(entry["id"])
 
     guards: dict[str, tuple[bool, str]] = {}
+    identities: dict[str, tuple[int, int] | None] = {}
     for entry in entries:
         guards[entry["id"]] = _delete_guard(root_path, entry)
+        identities[entry["id"]] = _path_identity(entry["path"])
 
     if max_total_bytes is not None:
         total = sum(entry["bytes"] for entry in entries
@@ -1596,8 +1636,18 @@ def clean(root: str | Path, *, dry_run: bool = True, expired: bool = False,
             candidates.append(_clean_row(entry, action="delete",
                                          why="eligible"))
             continue
+        fresh, changed = _clean_verify(
+            root_path, entry, identities[entry["id"]])
+        if changed is not None:
+            kept.append(_clean_row(entry, action="keep", why=changed))
+            if changed == "missing":
+                record = dict(_load_single(root_path, entry["id"]))
+                record["state"] = "missing"
+                _write_json(_record_path(root_path, entry["id"]), record)
+            continue
+        assert fresh is not None
         try:
-            _delete_tree(_guarded_delete_path(entry))
+            _delete_tree(_guarded_delete_path(fresh))
         except OSError as exc:
             kept.append(_clean_row(entry, action="keep",
                                    why=f"delete-failed: {exc.strerror or exc}"))
@@ -1810,7 +1860,9 @@ def _gc_block_reason(entry: Mapping[str, Any], root: Path) -> str | None:
     return None if safe else why
 
 
-def _gc_verify(root: Path, entry: Mapping[str, Any]
+def _gc_verify(root: Path, entry: Mapping[str, Any], *,
+               identity: tuple[int, int] | None = None,
+               check_identity: bool = False
                ) -> tuple[dict[str, Any] | None, str | None]:
     """Re-read one candidate immediately before planning or deleting it."""
     try:
@@ -1818,6 +1870,10 @@ def _gc_verify(root: Path, entry: Mapping[str, Any]
     except TempSpaceError:
         return None, "unreadable-record"
     fresh = _entry(root, record)
+    if check_identity:
+        problem = _identity_recheck(fresh["path"], identity)
+        if problem is not None:
+            return fresh, problem
     reason = _gc_block_reason(fresh, root)
     return fresh, reason
 
@@ -1953,12 +2009,17 @@ def gc(root: str | Path, *, budget: TempBudget | None = None,
     errors: list[str] = []
     failure_reasons: dict[str, str] = {}
     delete_order: list[str] = list(selected)
+    identities: dict[str, tuple[int, int] | None] = {
+        entry_id: _path_identity(by_id[entry_id]["path"])
+        for entry_id in selected if entry_id in by_id}
     if apply:
         for entry_id in list(selected):
             entry = by_id.get(entry_id)
             if entry is None:
                 continue
-            fresh, reason = _gc_verify(root_path, entry)
+            fresh, reason = _gc_verify(
+                root_path, entry, identity=identities.get(entry_id),
+                check_identity=True)
             if reason is not None:
                 failure_reasons[entry_id] = reason
                 continue
@@ -1992,7 +2053,10 @@ def gc(root: str | Path, *, budget: TempBudget | None = None,
                     if reason is not None:
                         failure_reasons.setdefault(entry_id, reason)
                         continue
-                    fresh, reason = _gc_verify(root_path, entry)
+                    fresh, reason = _gc_verify(
+                        root_path, entry,
+                        identity=_path_identity(entry["path"]),
+                        check_identity=True)
                     if reason is not None:
                         failure_reasons[entry_id] = reason
                         continue
@@ -2427,6 +2491,8 @@ def _audit_artifact(path: Path, pattern: str, info: os.stat_result,
         "unknown": usage["unknown"],
         "errors": usage["errors"],
         "mtime": mtime,
+        "st_dev": int(info.st_dev),
+        "st_ino": int(info.st_ino),
         "age_s": max(0, now - mtime),
         "registered": exact is not None,
         "registered_entry": exact.get("id") if exact is not None else None,
@@ -2450,6 +2516,32 @@ def _session_label(entry: Mapping[str, Any]) -> str:
     if not isinstance(session, Mapping):
         return "unknown"
     return f"{session.get('harness')}:{session.get('id')}"
+
+
+def _clean_verify(root: Path, entry: Mapping[str, Any],
+                  identity: tuple[int, int] | None
+                  ) -> tuple[dict[str, Any] | None, str | None]:
+    """Re-check one planned candidate immediately before deletion.
+
+    The registry record, pin, lease, marker id and the planned directory
+    identity are all re-read so a path swapped between plan and apply is kept.
+    """
+    try:
+        record = _load_single(root, str(entry["id"]))
+    except TempSpaceError:
+        return None, "unreadable-record"
+    fresh = _entry(root, record)
+    if fresh.get("pinned"):
+        return fresh, "pinned"
+    if fresh.get("leased"):
+        return fresh, "leased"
+    problem = _identity_recheck(fresh["path"], identity)
+    if problem is not None:
+        return fresh, problem
+    safe, why = _delete_guard(root, fresh)
+    if not safe:
+        return fresh, why
+    return fresh, None
 
 
 def _clean_row(entry: Mapping[str, Any], *, action: str, why: str
@@ -2615,6 +2707,8 @@ def _legacy_decision(item: Mapping[str, Any], *, root: Path,
             return "keep", "cache-disabled"
         if kind != "directory":
             return "keep", "not-a-directory"
+        if _has_cachedir_tag(path):
+            return "keep", "cache-tag"
         if age < older_than_s:
             return "keep", "too-recent"
         if _legacy_protected(root, path, scan_roots):
@@ -2631,6 +2725,11 @@ def _legacy_recheck(row: Mapping[str, Any], *, root: Path,
     info = _safe_lstat(path)
     if info is None:
         return "missing"
+    expected_dev = row.get("st_dev")
+    expected_ino = row.get("st_ino")
+    if isinstance(expected_dev, int) and isinstance(expected_ino, int):
+        if (int(info.st_dev), int(info.st_ino)) != (expected_dev, expected_ino):
+            return "changed"
     fresh = {
         "path": str(path),
         "pattern": row["pattern"],
@@ -2658,11 +2757,37 @@ def _legacy_row(item: Mapping[str, Any], *, action: str,
         "hardlinks": int(item.get("hardlinks") or 0),
         "age_s": int(item.get("age_s") or 0),
         "mtime": item.get("mtime"),
+        "st_dev": item.get("st_dev"),
+        "st_ino": item.get("st_ino"),
         "registered": bool(item.get("registered")),
         "registered_ancestor": item.get("registered_ancestor"),
         "action": action,
         "why": why,
     }
+
+
+def _path_identity(path: str | Path) -> tuple[int, int] | None:
+    """The ``(st_dev, st_ino)`` of a directory, or ``None`` if it is not one.
+
+    This is recorded at plan time so a deletion can tell that the planned
+    directory was replaced before it is removed.
+    """
+    info = _safe_lstat(Path(path))
+    if info is None or stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return None
+    return (int(info.st_dev), int(info.st_ino))
+
+
+def _identity_recheck(path: str | Path, expected: tuple[int, int] | None) -> str | None:
+    """``changed`` when the path is no longer the planned directory."""
+    info = _safe_lstat(Path(path))
+    if info is None or stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return "changed"
+    if expected is None:
+        return "changed"
+    if (int(info.st_dev), int(info.st_ino)) != expected:
+        return "changed"
+    return None
 
 
 def _delete_guard(root: Path, entry: Mapping[str, Any]) -> tuple[bool, str]:
@@ -2765,6 +2890,53 @@ def _safe_lstat(path: Path) -> os.stat_result | None:
 def _marker_matches(path: Path, entry_id: str) -> bool:
     marker = _read_marker(path)
     return bool(marker and marker.get("id") == entry_id)
+
+
+def _write_cachedir_tag(path: Path) -> None:
+    """Write a conventional ``CACHEDIR.TAG`` (mode 0644) into a cache entry."""
+    tag = Path(path) / CACHEDIR_TAG_NAME
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(tag, flags, 0o644)
+    try:
+        os.fchmod(descriptor, 0o644)
+        data = CACHEDIR_TAG_CONTENT.encode("utf-8")
+        while data:
+            written = os.write(descriptor, data)
+            if written <= 0:
+                raise TempSpaceError(f"cannot write cache tag {tag}")
+            data = data[written:]
+    finally:
+        os.close(descriptor)
+
+
+def _has_cachedir_tag(path: str | Path) -> bool:
+    """Whether a directory carries the conventional cache tag.
+
+    Only the tag file is inspected; the directory is not walked and a
+    symlinked tag is not followed.
+    """
+    tag = Path(path) / CACHEDIR_TAG_NAME
+    try:
+        info = os.lstat(tag)
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(tag, flags)
+    except OSError:
+        return False
+    try:
+        data = os.read(descriptor, len(CACHEDIR_TAG_SIGNATURE))
+    except OSError:
+        return False
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+    return data == CACHEDIR_TAG_SIGNATURE.encode("utf-8")
 
 
 def _read_marker(path: Path) -> dict[str, Any] | None:
@@ -2946,7 +3118,8 @@ def _unescape(value: str) -> str:
 __all__ = [
     "AGENT_DIRNAME", "ALLOCATION_APPARENT_FALLBACK", "ALLOCATION_BLOCKS",
     "ALLOCATION_BLOCK_SIZE", "AUDIT_MAX_ARTIFACTS", "AUDIT_MAX_SECONDS",
-    "AUDIT_PATTERNS", "DEFAULT_KIND", "DEFAULT_LIST_SORT",
+    "AUDIT_PATTERNS", "CACHEDIR_TAG_CONTENT", "CACHEDIR_TAG_NAME",
+    "CACHEDIR_TAG_SIGNATURE", "DEFAULT_KIND", "DEFAULT_LIST_SORT",
     "DEFAULT_SCRATCH_KIND", "ENV_MAX_INODES", "ENV_MAX_TOTAL_BYTES",
     "ENV_MIN_FREE", "KINDS", "LEASE_NAME", "LEGACY_CACHE_PATTERNS",
     "LEGACY_DEFAULT_OLDER_THAN_S", "LEGACY_DIR_PATTERNS",

@@ -30,7 +30,7 @@ An entry records:
 
 * a random opaque `id` (`tmp_` plus 12 hex characters);
 * an absolute `path` under an allowed temp root;
-* `kind`: `scratch`, `agent`, `check`, `eval`, `engine` or `other`;
+* `kind`: `scratch`, `agent`, `check`, `eval`, `engine`, `cache` or `other`;
 * `session`: `{harness, id}` or `null` (never invented; `session_source` is
   `unknown` when absent);
 * optional `model` and `run_id` provenance labels (bounded, stored in the
@@ -87,10 +87,10 @@ of it.
 
 ## Roots
 
-`<state dir>/tmp/workspaces/` holds `scratch`, `check`, `eval`, `engine` and
-`other` entries.  `<state dir>/tmp/agent/` is reserved for agent run roots.  A
-caller may adopt a path only under the resolved `TMPDIR`, `/tmp`, `/var/tmp` or
-a managed root.
+`<state dir>/tmp/workspaces/` holds `scratch`, `check`, `eval`, `engine`,
+`cache` and `other` entries.  `<state dir>/tmp/agent/` is reserved for agent
+run roots.  A caller may adopt a path only under the resolved `TMPDIR`,
+`/tmp`, `/var/tmp` or a managed root.
 
 ## Commands
 
@@ -134,8 +134,17 @@ plan: 1 candidate(s), 18240 allocated, 9216 apparent, 7 files, 8 inodes, 0 delet
 $ ozagia tmp clean --expired --apply
 $ ozagia tmp pin tmp_... --until 2026-12-31T00:00:00Z
 $ ozagia tmp unpin tmp_...
+$ ozagia tmp touch tmp_...
 $ ozagia tmp gc --max-total-bytes 1073741824 --min-free 268435456
 $ ozagia tmp gc --apply --max-total-bytes 1073741824
+
+$ ozagia tmp run --reason "probe" -- sh -c 'printf ok > "$TMPDIR/probe"'
+tmp_...  /home/me/project/.ozagia/tmp/workspaces/scratch/tmp_...  exit=0  cleaned
+
+$ ozagia tmp run --reason "inspect failure" --keep -- sh -c 'exit 2'
+tmp_...  /home/me/project/.ozagia/tmp/workspaces/scratch/tmp_...  exit=2  kept (--keep)
+
+$ ozagia tmp run --reason "cache warm" --kind cache -- make cache
 ```
 
 `create` also accepts `--max-total-bytes`, `--max-inodes`,
@@ -228,6 +237,32 @@ entries; unowned, marker-mismatched, symlinked, missing, protected, pinned and
 leased entries are reported as kept.  A per-session limit makes that session's
 entries candidates in the same order.
 
+A **cache entry** (`--kind cache`) writes a conventional `CACHEDIR.TAG` with
+the `Signature: 8a477f597d28d172789f06886806bc55` first line, in mode 0644,
+when `create` makes the directory.  Ordinary scratch entries never get a tag.
+`gc` orders released/expired entries first, then `cache` entries, then the
+oldest `last_used_at`, so a regenerable cache is evicted before scratch work.
+`audit` and `clean-legacy` skip a candidate directory that carries the tag:
+it is treated as a cache by convention, not as an untracked legacy artifact,
+and the cache tree is not walked.
+
+`ozagia tmp touch ID` moves `last_used_at` to now for LRU ordering.  It does not
+change the entry's state, kind or usage, and it never clears a pin or releases a
+lease.
+
+`ozagia tmp run --reason TEXT [--kind K] [--ttl-s N] [--keep] -- CMD...` runs
+one command inside a fresh managed entry.  It sets `TMPDIR`, `TMP`, `TEMP` and
+`OZAGIA_SCRATCH_ROOT` to the entry path, acquires the entry's lease, and runs
+`CMD` with `subprocess.run(..., shell=False)` and inherited stdin/stdout/stderr.
+There is no shell, so arguments are passed literally.  Command output, prompts
+and environment values are never captured or printed by ozagia.  On exit 0 the
+lease is released and the entry is deleted (with the normal owned/marker/budget
+checks) unless `--keep` is given.  A non-zero exit, timeout, signal,
+`KeyboardInterrupt`, or a cleanup refusal keeps the entry and releases the
+lease, with the reason in the output.  A budget refusal exits 1 and creates
+nothing.  Plain mode prints the entry id/path and exit status; JSON adds
+`exit_code`, `entry`, `kept`, `cleaned`, `reason` and `usage`.
+
 `--json` is available on every subcommand.  JSON is deterministic except for
 timestamps and paths.  `create` prints only the created path in plain mode so a
 caller can use it directly.
@@ -255,9 +290,32 @@ a refusal or error.
   root.
 * Deletion never follows a symlink out of the tree; directory symlinks are
   unlinked, not descended into.
+* At apply time `clean` and `gc` re-read the registry record and marker, and
+  compare the directory's planned `(st_dev, st_ino)` identity with the current
+  one immediately before deletion.  A path replaced by a symlink, a different
+  inode or a non-directory is kept and reported as `changed`; the replacement
+  is never followed.
+* `clean-legacy` records the planned `(st_dev, st_ino)` for each artifact row
+  and applies the same recheck before `unlink` or `rmtree`.  Older rows without
+  an identity still go through the name, type, lock/socket and protected-path
+  checks.
 * A missing path is reported as `missing` and does not fail the whole run.
 * Nothing is written into the repository outside its state directory.
 * No network access, no target import and no target execution.
+
+### Residual path-resolution race
+
+The identity recheck narrows the window but does not close it.  Paths are still
+resolved by name: another process with write access to a parent directory can
+replace a planned path between the final `lstat` and the `unlink`/`rmtree`.
+ozagia never follows a replacement symlink and refuses a changed inode, but a
+rename into the same name in that last instant is a classic time-of-check to
+time-of-use race.  The intended hardening direction is Linux `openat2` with
+`RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS`, walking and deleting relative to a
+held directory descriptor so the name cannot be swapped underneath the
+operation.  That needs a ctypes or external dependency and is deliberately a
+later slice; this module stays standard-library only and does not claim
+hostile-parent hardening.
 
 ## What is tracked and what is not
 
@@ -313,6 +371,7 @@ from ozagia.core import temp_space as TS
 entry = TS.create(root, kind="scratch", reason="fixture dump", ttl_s=3600)
 entry = TS.create(root, kind="agent", reason="agent run", model="m",
                   run_id="run-7")
+entry = TS.create(root, kind="cache", reason="build cache")  # CACHEDIR.TAG
 entry = TS.adopt(root, "/tmp/tool-output", reason="tool output", owned=True,
                  mark=True)
 entry = TS.get(root, entry["id"])
@@ -496,6 +555,10 @@ unknown name.  It also keeps:
 
 * a path registered in the temp registry, and any path under a registered
   ancestor (the normal `clean` owns those entries);
+* a candidate directory that carries a `CACHEDIR.TAG`; audit skips it before
+  it becomes a row, and the decision/recheck also keeps it as `cache-tag`;
+* a planned row whose `(st_dev, st_ino)` identity changed before deletion
+  (reported as `changed`; the replacement is not followed);
 * symlinks, non-regular lock files, and files where a directory pattern is
   expected;
 * the filesystem root, repository root, home directory, allowed roots, managed

@@ -15,6 +15,9 @@
     ozagia tmp release ID [--delete] [--json]
     ozagia tmp pin     ID [--until EPOCH|ISO] [--json]
     ozagia tmp unpin   ID [--json]
+    ozagia tmp touch   ID [--json]
+    ozagia tmp run     --reason TEXT [--kind K] [--ttl-s N] [--keep]
+                       [--max-total-bytes B] ... -- CMD...
     ozagia tmp clean   [--apply] [--expired] [--older-than D]
                        [--max-total-bytes B] [--id ID] [--json]
     ozagia tmp gc      [--apply] [--max-total-bytes B] [--max-inodes N]
@@ -37,6 +40,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,6 +138,24 @@ def _add_actions(children: Any) -> None:
 
     unpinned = common(children.add_parser("unpin", help="remove a pin"))
     unpinned.add_argument("id", metavar="ID")
+
+    touched = common(children.add_parser(
+        "touch", help="move an entry's last-used time for LRU"))
+    touched.add_argument("id", metavar="ID")
+
+    ran = common(children.add_parser(
+        "run", help="run a command with a managed entry as its temp dir"))
+    ran.add_argument("--reason", required=True,
+                     help="short label (at most 200 characters)")
+    ran.add_argument("--kind", choices=TS.KINDS,
+                     default=TS.DEFAULT_SCRATCH_KIND)
+    ran.add_argument("--ttl-s", type=int, default=None,
+                     help="expiry in seconds (60 to 90 days)")
+    ran.add_argument("--keep", action="store_true",
+                     help="keep the entry even when the command succeeds")
+    _budget_arguments(ran)
+    ran.add_argument("run_command", nargs=argparse.REMAINDER, metavar="CMD",
+                     help="command and arguments after --")
 
     cleaned = common(children.add_parser("clean", help="plan or apply cleanup"))
     cleaned.add_argument("--apply", action="store_true",
@@ -483,6 +507,145 @@ def _format_clean_legacy(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+class _RunSignal(Exception):
+    """A termination signal received while ``tmp run`` is running a child."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"signal {signum}")
+        self.signum = int(signum)
+
+
+def _install_run_signals() -> dict[int, Any]:
+    """Convert common termination signals into an exception during a run."""
+    previous: dict[int, Any] = {}
+
+    def handler(signum: int, frame: Any) -> None:
+        raise _RunSignal(signum)
+
+    for name in ("SIGTERM", "SIGHUP", "SIGQUIT"):
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        try:
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, handler)
+        except (OSError, ValueError):  # non-main thread or unsupported host
+            previous.pop(signum, None)
+    return previous
+
+
+def _restore_run_signals(previous: dict[int, Any]) -> None:
+    for signum, handler in previous.items():
+        try:
+            signal.signal(signum, handler)
+        except (OSError, ValueError):
+            pass
+
+
+def _usage_payload(entry: dict[str, Any]) -> dict[str, int]:
+    return {
+        "bytes": int(entry.get("bytes") or 0),
+        "apparent_bytes": int(entry.get("apparent_bytes") or 0),
+        "files": int(entry.get("files") or 0),
+        "inodes": int(entry.get("inodes") or 0),
+        "hardlinks": int(entry.get("hardlinks") or 0),
+    }
+
+
+def _run_action(args: argparse.Namespace, *, root: Path,
+                as_json: bool) -> int:
+    command = list(getattr(args, "run_command", None) or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        return _error("run needs a command after --", as_json=as_json)
+
+    entry = TS.create(root, kind=args.kind, reason=args.reason,
+                      ttl_s=args.ttl_s, budget=_budget(args))
+    entry_id = entry["id"]
+    temp = Path(entry["path"])
+    exit_code = 0
+    keep_reason: str | None = None
+    lease = None
+    previous: dict[int, Any] = {}
+    try:
+        lease = TS.acquire_lease(root, entry_id)
+        environment = dict(os.environ)
+        for name in ("TMPDIR", "TMP", "TEMP", "OZAGIA_SCRATCH_ROOT"):
+            environment[name] = str(temp)
+        previous = _install_run_signals()
+        try:
+            completed = subprocess.run(
+                command, shell=False, env=environment,
+                stdin=None, stdout=None, stderr=None, check=False)
+            exit_code = int(completed.returncode)
+        except KeyboardInterrupt:
+            exit_code = 130
+            keep_reason = "interrupted"
+        except subprocess.TimeoutExpired:
+            exit_code = 124
+            keep_reason = "timeout"
+        except _RunSignal as exc:
+            exit_code = 128 + exc.signum
+            keep_reason = f"signal {exc.signum}"
+        except OSError as exc:
+            exit_code = 127
+            keep_reason = f"spawn-failed: {exc.strerror or exc}"
+        finally:
+            _restore_run_signals(previous)
+            previous = {}
+        if keep_reason is None and exit_code != 0:
+            keep_reason = (f"signal {-exit_code}" if exit_code < 0
+                           else f"exit {exit_code}")
+        elif keep_reason is None and args.keep:
+            keep_reason = "--keep"
+    finally:
+        if previous:
+            _restore_run_signals(previous)
+        if lease is not None:
+            lease.close()
+
+    try:
+        current = TS.get(root, entry_id)
+    except TS.TempSpaceError:
+        current = entry
+    usage = _usage_payload(current)
+    final_entry = current
+    cleaned = False
+    if keep_reason is None:
+        try:
+            final_entry = TS.release(root, entry_id, delete=True)
+            if final_entry["state"] == "released" and not temp.exists():
+                cleaned = True
+            elif final_entry["state"] == "missing":
+                keep_reason = "missing"
+            else:
+                keep_reason = "not-deleted"
+        except (TS.TempSpaceError, OSError) as exc:
+            keep_reason = f"cleanup-refused: {exc}"
+            try:
+                final_entry = TS.get(root, entry_id)
+            except TS.TempSpaceError:
+                final_entry = current
+    if as_json:
+        _print_json({
+            "ok": True,
+            "exit_code": exit_code,
+            "entry": final_entry,
+            "kept": keep_reason is not None,
+            "cleaned": cleaned,
+            "reason": keep_reason,
+            "usage": usage,
+        })
+    else:
+        outcome = ("cleaned" if cleaned else
+                   f"kept ({keep_reason})" if keep_reason else "kept")
+        print(f"{entry_id}  {temp}  exit={exit_code}  {outcome}")
+    if exit_code < 0:
+        return 128 - exit_code
+    return exit_code
+
+
 def run(args: argparse.Namespace) -> int:
     """Run one parsed ``ozagia tmp`` command."""
     action = args.action
@@ -574,6 +737,15 @@ def run(args: argparse.Namespace) -> int:
             else:
                 print(f"unpinned {entry['id']}")
             return 0
+        if action == "touch":
+            entry = TS.touch(root, args.id)
+            if as_json:
+                _print_json({"ok": True, "entry": entry})
+            else:
+                print(f"touched {entry['id']}")
+            return 0
+        if action == "run":
+            return _run_action(args, root=root, as_json=as_json)
         if action == "clean":
             result = TS.clean(
                 root, dry_run=True, expired=args.expired,
