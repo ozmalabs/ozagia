@@ -162,11 +162,13 @@ through a trusted channel, and review the source if that matters.
 For development *on* an Ocelot checkout, the optional
 [`ozagia.integrations.ocelot.workspace`](ocelot_workspace.md) adapter indexes
 top-level seed manifests, seed dependencies, boot/registry references,
-seed-aware tests and engine-aware Python files. Its `ocelot_status`,
-`ocelot_seed`, `ocelot_seeds` and `ocelot_plan` tools give a conservative
-affected-test plan and an engine/worktree provenance check without importing
-or running Ocelot. It is separate from the installer above; it does not bundle
-or download Ocelot.
+seed-aware tests, engine-aware Python files, PyO3/Term definitions and
+research protocol documents. Its `ocelot_status`, `ocelot_seed`,
+`ocelot_seeds`, `ocelot_plan`, `ocelot_engine`, `ocelot_research` and
+`ocelot_seed_validate` tools give a conservative affected-test plan, an
+engine/worktree provenance check, a Rust/Python/seed impact map and a
+research chain without importing or running Ocelot. It is separate from the
+installer above; it does not bundle or download Ocelot.
 
 ## Licence and scope
 

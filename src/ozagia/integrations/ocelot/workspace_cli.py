@@ -75,6 +75,25 @@ def test_plan(memory: Any, changed: Iterable[str] | None = None, *,
     return query(memory, changed=changed, base=base, head=head, seeds=seeds)
 
 
+def research_summary(memory: Any, target: str = "") -> dict[str, Any]:
+    """An Ocelot research chain, or the research census when target is empty."""
+    from .workspace_research import research_census, research_summary as query
+    return query(memory, target) if target else research_census(memory)
+
+
+def engine_summary(memory: Any, target: str | None = None,
+                   op: str = "primitive") -> dict[str, Any]:
+    """The Ocelot Rust/Python/seed bridge query."""
+    from .workspace_engine import engine_summary as query
+    return query(memory, target=target, op=op)
+
+
+def seed_validate(memory: Any, seed_id: str) -> dict[str, Any]:
+    """Read-only structural validation of one Ocelot seed manifest."""
+    from .workspace_validate import seed_validate as query
+    return query(memory, seed_id)
+
+
 def _print_json(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True, default=str))
 
@@ -178,7 +197,7 @@ def _format_seed(result: dict[str, Any]) -> str:
         if not tests:
             lines[-1] = "tests (0): -"
     for key, label in (("docs", "docs"), ("sources", "sources"),
-                       ("boot_files", "boot files")):
+                       ("boot_files", "boot files"), ("terms", "terms")):
         if key in result:
             lines.append(f"{label} ({len(result.get(key) or [])}): "
                          + _one_line(result.get(key) or []))
@@ -218,6 +237,124 @@ def _format_census(result: dict[str, Any]) -> str:
         lines.append(f"index errors ({len(errors)}):")
         for error in _capped(errors):
             lines.append(f"  {error}")
+    return "\n".join(lines)
+
+
+def _format_validate(result: dict[str, Any]) -> str:
+    seed_id = result.get("seed") or result.get("id") or "?"
+    lines = [f"seed validation: {seed_id} "
+             f"({'ok' if result.get('ok') else 'failed'})"]
+    path = result.get("path")
+    if path:
+        lines.append(f"path: {path}")
+    errors = result.get("errors") or []
+    warnings = result.get("warnings") or []
+    checks = result.get("checks") or []
+    lines.append(f"checks: {len(checks)}; errors: {len(errors)}; "
+                 f"warnings: {len(warnings)}")
+    for label, values in (("error", errors), ("warning", warnings)):
+        for value in _capped(values):
+            if isinstance(value, dict):
+                text = value.get("message") or value.get("name") or value
+            else:
+                text = value
+            lines.append(f"  {label}: {text}")
+    return "\n".join(lines)
+
+
+def _format_engine(result: dict[str, Any]) -> str:
+    if result.get("ok") is False:
+        return f"error: {result.get('error') or 'engine query failed'}"
+    lines: list[str] = []
+    if "defined_terms" in result:
+        lines.append(
+            f"term census: {result.get('defined_count', 0)} defined, "
+            f"{result.get('used_count', 0)} used, "
+            f"{result.get('unknown_count', 0)} unknown, "
+            f"{result.get('unused_count', 0)} unused")
+        for key, label in (("unknown_terms", "unknown"),
+                           ("top_terms", "top terms"),
+                           ("unused_terms", "unused")):
+            values = result.get(key) or []
+            if values:
+                shown = [
+                    item.get("name") if isinstance(item, dict) else item
+                    for item in _capped(values)]
+                lines.append(f"{label} ({len(values)}): " + _one_line(shown))
+        errors = result.get("errors") or []
+        if errors:
+            lines.append("errors: " + _one_line(_capped(errors)))
+        return "\n".join(lines)
+    target = result.get("target") or result.get("primitive") or ""
+    lines.append(f"engine: {target or 'primitives'}")
+    if result.get("engine_rebuild"):
+        lines.append("engine rebuild: required")
+    primitives = result.get("primitives") or []
+    if primitives and isinstance(primitives[0], dict):
+        lines.append(f"primitives ({len(primitives)}):")
+        for item in primitives:
+            lines.append(
+                f"  {item.get('name', '?')} "
+                f"({item.get('kind', '?')}, "
+                f"defined={'yes' if item.get('defined') else 'no'})")
+    elif primitives:
+        lines.append(f"primitives ({len(primitives)}): " + _one_line(primitives))
+    definitions = result.get("definitions") or []
+    if definitions:
+        lines.append("definitions: " + _one_line(_capped(definitions)))
+    for key, label in (("python_files", "python files"), ("tests", "tests"),
+                       ("test_files", "test files"), ("seeds", "seeds"),
+                       ("terms", "terms"), ("resources", "resources")):
+        values = result.get(key) or []
+        if values:
+            lines.append(f"{label} ({len(values)}): " + _one_line(_capped(values)))
+    return "\n".join(lines)
+
+
+def _format_research(result: dict[str, Any]) -> str:
+    if result.get("ok") is False:
+        return f"error: {result.get('error') or 'research query failed'}"
+    if "docs" in result and "chain" not in result:
+        lines = [f"research census: {result.get('docs', 0)} document(s)"]
+        kinds = result.get("by_kind") or {}
+        if kinds:
+            lines.append("by kind: " + ", ".join(
+                f"{key}={value}" for key, value in sorted(kinds.items())))
+        for key, label in (
+                ("prereg_without_results", "prereg without results"),
+                ("results_without_prereg", "results without prereg"),
+                ("missing_gates", "missing gate tests")):
+            values = result.get(key) or []
+            if values:
+                lines.append(f"{label} ({len(values)}): " + _one_line(
+                    _capped(values)))
+        errors = result.get("errors") or []
+        if errors:
+            lines.append("errors: " + _one_line(_capped(errors)))
+        return "\n".join(lines)
+    target = result.get("target") or ""
+    lines = [f"research: {target}"]
+    nodes = result.get("nodes") or []
+    if nodes:
+        lines.append(f"documents ({len(nodes)}):")
+        for node in nodes:
+            if isinstance(node, dict):
+                lines.append(
+                    f"  {node.get('kind', '?')}: {node.get('path', '?')}")
+            else:
+                lines.append(f"  {node}")
+    for key, label in (("scripts", "scripts"), ("tests", "tests"),
+                       ("seeds", "seeds"), ("engine_hashes", "engine hashes"),
+                       ("commit_pins", "commit pins")):
+        values = result.get(key) or []
+        if values:
+            lines.append(f"{label} ({len(values)}): " + _one_line(_capped(values)))
+    if result.get("missing_gate"):
+        lines.append("missing gate: yes")
+    if result.get("stale"):
+        lines.append("stale: yes")
+    for reason in _capped(result.get("reasons") or []):
+        lines.append(f"  - {reason}")
     return "\n".join(lines)
 
 
@@ -270,7 +407,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ozagia-ocelot-workspace",
         description="query an indexed Ocelot checkout: seed impact, a scoped "
-                    "test plan, and a read-only engine/worktree doctor")
+                    "test plan, the Rust/Python/seed bridge, research links, "
+                    "seed validation, and a read-only engine/worktree doctor")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(name: str, help_text: str) -> argparse.ArgumentParser:
@@ -287,10 +425,26 @@ def build_parser() -> argparse.ArgumentParser:
     seed = common("seed", "one seed with dependencies, tests and docs")
     seed.add_argument("id", metavar="ID", help="seed id")
     seed.add_argument("--include", default="summary",
-                      choices=("summary", "closure", "tests", "docs", "all"),
+                      choices=("summary", "closure", "tests", "docs",
+                               "sources", "terms", "all"),
                       help="detail level (default: summary)")
 
     common("seeds", "census of indexed seeds and their test/boot coverage")
+
+    research = common("research", "research/evidence chain or research census")
+    research.add_argument("target", nargs="?", default="",
+                          metavar="TARGET",
+                          help="document path, block number or topic substring")
+
+    engine = common("engine", "Rust/Python/seed bridge query")
+    engine.add_argument("--op", default="primitive",
+                        choices=("primitive", "rust_impact", "term_census"),
+                        help="query kind (default: primitive)")
+    engine.add_argument("--target", default=None,
+                        help="primitive name or Rust path for primitive/impact")
+
+    validate = common("validate", "structural seed-manifest validation")
+    validate.add_argument("id", metavar="ID", help="seed id")
 
     plan = common("plan", "affected-test plan or conservative full-gate fallback")
     plan.add_argument("--changed", action="append", nargs="+", default=[],
@@ -339,6 +493,30 @@ def main(argv: list[str] | None = None) -> int:
             _print_json(result)
         else:
             print(_format_census(result))
+        return 0 if _result_ok(result) else 1
+
+    if args.command == "research":
+        result = research_summary(memory, args.target)
+        if args.json:
+            _print_json(result)
+        else:
+            print(_format_research(result))
+        return 0 if _result_ok(result) else 1
+
+    if args.command == "engine":
+        result = engine_summary(memory, target=args.target, op=args.op)
+        if args.json:
+            _print_json(result)
+        else:
+            print(_format_engine(result))
+        return 0 if _result_ok(result) else 1
+
+    if args.command == "validate":
+        result = seed_validate(memory, args.id)
+        if args.json:
+            _print_json(result)
+        else:
+            print(_format_validate(result))
         return 0 if _result_ok(result) else 1
 
     if args.command == "plan":
