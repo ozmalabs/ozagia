@@ -18,8 +18,11 @@ the read-only durable-asset views `dev_assets_list` and `dev_assets_status`
 (catalog filters, totals and largest entries), and the read-only session-mesh
 views `dev_mesh_status` (counts, self, peers, links/roles, leases, delegations,
 unread) and `dev_mesh_inbox` (mailbox metadata rows only, never subject or
-body). None is part of the `graph` or `engine` surfaces, and no surface exposes
-a create, write, asset-register/pin/delete, mesh send, lease, release, claim or
+body), and the read-only `dev_ozma_flight` view (declared flight members,
+roles/workunits from host agent ids only, advisory claims/blockers, handoff and
+wake counts; no bodies or credentials). None is part of the `graph` or `engine`
+surfaces, and no surface exposes a create, write, asset-register/pin/delete,
+mesh send, lease, release, claim, Ozma send/claim/wake-approve/handoff-accept or
 approve tool: creation is the OpenCode `ozagia_scratch` tool, the harness,
 `ozagia tmp create`, or the explicit `ozagia assets register`/`discover` CLI.
 

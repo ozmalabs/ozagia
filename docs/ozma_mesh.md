@@ -105,8 +105,21 @@ ozagia mesh ozma check [--require-ready] [--live] [--json]
 ozagia mesh ozma outbox [--all] [--json]
 ozagia mesh ozma inbox [--unread] [--json] [--harness H --session S]
 ozagia mesh ozma read MESSAGE_ID [--json]
-ozagia mesh ozma ack MESSAGE_ID [--json]
+ozagia mesh ozma ack MESSAGE_ID [--accepted|--rejected] [--reason R]
+                       [--json] [--harness H --session S]
 ozagia mesh ozma claims [--json]
+ozagia mesh ozma flight [--limit N] [--json] [--harness H --session S]
+ozagia mesh ozma handoff list|show [HANDOFF_ID] [--json]
+ozagia mesh ozma handoff accept|reject|complete HANDOFF_ID [--reason R]
+                       [--json] [--harness H --session S]
+ozagia mesh ozma block --blocked ID --blocker ID [--workunit W] [--resource R]
+ozagia mesh ozma unblock [--id ID] [--workunit W] [--json]
+ozagia mesh ozma blockers [--json]
+ozagia mesh ozma wake list [--json]
+ozagia mesh ozma wake approve --mode M --budget-turns N [--ttl S]
+                       [--agent ID] [--json] [--harness H --session S]
+ozagia mesh ozma wake revoke APPROVAL_ID [--json] [--harness H --session S]
+ozagia mesh ozma wake claim [--json] [--harness H --session S]
 ozagia mesh ozma enqueue --message LOCAL_MSG_ID [--channel C]
                           [--offer-as response|handoff]
                           [--harness H --session S]
@@ -167,9 +180,12 @@ and the bridge marks it `lossy: true` with the fields it cannot represent:
 - `subscriptions`
 - `priority_floor`
 - `compliance`
+- `refs` when a ref is present
+- `workunit` when a workunit is present
 
-`map` and `check` list the same fields.  No verified handoff, claim or
-completion is implied under A2A or native transport.
+`map` and `check` list the static fields.  The A2A adapter adds `refs` and
+`workunit` to its own `loss_fields` when the envelope carries them.  No verified
+handoff, claim or completion is implied under A2A or native transport.
 
 ## No-network boundary
 
@@ -364,22 +380,132 @@ ozagia mesh ozma sync
 
 `enqueue` and `claim` need a registered local identity with `coordinate`
 exposure, bridge mode `messages` or `full`, a matching host-declared card and
-a valid flight.  Read views (`outbox`, `inbox`, `read`, `ack`, `claims`) need
-no identity.  Errors use stable codes such as `bridge_not_ready`, `queue_full`,
+a valid flight.  Read views (`outbox`, `inbox`, `read`, `claims`, `flight`,
+`handoff list|show`, `blockers`, `wake list`) need no identity.  A typed `ack`
+is an explicit CLI choice; a handoff acknowledgement needs a host/coordinate
+session; `wake approve|revoke|claim` are CLI-only host primitives (no MCP or
+daemon action).  Errors use stable codes such as `bridge_not_ready`, `queue_full`,
 `rate_limited`, `id_conflict`, `channel_not_allowed`, `unsupported_mapping`,
-`unknown_message` and `shim_unavailable`; bodies and credentials are never
-echoed in an error.
+`unknown_message`, `shim_unavailable`, `wake_not_approved`,
+`wake_budget_exhausted`, `wake_expired`, `wake_not_due` and
+`a2a_unsupported_required`; bodies and credentials are never echoed in an
+error.
 
 `status` adds read-only bridge counts: outbox pending/sent/failed/expired,
 inbox unread/read/acked, remote/outbound claims, active/expired claims,
-conflict count, queue messages/bytes against caps, and dedupe conflicts.
-Neither `status` nor `check` creates `<state>/mesh/ozma`.
+conflict count, queue messages/bytes against caps, dedupe conflicts, handoff
+states, open/cleared blocker edges and wake approval/request counts.  The core
+`ozagia status` snapshot also carries a compact `flight` section with counts
+only.  Neither `status`, `check` nor any read view creates
+`<state>/mesh/ozma`.
+
+## Stage H: declared flights, handoffs, blockers, A2A and wake primitives
+
+Stage H adds a flight view and local lifecycle primitives.  It is still the
+declared local half of the bridge: the envelope mapping is `declared`, the
+identity result is `unverified`, and no command contacts a shim.  A flight is a
+label and a set of records, not a second scheduler or an authority.
+
+### Flights and labels
+
+`ozagia mesh ozma flight` reads the flight-scoped identity mapping records under
+`identities/` and joins a local mesh registration by its key to report live
+state.  A registration never declares a role.  `role` and `workunit` are
+derived only from the host-provided `agent:<role>[:<workunit>]` id; without
+that id both are `null`.  Registration order, link direction, WireGuard identity
+and model claims are never used to infer a role, and no leader is elected.
+
+The view reports the flight id/source, bounded members (harness/session/key,
+agent id, role, workunit, scope, verification, transport, wake modes, state and
+exposure), role/workunit counts, link/delegation counts whose two endpoints are
+flight members, active advisory claims, open blocker edges, handoff and wake
+counts, and readiness.  It is metadata only: no message bodies, criteria text,
+credentials or card paths.  `dev_ozma_flight` exposes the same view on the
+full/coding MCP surface and is read-only.
+
+### Handoff lifecycle
+
+Stage G's `handoff` mapping is unchanged.  An inbound `handoff` writes a
+lifecycle record under
+`<state>/mesh/ozma/handoffs/<flight>/<hash>.json` with state `pending`, the
+sender, workunit, criteria digest/count, thread/channel and timestamps.  A
+response queues a typed `ack` (`accept`/`reject`) or `handoff`
+(`completion=done`) with the same thread and `in_reply_to` the handoff id; the
+record moves to `accepted`, `rejected` or `complete` and keeps the ack id.  An
+inbound `ack` whose `in_reply_to` names a handoff transitions it only when it
+comes from the expected recipient.  Only the agent the handoff was addressed to
+may accept or reject it, and only its sender may complete an outbound handoff;
+any other local agent is refused.
+
+Records are hashed, atomic, `0600` and bounded.  They retain no message body
+beyond the bounded inbox.  A handoff acknowledgement never transfers a
+credential, lease, delegation or merge authority; the record states
+`authority_transferred: false` and the bridge does not touch a lease or
+delegation.
+
+`ozagia mesh ozma ack MESSAGE --accepted|--rejected` optionally queues a typed
+ack for a message that declared `requires_ack`; the default `ack` remains
+local-only.  There is no automatic reply.
+
+### Advisory blockers
+
+`<state>/mesh/ozma/blockers/<flight>.json` holds bounded edges
+`{blocked_id, blocker_id, workunit, resource, state, created_at, cleared_at,
+source}`.  `block`/`unblock` envelopes create and clear edges; the local
+`block`/`unblock` commands do the same without a message.  `unblock --id`
+matches an edge id or either party id, and `--workunit` clears a work unit.
+Ids are validated; no arbitrary path is accepted.
+
+A blocker is a warning shown in `flight` and `status`.  It never blocks a local
+worktree, commit, merge, lease acquisition or policy check, and no command
+grants merge authority.
+
+### A2A lossy translation
+
+`to_a2a(envelope)` produces a declared A2A v1.0-shaped message with a text part
+and an `ozagia` metadata extension, and marks it `lossy: true` with named
+fields.  It always names the static losses (`criteria`, `claim_scope`,
+`blockers`, `subscriptions`, `priority_floor`, `compliance`) and adds `refs`
+and `workunit` when present.  `from_a2a(payload)` rebuilds an untrusted inbound
+envelope and reports the same loss list; structured criteria become flattened
+text and refs/workunit are not restored.
+
+A claim's scope or a block/unblock edge is a required field that A2A cannot
+represent, so translation refuses with `a2a_unsupported_required` instead of
+silently sending a message with a different meaning.  There is no A2A client:
+no socket, DNS or HTTP is opened, and `sync`/`check --live` remain unavailable.
+Because the adapter is declared rather than verified, `transport = "a2a"` is
+not message-ready for `enqueue`/`claim`; the pure `to_a2a`/`from_a2a`
+translation can still be exercised locally.
+
+### Host-approved wake (primitives only)
+
+`<state>/mesh/ozma/wake/<flight>/` holds approval and request records.
+`wake approve` writes an approval only from the CLI:
+`{mode: message-triggered|scheduled, budget_turns, used_turns, expires_at,
+approved_by: host, source: cli, created_at}`.  It requires `budget_turns >= 1`,
+a bounded TTL, a host-provided target agent id and the mode listed in
+`[ozma_mesh] wake_modes`.  No model, MCP tool or daemon action can approve or
+revoke wake.
+
+An inbound envelope may declare `wake: "message"|"scheduled"` and an optional
+`wake_at`.  The bridge records a pending request only after the message is
+accepted, only when the target declares that mode, and never grants approval
+from the envelope itself.
+
+`wake claim` is a host-runner primitive.  It returns the next due request only
+when an unexpired approval for the same target and mode has remaining budget;
+it then increments `used_turns` and appends an id-only audit entry.  It refuses
+with `wake_not_approved`, `wake_budget_exhausted`, `wake_expired`,
+`wake_not_due` or `wake_mode_not_declared`.  It never spawns a process, model
+turn, lease or timer; `claimable` is `true` and `spawnable` is `false`.
+`status`/`check` report the same boundary and count pending requests.
 
 ## What comes next
 
-Stage H adds flight membership/roles/work-units, handoff acknowledgement,
-blocker edges and `unblock`, host-approved message-triggered or scheduled wake
-with a budget, A2A lossy translation and live conformance against one approved
-shim, and a read-only flight view.  It continues to keep wake, claims and merge
-authority out of model hands, and it will need a real, approved shim contract
-before anything here can be called upstream-verified.
+A real live slice still needs an approved shim contract with host-supplied
+authentication, a signed Agent Card verifier and an A2A client.  Until then the
+bridge stays `declared`/`unverified`, `check --live` and `sync` stay
+unavailable, and wake remains a host-runner primitive rather than a daemon
+scheduler.  A TUI would be a read-only view over the same flight/status data;
+it would not gain send, claim, approval, takeover or merge authority.

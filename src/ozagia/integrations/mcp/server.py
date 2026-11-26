@@ -991,6 +991,23 @@ _TOOLS.extend([
                        "description": "Only unread messages."},
         }),
     },
+    {
+        "name": "dev_ozma_flight",
+        "description": (
+            "Read-only declared Ozma flight view for this repository: flight "
+            "id/source, bounded members (harness/session/key, host-provided "
+            "agent id, role and workunit derived only from that id, scope, "
+            "verification, transport, wake modes, state), role/workunit "
+            "counts, advisory claim/blocker summaries, handoff counts and "
+            "host-approved wake counts. Metadata only: no message bodies, "
+            "criteria text, credentials or card files. Conformance remains "
+            "declared and unverified; there is no send, claim, wake approval, "
+            "handoff accept, merge or network action."),
+        "inputSchema": _schema({
+            "limit": {"type": "integer", "default": 32,
+                      "description": "Most members to list (at most 64)."},
+        }),
+    },
 ])
 
 # The created-file ledger (`ozagia.core.files`): read-only over
@@ -1605,6 +1622,7 @@ class DevMemoryServer:
             "dev_working_set": self._working_set,
             "dev_mesh_status": self._mesh_status,
             "dev_mesh_inbox": self._mesh_inbox,
+            "dev_ozma_flight": self._ozma_flight,
             "dev_files_list": self._files_list,
             "dev_files_explain": self._files_explain,
             "dev_tmp_list": self._tmp_list,
@@ -2794,6 +2812,33 @@ class DevMemoryServer:
         return {"ok": True, "mesh_id": payload.get("mesh_id"),
                 "messages": rows, "count": len(rows),
                 "unread": payload.get("unread", 0)}
+
+    # -- Ozma flight (`ozagia.core.ozma_bridge`): read-only ----------------- #
+    def _ozma_flight(self, a: dict[str, Any]) -> Any:
+        from ozagia.core import mesh as M
+        from ozagia.core import ozma_bridge as B
+        from ozagia.core import ozma_mesh as O
+        root = self._files_root()
+        try:
+            config = O.load_config(root)
+        except O.OzmaMeshError as e:
+            return {"ok": False, "state": "unknown", "error": str(e)}
+        try:
+            limit = int(a.get("limit", 32))
+        except (TypeError, ValueError):
+            limit = 32
+        try:
+            report = B.flight(root, config=config, limit=limit)
+        except (M.MeshError, O.OzmaMeshError, B.OzmaBridgeError,
+                ValueError) as e:
+            return {"ok": False, "state": "unknown", "error": str(e)}
+        state = report.get("state")
+        if not config.configured and not config.enabled:
+            state = "absent"
+        payload = dict(report)
+        payload["state"] = state
+        payload["ok"] = True
+        return payload
 
     # -- created-file ledger (`ozagia.core.files`) -------------------------- #
     def _files_root(self) -> Path:

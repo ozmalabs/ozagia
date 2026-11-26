@@ -956,25 +956,55 @@ def _shim(config: OzmaMeshConfig) -> dict[str, Any]:
     }
 
 
-def _wake(config: OzmaMeshConfig) -> dict[str, Any]:
-    scheduled = "scheduled" in config.wake_modes
+def _wake(root: str | Path, config: OzmaMeshConfig) -> dict[str, Any]:
+    from ozagia.core import ozma_bridge as B
+    status = B.read_wake_status(root, config)
+    by_mode = (status.get("approvals") or {}).get("by_mode") or {}
     triggered = "message-triggered" in config.wake_modes
+    scheduled = "scheduled" in config.wake_modes
+    pending = int(status.get("pending_requests") or 0)
+    budget = int(status.get("budget_turns") or 0)
+    used = int(status.get("used_turns") or 0)
     return {
         "passive": "passive" in config.wake_modes,
         "message_triggered": {
             "requested": triggered,
+            "approved": bool(by_mode.get("message-triggered")),
+            "approval_records": bool(by_mode.get("message-triggered")),
+            "budget_turns": budget,
+            "used_turns": used,
+            "pending_requests": pending,
+            "claimable": True,
             "spawnable": False,
-            "reason": ("message-triggered wake needs host approval and a "
-                       "budget; this slice is status-only")
+            "reason": ("a host runner may claim an approved request; this "
+                       "bridge never spawns a process or model turn")
             if triggered else None,
         },
         "scheduled": {
             "requested": scheduled,
-            "approved": scheduled and config.verified_by == "host",
+            # Stage G reported a host-declared mode here.  A stored approval
+            # is still separate; top-level ``approved`` counts only records.
+            "approved": bool(by_mode.get("scheduled")) or (
+                scheduled and config.verified_by == "host"),
+            "approval_records": bool(by_mode.get("scheduled")),
+            "budget_turns": budget,
+            "used_turns": used,
+            "pending_requests": pending,
+            "claimable": True,
             "spawnable": False,
-            "reason": ("scheduled wake needs host approval and a budget; this "
-                       "slice is status-only") if scheduled else None,
+            "reason": ("a host runner may claim an approved request; this "
+                       "bridge never spawns a process or model turn")
+            if scheduled else None,
         },
+        "approved": int(status.get("approved") or 0),
+        "budget_turns": budget,
+        "used_turns": used,
+        "pending_requests": pending,
+        "claimable": True,
+        "spawnable": False,
+        "reason": status.get("reason"),
+        "store_present": bool(status.get("store_present")),
+        "network": False,
     }
 
 
@@ -1016,7 +1046,7 @@ def status(root: str | Path, *, harness: str | None = None,
         "card": mapped["card"],
         "verification": mapped["verification"],
         "wake_modes": mapped["wake_modes"],
-        "wake": _wake(cfg),
+        "wake": _wake(root, cfg),
         "channels": {"count": len(cfg.channels),
                      "items": list(cfg.channels)},
         "subscriptions": {"count": len(cfg.subscriptions),
@@ -1084,6 +1114,12 @@ def check(root: str | Path, *, harness: str | None = None,
     if bridge.get("conflicts"):
         reasons.append("remote claims overlap local leases; conflicts are "
                        "advisory and never block local work")
+    if (bridge.get("blockers") or {}).get("open"):
+        reasons.append("open blocker edges are advisory warnings; they never "
+                       "block a local worktree, commit, merge or lease")
+    if (bridge.get("wake") or {}).get("pending_requests"):
+        reasons.append("wake requests await an explicit host approval; the "
+                       "bridge never spawns a model turn or process")
     return {
         "schema": SCHEMA,
         "section": SECTION,

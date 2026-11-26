@@ -2,7 +2,7 @@
 
 > **Generated file.** Built by `scripts/docs/generate_docs.py` from `src/ozagia/integrations/mcp/server.py`, `src/ozagia/integrations/mcp/graph_surface.py`, `src/ozagia/integrations/mcp/sre.py`, `src/ozagia/research/mcp.py` (ozagia `0.1.5.dev0`). Do not edit by hand: change the source code and regenerate.
 
-96 tools.
+97 tools.
 
 > Built-in tools from `server._TOOLS`, plus the offline SRE/IaC tools (`sre.py`) and `research_fetch`.
 
@@ -360,6 +360,13 @@ One stable reference page for the repository: identity and package metadata, top
 | `format` | string |  | "markdown" | — |
 | `budget_tokens` | integer |  | 6000 | Bound the Markdown response. |
 | `max_modules` | integer |  | 40 | Maximum modules listed. |
+### `dev_ozma_flight`
+
+Read-only declared Ozma flight view for this repository: flight id/source, bounded members (harness/session/key, host-provided agent id, role and workunit derived only from that id, scope, verification, transport, wake modes, state), role/workunit counts, advisory claim/blocker summaries, handoff counts and host-approved wake counts. Metadata only: no message bodies, criteria text, credentials or card files. Conformance remains declared and unverified; there is no send, claim, wake approval, handoff accept, merge or network action.
+
+| parameter | type | required | default | description |
+|---|---|---|---|---|
+| `limit` | integer |  | 32 | Most members to list (at most 64). |
 ### `dev_preflight_plan`
 
 Build a dry-run, scrubbed emulator pre-flight plan; never executes it.

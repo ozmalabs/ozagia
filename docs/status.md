@@ -44,6 +44,7 @@ reported but does not by itself fail the command.
 | `ownership` | `ozagia.core.owners` and the edit/daemon journals | Bounded dirty files with uncommitted journaled edits by a session, liveness and age; only files a session journaled are attributed |
 | `reviews` | `<root>/.ozagia/reviews/*/manifest.json` | Newest deep-review directory, run status, `complete`/`exhaustive`/`truth_assessed` flags, finding and subject counts, bounded subject statuses |
 | `mesh` | `ozagia.core.mesh` under `<root>/.ozagia/mesh/` | Read-only local session-mesh metadata: counts, self, peers, links/roles, leases, delegations and unread. No message body, subject or daemon |
+| `flight` | `ozagia.core.ozma_bridge` under `<root>/.ozagia/mesh/ozma/` | Compact read-only Ozma flight counts: members, roles/workunits from host agent ids only, links/delegations, advisory claim/blocker counts, handoff and wake counts plus declared readiness. No member rows, bodies or credentials |
 | `config` | `ozagia.config` | Resolved config path, adapters, index directories, jobs flag, configured runtime names |
 
 Every section is an envelope:
@@ -60,10 +61,10 @@ Every section is an envelope:
 sections (`workspace`, `resources`, `files`, `runtime`, `daemon`, `doctor` and
 `config`) and a bounded extraction for `integrations`, `capabilities`,
 `reviews`, `jobs`, `admissions`, `providers`, `snapshot`, `sessions`,
-`ownership` and `mesh`. On an unavailable component the envelope still exists
-and `report` is `null`; it is never an empty object. A section that can still
+`ownership`, `mesh` and `flight`. On an unavailable component the envelope
+still exists and `report` is `null`; it is never an empty object. A section that can still
 name what is missing keeps its partial report (daemon, reviews, jobs, providers,
-snapshot, sessions, ownership and mesh).
+snapshot, sessions, ownership, mesh and flight).
 
 `reviews.report` contains `root` (the reviewed repository), `reviews_root`,
 `latest`, `manifest`, `manifest_root`, `age_s` when a manifest was read,
@@ -142,6 +143,15 @@ credentials are not copied. The section reads the same filesystem registry as
 `ozagia mesh status`; it never creates `.ozagia/mesh`, starts a daemon, opens a
 network connection or changes a lease.
 
+`flight.report` contains `flight_id`, `source`, `counts` (members, roles,
+workunits, links, delegations, active claims, claim conflicts, open blockers,
+pending handoffs and pending wake requests), `ready`, `conformance`, `verified`
+and `network`. It is counts only: member rows, message bodies, criteria text,
+credentials and card paths are not copied. The section is `absent` when the
+bridge is neither configured nor enabled; otherwise it reads the same local
+stores as `ozagia mesh ozma flight` and never creates them, opens a socket or
+changes a claim, blocker, handoff or wake record.
+
 ## States
 
 Section states describe whether the section could be read, not whether the
@@ -152,8 +162,8 @@ repository is healthy.
 | `ok` | The component was read completely (for `reviews`, a valid manifest was read) |
 | `degraded` | It was read, but a secondary fact is missing or stale (the graph snapshot, or the snapshot metrics section when its manifest is stale) |
 | `unavailable` | It could not be read; `error` says why |
-| `absent` | It is known not to exist (daemon: nothing listens on the socket; reviews: no review directory or no `deep-*` directory; sessions: no profile directory; ownership: no edit journal; mesh: no mesh state and no `[mesh]` configuration; snapshot: no snapshot file) |
-| `unknown` | It exists or may exist but could not be determined (daemon timeout or bad reply; jobs/providers: failed daemon reply; sessions: unreadable or malformed profile; ownership: unreadable journal; mesh: unreadable or invalid mesh state/configuration; reviews: the newest manifest is missing, unreadable, malformed, ambiguous or outside the reviews directory) |
+| `absent` | It is known not to exist (daemon: nothing listens on the socket; reviews: no review directory or no `deep-*` directory; sessions: no profile directory; ownership: no edit journal; mesh: no mesh state and no `[mesh]` configuration; flight: no `[ozma_mesh]` configuration or enabled bridge; snapshot: no snapshot file) |
+| `unknown` | It exists or may exist but could not be determined (daemon timeout or bad reply; jobs/providers: failed daemon reply; sessions: unreadable or malformed profile; ownership: unreadable journal; mesh: unreadable or invalid mesh state/configuration; flight: unreadable or invalid `[ozma_mesh]` configuration or flight store; reviews: the newest manifest is missing, unreadable, malformed, ambiguous or outside the reviews directory) |
 | `configured` | Project configuration file was loaded |
 | `defaults` | No project configuration file; built-in defaults apply |
 | `invalid` | Project configuration is malformed |

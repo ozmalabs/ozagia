@@ -767,3 +767,24 @@ def test_mesh_mcp_tools_are_read_only_and_metadata_only(server, monkeypatch):
     reply = server.handle(_call("dev_mesh_inbox", {}))
     payload = json.loads(reply["result"]["content"][0]["text"])
     assert payload["ok"] is False and "identity" in payload["error"]
+
+
+def test_ozma_flight_mcp_tool_is_read_only_and_metadata_only(server):
+    root = Path(server.mem.raw_repo_root)
+    names = {tool["name"] for tool in server._tools}
+    assert "dev_ozma_flight" in names
+    assert not ({"dev_ozma_send", "dev_ozma_claim", "dev_ozma_wake",
+                 "dev_ozma_approve", "dev_ozma_handoff_accept"} & names)
+    graph = DevMemoryServer(server.mem, surface="graph")
+    assert "dev_ozma_flight" not in {tool["name"] for tool in graph._tools}
+
+    reply = server.handle(_call("dev_ozma_flight", {"limit": 4}))
+    payload = json.loads(reply["result"]["content"][0]["text"])
+    assert payload["ok"] is True
+    assert payload["state"] == "absent"
+    assert payload["conformance"] == "declared"
+    assert payload["verified"] is False
+    assert payload["network"] is False
+    assert payload["counts"]["members"] == 0
+    assert payload["members"] == []
+    assert not (root / ".ozagia" / "mesh" / "ozma").exists()

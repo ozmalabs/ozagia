@@ -27,6 +27,13 @@
     ozagia mesh delegation revoke DELEGATION_ID [--reason R]
     ozagia mesh delegation list|show [DELEGATION_ID]
     ozagia mesh ozma status|map|check [--json]
+    ozagia mesh ozma flight [--json]
+    ozagia mesh ozma handoff list|show [ID] [--json]
+    ozagia mesh ozma handoff accept|reject|complete ID [--reason R]
+    ozagia mesh ozma block --blocked ID --blocker ID
+    ozagia mesh ozma unblock [--id ID] [--workunit W]
+    ozagia mesh ozma blockers [--json]
+    ozagia mesh ozma wake list|approve|revoke|claim
     ozagia mesh prune (--expired | --delivered-before S) [--apply]
 
 Identity defaults to ``OZAGIA_MESH_HARNESS``/``OZAGIA_MESH_SESSION``.  Every
@@ -317,7 +324,80 @@ def add_parser(sub: Any) -> None:
     ozma_ack = ozma_children.add_parser(
         "ack", help="mark one bridge inbox message read and acked")
     _add_common(ozma_ack)
+    _add_identity(ozma_ack)
     ozma_ack.add_argument("msg_id")
+    ozma_ack_decision = ozma_ack.add_mutually_exclusive_group()
+    ozma_ack_decision.add_argument(
+        "--accepted", action="store_true",
+        help="also queue a typed ack{accepted:true} (requires host/coordinate)")
+    ozma_ack_decision.add_argument(
+        "--rejected", action="store_true",
+        help="also queue a typed ack{accepted:false} (requires host/coordinate)")
+    ozma_ack.add_argument("--reason", default="")
+    ozma_flight = ozma_children.add_parser(
+        "flight", help="read-only flight members, labels and counts")
+    _add_common(ozma_flight)
+    _add_identity(ozma_flight)
+    ozma_flight.add_argument("--limit", type=int, default=64,
+                             help="most members to list (at most 64)")
+    ozma_handoff = ozma_children.add_parser(
+        "handoff", help="handoff lifecycle metadata and acknowledgement")
+    handoff_children = ozma_handoff.add_subparsers(
+        dest="handoff_action", required=True)
+    handoff_list = handoff_children.add_parser("list", help="list handoffs")
+    _add_common(handoff_list)
+    handoff_show = handoff_children.add_parser("show", help="show one handoff")
+    _add_common(handoff_show)
+    handoff_show.add_argument("handoff_id")
+    for name, text in (
+            ("accept", "accept an inbound handoff and queue an ack"),
+            ("reject", "reject an inbound handoff and queue an ack"),
+            ("complete", "mark a handoff complete and queue a handoff")):
+        item = handoff_children.add_parser(name, help=text)
+        _add_common(item)
+        _add_identity(item)
+        item.add_argument("handoff_id")
+        item.add_argument("--reason", default="")
+    ozma_block = ozma_children.add_parser(
+        "block", help="add one advisory blocker edge")
+    _add_common(ozma_block)
+    ozma_block.add_argument("--blocked", required=True, metavar="ID")
+    ozma_block.add_argument("--blocker", required=True, metavar="ID")
+    ozma_block.add_argument("--workunit", default=None, metavar="W")
+    ozma_block.add_argument("--resource", default=None, metavar="R")
+    ozma_unblock = ozma_children.add_parser(
+        "unblock", help="clear advisory blocker edges")
+    _add_common(ozma_unblock)
+    ozma_unblock.add_argument("--id", dest="identifier", default=None,
+                              metavar="ID")
+    ozma_unblock.add_argument("--workunit", default=None, metavar="W")
+    ozma_blockers = ozma_children.add_parser(
+        "blockers", help="list advisory blocker edges")
+    _add_common(ozma_blockers)
+    ozma_wake = ozma_children.add_parser(
+        "wake", help="host-approved wake approvals and requests")
+    wake_children = ozma_wake.add_subparsers(dest="wake_action", required=True)
+    wake_list = wake_children.add_parser("list", help="list approvals and requests")
+    _add_common(wake_list)
+    wake_approve = wake_children.add_parser(
+        "approve", help="write a host wake approval (CLI only)")
+    _add_common(wake_approve)
+    _add_identity(wake_approve)
+    wake_approve.add_argument("--mode", required=True,
+                              choices=("message-triggered", "scheduled"))
+    wake_approve.add_argument("--budget-turns", type=int, required=True,
+                              metavar="N")
+    wake_approve.add_argument("--ttl", type=int, default=3600, metavar="S")
+    wake_approve.add_argument("--agent", default=None, metavar="ID")
+    wake_revoke = wake_children.add_parser(
+        "revoke", help="revoke a host wake approval (CLI only)")
+    _add_common(wake_revoke)
+    _add_identity(wake_revoke)
+    wake_revoke.add_argument("approval_id")
+    wake_claim = wake_children.add_parser(
+        "claim", help="return the next due approved request (never spawns)")
+    _add_common(wake_claim)
+    _add_identity(wake_claim)
     ozma_claims = ozma_children.add_parser(
         "claims", help="list outbound claim refs, remote claims and conflicts")
     _add_common(ozma_claims)
@@ -1049,13 +1129,26 @@ def _run_ozma(root: Path, args: argparse.Namespace, as_json: bool) -> int:
                 print(f"{key}: {value}")
         return 0
     if action == "ack":
-        payload = B.ack_message(root, args.msg_id,
-                                config=O.load_config(root))
+        cfg = O.load_config(root)
+        accepted = None
+        if getattr(args, "accepted", False):
+            accepted = True
+        elif getattr(args, "rejected", False):
+            accepted = False
+        harness = session = None
+        payload = B.ack_message(
+            root, args.msg_id, config=cfg, accepted=accepted,
+            reason=getattr(args, "reason", ""), harness=harness,
+            session=session)
         if as_json:
             _print_json(payload)
         else:
             print(f"ack {payload.get('id')} "
                   f"state={payload.get('state')}")
+            reply = payload.get("reply") or {}
+            if reply:
+                print(f"reply={reply.get('id')} queued={reply.get('queued')} "
+                      f"duplicate={reply.get('duplicate')}")
         return 0
     if action == "claims":
         payload = B.claims(root, config=O.load_config(root))
@@ -1112,6 +1205,195 @@ def _run_ozma(root: Path, args: argparse.Namespace, as_json: bool) -> int:
                   f"resource={payload.get('resource')} advisory=true "
                   f"merge={payload.get('merge')}")
         return 0
+    if action == "flight":
+        payload = B.flight(root, harness=harness, session=session,
+                           limit=getattr(args, "limit", 64))
+        if as_json:
+            _print_json(payload)
+        else:
+            counts = payload.get("counts") or {}
+            print(f"flight={payload.get('flight_id')} "
+                  f"source={payload.get('flight_source')} "
+                  f"state={payload.get('state')} "
+                  f"conformance={payload.get('conformance')} "
+                  f"verified={payload.get('verified')}")
+            print("counts: " + " ".join(
+                f"{key}={value}" for key, value in sorted(counts.items())))
+            print("roles: " + " ".join(
+                f"{key}={value}" for key, value in sorted(
+                    (payload.get("role_counts") or {}).items())))
+            print("workunits: " + " ".join(
+                f"{key}={value}" for key, value in sorted(
+                    (payload.get("workunit_counts") or {}).items())))
+            for item in payload.get("members", ()):
+                print(f"  {item.get('harness')}:{item.get('session')} "
+                      f"agent={item.get('agent_id') or '-'} "
+                      f"role={item.get('role') or '-'} "
+                      f"workunit={item.get('workunit') or '-'} "
+                      f"state={item.get('state') or '-'} "
+                      f"transport={item.get('transport') or '-'} "
+                      f"verification={item.get('verification')}")
+            readiness = payload.get("readiness") or {}
+            print(f"ready={readiness.get('ready')} "
+                  f"network={payload.get('network')}")
+        return 0
+    if action == "handoff":
+        handoff_action = args.handoff_action
+        cfg = O.load_config(root)
+        if handoff_action == "list":
+            payload = B.handoffs(root, config=cfg)
+            if as_json:
+                _print_json(payload)
+            else:
+                for item in payload.get("handoffs", ()):
+                    print(f"{item.get('handoff_id')}  "
+                          f"{item.get('direction')}  "
+                          f"{item.get('state')}  "
+                          f"workunit={item.get('workunit') or '-'} "
+                          f"ack={item.get('ack_message_id') or '-'} "
+                          f"authority_transferred=false")
+                print("counts: " + " ".join(
+                    f"{key}={value}" for key, value in sorted(
+                        (payload.get("counts") or {}).items())))
+            return 0
+        if handoff_action == "show":
+            payload = B.handoff_show(root, args.handoff_id, config=cfg)
+            if as_json:
+                _print_json(payload)
+            else:
+                item = payload.get("handoff") or {}
+                print(f"{item.get('handoff_id')} "
+                      f"{item.get('direction')} {item.get('state')} "
+                      f"sender={item.get('sender') or '-'} "
+                      f"recipient={item.get('recipient') or '-'} "
+                      f"workunit={item.get('workunit') or '-'} "
+                      f"criteria_digest={item.get('criteria_digest') or '-'} "
+                      f"ack={item.get('ack_message_id') or '-'} "
+                      f"authority_transferred=false")
+            return 0
+        harness, session = _coordinate(root, args)
+        payload = B.handoff_respond(
+            root, args.handoff_id, handoff_action, reason=args.reason,
+            harness=harness, session=session, config=cfg)
+        if as_json:
+            _print_json(payload)
+        else:
+            item = payload.get("handoff") or {}
+            print(f"{handoff_action} {item.get('handoff_id')} "
+                  f"state={item.get('state')} "
+                  f"reply={payload.get('reply', {}).get('id')} "
+                  f"authority_transferred=false")
+        return 0
+    if action == "block":
+        cfg = O.load_config(root)
+        payload = B.add_blocker(
+            root, blocked_id=args.blocked, blocker_id=args.blocker,
+            workunit=args.workunit, resource=args.resource,
+            source="cli", config=cfg)
+        if as_json:
+            _print_json(payload)
+        else:
+            item = payload.get("edge") or {}
+            print(f"block {item.get('edge_id')} "
+                  f"{item.get('blocked_id')} <- {item.get('blocker_id')} "
+                  f"workunit={item.get('workunit') or '-'} "
+                  f"advisory=true blocking=false")
+        return 0
+    if action == "unblock":
+        cfg = O.load_config(root)
+        payload = B.clear_blockers(
+            root, identifier=args.identifier, workunit=args.workunit,
+            source="cli", config=cfg)
+        if not payload.get("cleared"):
+            raise M.MeshRefusal("no matching open blocker edge",
+                                code="unknown_blocker")
+        if as_json:
+            _print_json(payload)
+        else:
+            print(f"cleared={payload.get('cleared')} advisory=true")
+        return 0
+    if action == "blockers":
+        payload = B.blockers(root, config=O.load_config(root))
+        if as_json:
+            _print_json(payload)
+        else:
+            for item in payload.get("edges", ()):
+                print(f"{item.get('edge_id')}  {item.get('state')}  "
+                      f"{item.get('blocked_id')} <- {item.get('blocker_id')} "
+                      f"workunit={item.get('workunit') or '-'} "
+                      f"resource={item.get('resource') or '-'} "
+                      f"advisory=true blocking=false")
+            print("counts: " + " ".join(
+                f"{key}={value}" for key, value in sorted(
+                    (payload.get("counts") or {}).items())))
+        return 0
+    if action == "wake":
+        wake_action = args.wake_action
+        cfg = O.load_config(root)
+        if wake_action == "list":
+            payload = B.wake_list(root, config=cfg)
+            if as_json:
+                _print_json(payload)
+            else:
+                for item in payload.get("approvals", ()):
+                    print(f"approval {item.get('approval_id')} "
+                          f"{item.get('mode')} {item.get('state')} "
+                          f"target={item.get('target')} "
+                          f"budget={item.get('used_turns')}/"
+                          f"{item.get('budget_turns')} "
+                          f"expires={item.get('expires_at')}")
+                for item in payload.get("requests", ()):
+                    print(f"request {item.get('request_id')} "
+                          f"{item.get('mode')} {item.get('state')} "
+                          f"target={item.get('target')} "
+                          f"wake_at={item.get('wake_at')}")
+                print("counts: " + " ".join(
+                    f"{key}={value}" for key, value in sorted(
+                        (payload.get("counts") or {}).items())))
+                print(f"claimable={payload.get('claimable')} "
+                      f"spawnable={payload.get('spawnable')} "
+                      f"network={payload.get('network')}")
+            return 0
+        if wake_action == "approve":
+            payload = B.wake_approve(
+                root, mode=args.mode, budget_turns=args.budget_turns,
+                ttl_s=args.ttl, agent_id=args.agent, approved_by="host",
+                source="cli", config=cfg)
+            if as_json:
+                _print_json(payload)
+            else:
+                item = payload.get("approval") or {}
+                print(f"approved {item.get('approval_id')} "
+                      f"{item.get('mode')} budget={item.get('budget_turns')} "
+                      f"expires={item.get('expires_at')} "
+                      f"spawnable={payload.get('spawnable')}")
+            return 0
+        if wake_action == "revoke":
+            payload = B.wake_revoke(root, args.approval_id, source="cli",
+                                    config=cfg)
+            if as_json:
+                _print_json(payload)
+            else:
+                item = payload.get("approval") or {}
+                print(f"revoked {item.get('approval_id')} "
+                      f"state={item.get('state')}")
+            return 0
+        if wake_action == "claim":
+            payload = B.wake_claim(root, config=cfg)
+            if as_json:
+                _print_json(payload)
+            else:
+                request = payload.get("request") or {}
+                approval = payload.get("approval") or {}
+                print(f"claimed {request.get('request_id')} "
+                      f"mode={request.get('mode')} "
+                      f"approval={approval.get('approval_id')} "
+                      f"budget={approval.get('used_turns')}/"
+                      f"{approval.get('budget_turns')} "
+                      f"spawnable={payload.get('spawnable')}")
+                print("note: a host runner may act on the request id; ozagia "
+                      "spawned nothing")
+            return 0
     if action == "sync":
         cfg = O.load_config(root)
         payload = B.sync(root, B.UnavailableShim(), config=cfg)

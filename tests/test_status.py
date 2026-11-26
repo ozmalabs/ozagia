@@ -28,6 +28,7 @@ KEYS = {
     "workspace", "resources", "files", "runtime", "daemon", "jobs",
     "admissions", "providers", "doctor", "integrations", "capabilities",
     "snapshot", "sessions", "ownership", "config", "reviews", "mesh",
+    "flight",
 }
 
 

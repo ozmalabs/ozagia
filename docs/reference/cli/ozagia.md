@@ -2399,7 +2399,7 @@ usage: ozagia mesh delegation show [-h] [--root ROOT] [--json] delegation_id
 
 ```
 usage: ozagia mesh ozma [-h]
-                        {status,map,check,outbox,inbox,read,ack,claims,enqueue,claim,sync} ...
+                        {status,map,check,outbox,inbox,read,ack,flight,handoff,block,unblock,blockers,wake,claims,enqueue,claim,sync} ...
 ```
 
 #### `ozagia mesh ozma status`
@@ -2492,7 +2492,10 @@ usage: ozagia mesh ozma read [-h] [--root ROOT] [--json] msg_id
 #### `ozagia mesh ozma ack`
 
 ```
-usage: ozagia mesh ozma ack [-h] [--root ROOT] [--json] msg_id
+usage: ozagia mesh ozma ack [-h] [--root ROOT] [--json] [--harness HARNESS]
+                            [--session SESSION] [--accepted | --rejected]
+                            [--reason REASON]
+                            msg_id
 ```
 
 | argument | type | values | required | help |
@@ -2503,6 +2506,232 @@ usage: ozagia mesh ozma ack [-h] [--root ROOT] [--json] msg_id
 |---|---|---|---|---|
 | `--root` |  |  |  | repository root |
 | `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--accepted` |  |  |  | also queue a typed ack{accepted:true} (requires host/coordinate) |
+| `--rejected` |  |  |  | also queue a typed ack{accepted:false} (requires host/coordinate) |
+| `--reason` |  |  | `` | — |
+
+#### `ozagia mesh ozma flight`
+
+```
+usage: ozagia mesh ozma flight [-h] [--root ROOT] [--json] [--harness HARNESS]
+                               [--session SESSION] [--limit LIMIT]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--limit` | int |  | 64 | most members to list (at most 64) |
+
+#### `ozagia mesh ozma handoff`
+
+```
+usage: ozagia mesh ozma handoff [-h] {list,show,accept,reject,complete} ...
+```
+
+##### `ozagia mesh ozma handoff list`
+
+```
+usage: ozagia mesh ozma handoff list [-h] [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+##### `ozagia mesh ozma handoff show`
+
+```
+usage: ozagia mesh ozma handoff show [-h] [--root ROOT] [--json] handoff_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `handoff_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+##### `ozagia mesh ozma handoff accept`
+
+```
+usage: ozagia mesh ozma handoff accept [-h] [--root ROOT] [--json]
+                                       [--harness HARNESS] [--session SESSION]
+                                       [--reason REASON]
+                                       handoff_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `handoff_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--reason` |  |  | `` | — |
+
+##### `ozagia mesh ozma handoff reject`
+
+```
+usage: ozagia mesh ozma handoff reject [-h] [--root ROOT] [--json]
+                                       [--harness HARNESS] [--session SESSION]
+                                       [--reason REASON]
+                                       handoff_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `handoff_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--reason` |  |  | `` | — |
+
+##### `ozagia mesh ozma handoff complete`
+
+```
+usage: ozagia mesh ozma handoff complete [-h] [--root ROOT] [--json]
+                                         [--harness HARNESS]
+                                         [--session SESSION] [--reason REASON]
+                                         handoff_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `handoff_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--reason` |  |  | `` | — |
+
+#### `ozagia mesh ozma block`
+
+```
+usage: ozagia mesh ozma block [-h] [--root ROOT] [--json] --blocked ID
+                              --blocker ID [--workunit W] [--resource R]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--blocked` |  |  |  | — |
+| `--blocker` |  |  |  | — |
+| `--workunit` |  |  |  | — |
+| `--resource` |  |  |  | — |
+
+#### `ozagia mesh ozma unblock`
+
+```
+usage: ozagia mesh ozma unblock [-h] [--root ROOT] [--json] [--id ID]
+                                [--workunit W]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--id` |  |  |  | — |
+| `--workunit` |  |  |  | — |
+
+#### `ozagia mesh ozma blockers`
+
+```
+usage: ozagia mesh ozma blockers [-h] [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+#### `ozagia mesh ozma wake`
+
+```
+usage: ozagia mesh ozma wake [-h] {list,approve,revoke,claim} ...
+```
+
+##### `ozagia mesh ozma wake list`
+
+```
+usage: ozagia mesh ozma wake list [-h] [--root ROOT] [--json]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+
+##### `ozagia mesh ozma wake approve`
+
+```
+usage: ozagia mesh ozma wake approve [-h] [--root ROOT] [--json]
+                                     [--harness HARNESS] [--session SESSION]
+                                     --mode {message-triggered,scheduled}
+                                     --budget-turns N [--ttl S] [--agent ID]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+| `--mode` |  |  |  | — |
+| `--budget-turns` | int |  |  | — |
+| `--ttl` | int |  | 3600 | — |
+| `--agent` |  |  |  | — |
+
+##### `ozagia mesh ozma wake revoke`
+
+```
+usage: ozagia mesh ozma wake revoke [-h] [--root ROOT] [--json]
+                                    [--harness HARNESS] [--session SESSION]
+                                    approval_id
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `approval_id` |  |  | yes | — |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
+
+##### `ozagia mesh ozma wake claim`
+
+```
+usage: ozagia mesh ozma wake claim [-h] [--root ROOT] [--json]
+                                   [--harness HARNESS] [--session SESSION]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--json` |  |  |  | print JSON |
+| `--harness` |  |  |  | harness name (default: OZAGIA_MESH_HARNESS) |
+| `--session` |  |  |  | session id (default: OZAGIA_MESH_SESSION) |
 
 #### `ozagia mesh ozma claims`
 

@@ -1406,6 +1406,32 @@ def _mesh_status(root: Path) -> dict[str, Any]:
     return _section("ok", report)
 
 
+def _flight_status(root: Path) -> dict[str, Any]:
+    """Compact, read-only Ozma flight counts; creates no bridge state."""
+    try:
+        from ozagia.core import ozma_bridge as bridge
+        from ozagia.core import ozma_mesh as ozma
+        config = ozma.load_config(root)
+    except Exception as exc:  # noqa: BLE001 - a broken bridge is unknown
+        return _section("unknown", None, error=str(exc))
+    if not config.configured and not config.enabled:
+        return _section("absent", None)
+    try:
+        report = bridge.flight(root, config=config)
+    except Exception as exc:  # noqa: BLE001 - never fail the whole snapshot
+        return _section("unknown", None, error=str(exc))
+    readiness = report.get("readiness") or {}
+    return _section("ok", {
+        "flight_id": report.get("flight_id"),
+        "source": report.get("flight_source"),
+        "counts": dict(report.get("counts") or {}),
+        "ready": bool(readiness.get("ready")),
+        "conformance": report.get("conformance"),
+        "verified": False,
+        "network": False,
+    })
+
+
 def status(
     root: str | Path,
     *,
@@ -1453,6 +1479,7 @@ def status(
     ownership = _ownership_status(root_path, degraded)
     reviews = _reviews_status(root_path, degraded)
     mesh = _mesh_status(root_path)
+    flight = _flight_status(root_path)
 
     return {
         "schema": SCHEMA,
@@ -1477,6 +1504,7 @@ def status(
         "ownership": ownership,
         "reviews": reviews,
         "mesh": mesh,
+        "flight": flight,
         "config": config,
     }
 
@@ -1814,6 +1842,23 @@ def format_status(report: Mapping[str, Any]) -> str:
         lines.append("mesh: off (no state or [mesh] configuration)")
     else:
         lines.append(f"mesh: {mesh.get('state')} ({_text(mesh.get('error'))})")
+
+    flight = report.get("flight") or {}
+    flight_report = flight.get("report")
+    if isinstance(flight_report, Mapping):
+        counts = flight_report.get("counts") or {}
+        lines.append(
+            f"flight: {_text(flight_report.get('flight_id'))} "
+            f"members={counts.get('members', 0)} "
+            f"roles={counts.get('roles', 0)} "
+            f"workunits={counts.get('workunits', 0)} "
+            f"handoffs_pending={counts.get('handoffs_pending', 0)} "
+            f"blockers_open={counts.get('blockers_open', 0)} "
+            f"wake_pending={counts.get('wake_pending', 0)} "
+            f"ready={bool(flight_report.get('ready'))}")
+    elif flight.get("state") not in {None, "absent"}:
+        lines.append(f"flight: {flight.get('state')} "
+                     f"({_text(flight.get('error'))})")
 
     config = report.get("config") or {}
     config_path_text = config.get("path") or "no configuration file"

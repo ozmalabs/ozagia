@@ -380,6 +380,7 @@ _DOCS = {
     "eval_retrieval": "doc:docs/eval_retrieval.md",
     "temp": "doc:docs/temp.md",
     "mesh": "doc:docs/session_mesh.md",
+    "ozma": "doc:docs/ozma_mesh.md",
     "assets": "doc:docs/assets.md",
     "install": "doc:docs/install.md",
 }
@@ -456,6 +457,9 @@ _TESTS = {
     "mesh_model": "test:tests/test_mesh_model.py",
     "daemon_mesh": "test:tests/test_daemon_mesh.py",
     "daemon_mesh_supervision": "test:tests/test_daemon_mesh_supervision.py",
+    "ozma_bridge": "test:tests/test_ozma_bridge.py",
+    "ozma_mesh": "test:tests/test_ozma_mesh.py",
+    "ozma_flight": "test:tests/test_ozma_flights.py",
     "assets": "test:tests/test_assets.py",
     "assets_discovery": "test:tests/test_assets_discovery.py",
     "assets_cli": "test:tests/test_assets_cli.py",
@@ -1536,6 +1540,38 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         docs=_docs("temp"),
     ),
     _def(
+        id="cap:mesh.ozma",
+        domain="actions",
+        purpose=("Read-only declared Ozma flight view: identity-mapped members, "
+                 "roles/workunits derived only from host agent ids, advisory "
+                 "claims and blocker edges, handoff lifecycle counts and "
+                 "host-approved wake counts."),
+        owner="ozagia.core.ozma_bridge",
+        side_effect="read",
+        exposure=["mcp"],
+        impl=["impl:ozagia.core.ozma_bridge.flight",
+              "impl:ozagia.core.ozma_bridge.read_status",
+              "impl:ozagia.core.ozma_bridge.handoffs",
+              "impl:ozagia.core.ozma_bridge.blockers",
+              "impl:ozagia.core.ozma_bridge.wake_list"],
+        surfaces=["mcp:tool:dev_ozma_flight"],
+        prerequisites=["a repository root",
+                       "optional [ozma_mesh] configuration and mapping records"],
+        limits=["the bridge envelope and mapping are declared, not "
+                "upstream-verified; conformance stays declared",
+                "metadata only: no message bodies, criteria text, credentials "
+                "or card-file paths",
+                "roles and workunits come only from a host-provided "
+                "agent:<role>[:<workunit>] id; no leader is elected",
+                "claims, blockers and wake are advisory; they never authorize "
+                "a merge or spawn a model turn",
+                "no send, claim, wake approval, handoff accept/complete or "
+                "merge action; no socket and no state creation"],
+        authorization="read-only; MCP exposes no Ozma write, approve or claim tool",
+        tests=_tests("ozma_flight", "ozma_bridge", "ozma_mesh"),
+        docs=_docs("ozma"),
+    ),
+    _def(
         id="cap:mesh.registry",
         domain="actions",
         purpose=("Register local sessions, exchange bounded redacted messages, "
@@ -1801,7 +1837,7 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
                   "status:config", "status:reviews", "status:integrations",
                   "status:capabilities", "status:jobs", "status:admissions",
                   "status:providers", "status:snapshot", "status:sessions",
-                  "status:ownership", "status:mesh"],
+                  "status:ownership", "status:mesh", "status:flight"],
         prerequisites=["the repository root"],
         limits=["absence and unknown are distinct; no service is started"],
         authorization=_READ,
