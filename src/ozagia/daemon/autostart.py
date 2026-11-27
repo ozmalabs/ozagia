@@ -142,9 +142,20 @@ def ensure(root: str | Path, *, wait_s: float = DEFAULT_WAIT_S,
     root_p = Path(root).resolve()
     sock_p = Path(sock) if sock else protocol.socket_path(root_p)
     deadline = time.monotonic() + max(wait_s, 0.0)
+
+    def existing_daemon(reply: dict[str, Any] | None) -> dict[str, Any] | None:
+        if reply is None:
+            return None
+        if reply.get("root") != str(root_p):
+            return {"ok": False, "started": False, "sock": str(sock_p),
+                    "reason": "daemon on socket belongs to a different root"}
+        return {"ok": True, "started": False, "sock": str(sock_p),
+                "pid": reply.get("pid")}
+
     reply = ping(sock_p)
-    if reply is not None:
-        return {"ok": True, "started": False, "sock": str(sock_p), "pid": reply.get("pid")}
+    result = existing_daemon(reply)
+    if result is not None:
+        return result
     lock_p = lock_path(root_p, sock_p)
     log_p = state_path(root_p, LOG_NAME)
     lock_p.parent.mkdir(parents=True, exist_ok=True)
@@ -155,16 +166,18 @@ def ensure(root: str | Path, *, wait_s: float = DEFAULT_WAIT_S,
             # A daemon started here holds the lock: it is loading or running.
             reply = ping(sock_p)
             if reply is not None:
-                return {"ok": True, "started": False, "sock": str(sock_p),
-                        "pid": reply.get("pid")}
+                result = existing_daemon(reply)
+                assert result is not None
+                return result
             if time.monotonic() >= deadline:
                 return {"ok": False, "started": False, "sock": str(sock_p),
                         "reason": "another daemon is starting"}
             time.sleep(POLL_S)
         reply = ping(sock_p)
         if reply is not None:
-            return {"ok": True, "started": False, "sock": str(sock_p),
-                    "pid": reply.get("pid")}
+            result = existing_daemon(reply)
+            assert result is not None
+            return result
         cmd = [python, "-m", "ozagia.daemon", "serve", "--root", str(root_p),
                "--idle-timeout", f"{max(idle_timeout_s, 0.0):g}", "--lock-fd", str(fd)]
         if sock:
@@ -179,6 +192,10 @@ def ensure(root: str | Path, *, wait_s: float = DEFAULT_WAIT_S,
         # The child keeps its copy of the locked descriptor.
         os.close(fd)
     reply = _wait_ping(sock_p, deadline, proc)
+    if reply is not None and reply.get("root") != str(root_p):
+        return {"ok": False, "started": True, "sock": str(sock_p),
+                "pid": proc.pid,
+                "reason": "daemon on socket belongs to a different root"}
     if reply is not None:
         return {"ok": True, "started": True, "sock": str(sock_p), "pid": reply.get("pid")}
     code = proc.poll()

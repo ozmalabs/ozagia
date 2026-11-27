@@ -60,6 +60,7 @@ LOGGER = logging.getLogger("ozagia.engine_http")
 PROTOCOL = "ozagia.graph_engine.http/1"
 GRAPH_PROTOCOL = "ozagia.graph_engine/2"
 TOKEN_ENV = "OZAGIA_ENGINE_TOKEN"
+READINESS_SCHEMA = "ozagia.engine.readiness/1"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_BODY_BYTES = 64 * 1024
@@ -638,7 +639,8 @@ def serve(root: str | Path, *, host: str = DEFAULT_HOST,
           port: int = DEFAULT_PORT, token: str | None = None,
           allow_remote: bool = False,
           auto_known: bool = True,
-          max_concurrent: int = MAX_CONCURRENT_REQUESTS) -> None:
+          max_concurrent: int = MAX_CONCURRENT_REQUESTS,
+          ready_json: bool = False) -> None:
     """Serve until SIGINT/SIGTERM or ``shutdown``; close server and engine."""
     server = create_server(root, host=host, port=port, token=token,
                            allow_remote=allow_remote,
@@ -646,19 +648,29 @@ def serve(root: str | Path, *, host: str = DEFAULT_HOST,
                            max_concurrent=max_concurrent)
     previous = _install_signal_handlers(server)
     try:
-        print(f"ozagia engine http (read-only): {server.base_url}{GRAPH_PATH}",
-              flush=True)
-        print(f"Listening on {server.base_url} (port {server.port}).", flush=True)
-        print("Bearer token required. The token is read from "
-              f"{TOKEN_ENV} or {token_path(server.root)}; its value is never "
-              "printed.", flush=True)
-        print(f"Limits: {MAX_BODY_BYTES} byte body, {max_concurrent} concurrent "
-              "requests.", flush=True)
+        if ready_json:
+            print(json.dumps({
+                "schema": READINESS_SCHEMA,
+                "event": "ready",
+                "protocol": PROTOCOL,
+                "pid": os.getpid(),
+                "host": server.display_host,
+                "port": server.port,
+            }, sort_keys=True, separators=(",", ":")), flush=True)
+        else:
+            print(f"ozagia engine http (read-only): {server.base_url}{GRAPH_PATH}",
+                  flush=True)
+            print(f"Listening on {server.base_url} (port {server.port}).", flush=True)
+            print("Bearer token required. The token is read from "
+                  f"{TOKEN_ENV} or {token_path(server.root)}; its value is never "
+                  "printed.", flush=True)
+            print(f"Limits: {MAX_BODY_BYTES} byte body, {max_concurrent} concurrent "
+                  "requests.", flush=True)
         if server.remote:
             print("WARNING: a non-loopback host is bound. HTTP is unencrypted; "
                   "TLS and the network/auth perimeter are the caller's "
                   "responsibility.", file=sys.stderr, flush=True)
-        else:
+        elif not ready_json:
             print("Binding: loopback only.", flush=True)
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
@@ -693,6 +705,9 @@ def add_parser(sub: Any) -> None:
                         help="return full find/outline/context rows when a "
                              "request omits known (default: remember hashes in "
                              "the session and return u handles)")
+    server.add_argument("--ready-json", action="store_true",
+                        help="print one versioned JSON readiness record after "
+                             "binding; omit human startup lines")
 
     token = children.add_parser(
         "token", help="create or repair <state>/engine/token (mode 0600)")
@@ -721,7 +736,8 @@ def run(args: argparse.Namespace) -> int:
                 return 2
             serve(root, host=args.host, port=args.port,
                   allow_remote=args.allow_remote,
-                  auto_known=not getattr(args, "no_auto_known", False))
+                  auto_known=not getattr(args, "no_auto_known", False),
+                  ready_json=getattr(args, "ready_json", False))
             return 0
     except EngineHTTPError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -746,6 +762,7 @@ def main(argv: list[str] | None = None) -> int:
     server.add_argument("--port", type=int, default=DEFAULT_PORT)
     server.add_argument("--allow-remote", action="store_true")
     server.add_argument("--no-auto-known", action="store_true")
+    server.add_argument("--ready-json", action="store_true")
     token = children.add_parser("token", help="create or repair <state>/engine/token")
     token.add_argument("--root", default=None)
     return run(parser.parse_args(argv))
@@ -754,7 +771,7 @@ def main(argv: list[str] | None = None) -> int:
 __all__ = [
     "CONTEXT_PATH", "DEFAULT_HOST", "DEFAULT_PORT", "EngineHTTPError",
     "EngineHTTPServer", "GRAPH_PATH", "HEALTH_PATH", "MAX_BODY_BYTES",
-    "MAX_CONCURRENT_REQUESTS", "PROTOCOL", "TOKEN_ENV", "TokenFile",
+    "MAX_CONCURRENT_REQUESTS", "PROTOCOL", "READINESS_SCHEMA", "TOKEN_ENV", "TokenFile",
     "add_parser", "create_server", "ensure_token_file", "load_engine", "main",
     "resolve_token", "run", "serve", "token_fingerprint", "token_path",
 ]

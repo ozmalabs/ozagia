@@ -39,6 +39,24 @@ Serve the existing snapshot (the command never builds or refreshes it):
 ozagia engine serve --root /path/to/repo --port 8765
 ```
 
+For a host that starts and owns the server process, `--ready-json` replaces the
+human startup lines with one JSON readiness record after the snapshot has
+loaded and the socket has bound:
+
+```bash
+ozagia engine serve --root /path/to/repo --port 0 --ready-json
+# {"event":"ready","host":"127.0.0.1","pid":12345,"port":43210,
+#  "protocol":"ozagia.graph_engine.http/1",
+#  "schema":"ozagia.engine.readiness/1"}
+```
+
+The record reports only the selected host/port, process id, and protocol
+versions. It contains no repository path, token, or graph data. Errors continue
+to use stderr and a non-zero exit status. Without `--ready-json`, the existing
+human-readable startup output is unchanged. The process owner should terminate
+the child with SIGINT or SIGTERM; the server then closes its engine and
+sessions.
+
 The default bind is `127.0.0.1:8765`. A non-loopback bind is refused unless
 `--allow-remote` is passed; HTTP has no TLS and the printed warning makes the
 caller responsible for the network/auth perimeter. No network exposure happens

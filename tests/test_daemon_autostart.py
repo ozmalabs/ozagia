@@ -78,6 +78,66 @@ def test_ensure_starts_once_then_reuses(repo):
     assert "ready" in (repo / ".ozagia" / autostart.LOG_NAME).read_text()
 
 
+def test_ensure_refuses_socket_bound_to_another_root(repo, tmp_path, monkeypatch):
+    other = (tmp_path / "other").resolve()
+    monkeypatch.setattr(autostart, "ping", lambda sock, timeout=0.5: {
+        "ok": True, "version": 1, "root": str(other), "pid": 123})
+
+    def unexpected_start(*args, **kwargs):
+        raise AssertionError("must not start a daemon on a socket owned by another root")
+
+    monkeypatch.setattr(autostart.subprocess, "Popen", unexpected_start)
+    result = autostart.ensure(repo, sock=tmp_path / "shared.sock")
+    assert result == {
+        "ok": False,
+        "started": False,
+        "sock": str(tmp_path / "shared.sock"),
+        "reason": "daemon on socket belongs to a different root",
+    }
+
+
+@pytest.mark.parametrize(
+    ("phase", "lock_acquired", "pings", "started"),
+    [
+        ("while another daemon holds the lock", False, [None, "other"], False),
+        ("after acquiring the lock", True, [None, "other"], False),
+        ("during startup readiness", True, [None, None, "other"], True),
+    ],
+)
+def test_ensure_rejects_cross_root_daemon_at_each_race_check(
+    repo, tmp_path, monkeypatch, phase, lock_acquired, pings, started
+):
+    other = (tmp_path / "other").resolve()
+    replies = iter(
+        None if item is None else {
+            "ok": True, "version": 1, "root": str(other), "pid": 123
+        }
+        for item in pings
+    )
+    monkeypatch.setattr(autostart, "ping", lambda *a, **k: next(replies, None))
+    monkeypatch.setattr(autostart, "_try_lock", lambda fd: lock_acquired)
+
+    class Child:
+        pid = 456
+
+        @staticmethod
+        def poll():
+            return None
+
+    if phase == "during startup readiness":
+        monkeypatch.setattr(autostart.subprocess, "Popen", lambda *a, **k: Child())
+    else:
+        monkeypatch.setattr(
+            autostart.subprocess, "Popen",
+            lambda *a, **k: pytest.fail(f"unexpected daemon start: {phase}"),
+        )
+
+    result = autostart.ensure(repo, wait_s=1, sock=tmp_path / "shared.sock")
+    assert result["ok"] is False
+    assert result["started"] is started
+    assert result["reason"] == "daemon on socket belongs to a different root"
+
+
 def test_concurrent_ensure_starts_one_daemon(repo):
     cmd = [sys.executable, "-m", "ozagia.daemon", "ensure", "--root", str(repo),
            "--wait", str(WAIT_S)]

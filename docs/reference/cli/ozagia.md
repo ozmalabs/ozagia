@@ -1138,7 +1138,7 @@ usage: ozagia engine [-h] {serve,token} ...
 
 ```
 usage: ozagia engine serve [-h] [--root ROOT] [--host HOST] [--port PORT]
-                           [--allow-remote] [--no-auto-known]
+                           [--allow-remote] [--no-auto-known] [--ready-json]
 ```
 
 | option | type | values | default | help |
@@ -1149,6 +1149,7 @@ usage: ozagia engine serve [-h] [--root ROOT] [--host HOST] [--port PORT]
 | `--allow-remote` |  |  |  | allow a non-loopback bind; HTTP has no TLS and the caller owns the network/auth perimeter |
 | `--no-auto-known` |  |  |  | return full find/outline/context rows when a request omits known (default: remember hashes in the session and return u handles) |
 
+| `--ready-json` |  |  |  | print one versioned JSON readiness record after binding; omit human startup lines |
 ### `ozagia engine token`
 
 ```

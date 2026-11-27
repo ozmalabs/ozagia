@@ -505,17 +505,22 @@ def test_owned_engine_and_server_close_cleanly(repo: Path,
     assert engine.spec_worker is None
 
 
+@pytest.mark.parametrize("ready_json", [False, True])
 def test_cli_serve_port_zero_prints_the_chosen_port_and_stops_on_sigterm(
-        repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        repo: Path, monkeypatch: pytest.MonkeyPatch,
+        ready_json: bool) -> None:
     build_index(repo, state_path(repo, "graph.json"), include_docs="features",
                 include_git=False)
     env = os.environ.copy()
     env[engine_http.TOKEN_ENV] = TOKEN
     env["OZAGIA_ENGINE_SPEC"] = "0"
     env.pop("OZAGIA_STATE_DIR", None)
+    command = [sys.executable, "-m", "ozagia", "engine", "serve",
+               "--root", str(repo), "--port", "0"]
+    if ready_json:
+        command.append("--ready-json")
     proc = subprocess.Popen(
-        [sys.executable, "-m", "ozagia", "engine", "serve",
-         "--root", str(repo), "--port", "0"],
+        command,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
     try:
         lines: list[str] = []
@@ -531,7 +536,23 @@ def test_cli_serve_port_zero_prints_the_chosen_port_and_stops_on_sigterm(
             if not line:
                 break
             lines.append(line)
-            if "Listening on http://127.0.0.1:" in line:
+            if ready_json:
+                try:
+                    readiness = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if readiness.get("event") == "ready":
+                    assert readiness == {
+                        "schema": engine_http.READINESS_SCHEMA,
+                        "event": "ready",
+                        "protocol": engine_http.PROTOCOL,
+                        "pid": proc.pid,
+                        "host": "127.0.0.1",
+                        "port": readiness["port"],
+                    }
+                    port = readiness["port"]
+                    break
+            elif "Listening on http://127.0.0.1:" in line:
                 port = int(line.rsplit(":", 1)[1].split()[0])
                 break
         assert port is not None, "".join(lines)
@@ -545,7 +566,12 @@ def test_cli_serve_port_zero_prints_the_chosen_port_and_stops_on_sigterm(
         proc.wait(timeout=10)
         assert proc.returncode == 0
         remainder = proc.stdout.read() + proc.stderr.read()
-        assert TOKEN not in "".join(lines) + remainder
+        combined = "".join(lines) + remainder
+        assert TOKEN not in combined
+        if ready_json:
+            assert str(repo) not in combined
+            assert len(lines) == 1
+            assert json.loads(lines[0])["port"] == port
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -558,5 +584,18 @@ def test_cli_registers_engine_serve_and_token() -> None:
     assert serve.command == "engine" and serve.action == "serve"
     assert serve.port == 0 and serve.host == "127.0.0.1"
     assert serve.allow_remote is False
+    assert serve.ready_json is False
+    ready = parser.parse_args(["engine", "serve", "--port", "0", "--ready-json"])
+    assert ready.ready_json is True
     token = parser.parse_args(["engine", "token", "--root", "/tmp/x"])
     assert token.command == "engine" and token.action == "token"
+
+
+def test_standalone_cli_passes_ready_json_option(tmp_path: Path,
+                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(engine_http, "serve", lambda *args, **kwargs: calls.append(kwargs))
+    assert engine_http.main([
+        "serve", "--root", str(tmp_path), "--port", "0", "--ready-json"
+    ]) == 0
+    assert calls and calls[0]["ready_json"] is True
