@@ -630,21 +630,33 @@ _TOOLS.extend([
     {
         "name": "federation_search",
         "description": (
-            "Read-only lexical search over discovered or explicitly selected "
-            "repository snapshots. Designated references may be fetched and "
-            "fast-forwarded over Git; set no_sync to opt out. Results retain "
-            "provenance; no index is refreshed. Set family_boost true to "
-            "prefer hits from members sharing a declared anchor family; it is "
-            "opt-in and defaults to false."),
+            "Read-only search over discovered or explicitly selected "
+            "repository members. The default graph mode searches existing "
+            "snapshots; code mode is opt-in and searches current member source, "
+            "writes only its cache outside member checkouts, does not refresh "
+            "indexes, and is relevance-ranked only. Designated references may "
+            "be fetched and fast-forwarded over Git; set no_sync to opt out. "
+            "Results retain provenance. In graph mode, set family_boost true "
+            "to prefer hits from members sharing a declared anchor family; it "
+            "is opt-in and defaults to false. Code mode rejects family_boost."),
         "inputSchema": _schema({
             "query": {"type": "string"},
             "roots": {"type": "array", "items": {"type": "string"},
                       "description": "Optional explicit member roots."},
             "limit": {"type": "integer", "default": 20},
+            "mode": {
+                "type": "string", "enum": ["graph", "code"],
+                "default": "graph",
+                "description": (
+                    "graph reads member snapshots; code reads current member "
+                    "source and caches outside member checkouts (opt-in, "
+                    "relevance-only)."),
+            },
             "family_boost": {
                 "type": "boolean", "default": False,
-                "description": ("Prefer hits from members sharing a declared "
-                                "anchor family (opt-in; default off)."),
+                "description": ("Graph mode only: prefer hits from members "
+                                "sharing a declared anchor family (opt-in; "
+                                "default off). Code mode rejects true."),
             },
             "no_sync": {"type": "boolean", "default": False},
         }, ["query"]),
@@ -1720,12 +1732,21 @@ class DevMemoryServer:
 
     def _federation_search(self, a: dict[str, Any]) -> Any:
         from ozagia.core import federation as F
+        mode = a.get("mode", "graph")
+        if mode == "code" and a.get("family_boost"):
+            return {"ok": False, "mode": "code",
+                    "error": "family_boost is only supported in graph mode"}
         context = F.without_reference_sync() if a.get("no_sync") else nullcontext()
         with context:
-            return self._federation_call("search", str(a["query"]),
-                                         roots=a.get("roots"),
-                                         limit=a.get("limit", 20),
-                                         family_boost=a.get("family_boost", False))
+            operation = "code_search" if mode == "code" else "search"
+            if operation == "code_search":
+                return self._federation_call(
+                    operation, str(a["query"]), roots=a.get("roots"),
+                    limit=a.get("limit", 20))
+            return self._federation_call(
+                operation, str(a["query"]), roots=a.get("roots"),
+                limit=a.get("limit", 20),
+                family_boost=a.get("family_boost", False))
 
     def _federation_node(self, a: dict[str, Any]) -> Any:
         from ozagia.core import federation as F

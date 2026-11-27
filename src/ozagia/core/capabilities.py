@@ -431,6 +431,7 @@ _TESTS = {
     "status": "test:tests/test_status.py",
     "settings": "test:tests/test_settings.py",
     "federation": "test:tests/test_federation.py",
+    "federation_code_search": "test:tests/test_federation_code_search.py",
     "federation_surface": "test:tests/test_federation_surface.py",
     "repo_relations": "test:tests/test_repo_relations.py",
     "api_relationships": "test:tests/test_api_relationships.py",
@@ -1992,17 +1993,28 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
     _def(
         id="cap:federation.search",
         domain="federation",
-        purpose="Search selected members for graph nodes.",
+        purpose=("Search selected members' graph snapshots, or opt in to search "
+                 "their current source."),
         owner="ozagia.core.federation",
         side_effect="read",
         exposure=["mcp"],
-        impl=["impl:ozagia.core.federation.search"],
+        impl=["impl:ozagia.core.federation.search",
+              "impl:ozagia.core.federation.code_search",
+              "impl:ozagia.core.federation_code.code_search",
+              "impl:ozagia.core.search.code_search"],
         surfaces=["mcp:tool:federation_search"],
         prerequisites=["indexed linked repositories"],
         limits=["limit bounds the hits; members are read-only",
-                "family_boost is opt-in and defaults off"],
+                "graph-mode family_boost is opt-in and defaults off",
+                "code mode is relevance-ranked only and has no family boost",
+                "code mode reads current member source and permits no member "
+                "write; its cache stays under the anchor state directory or a "
+                "temporary fallback, never another member",
+                "code mode does not refresh member indexes or import target "
+                "code"],
         authorization=_READ,
-        tests=_tests("federation_surface", "family_ranking"),
+        tests=_tests("federation_code_search", "federation_surface",
+                     "family_ranking"),
         docs=_docs("federation"),
     ),
     _def(

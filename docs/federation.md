@@ -151,15 +151,61 @@ name-based matches.
 The CLI prints JSON results. `--json` is accepted for scripting clarity and
 prints the same complete JSON representation.
 
+### Federated code search
+
+Graph search reads snapshots. The separate, opt-in code arm reads the current
+source tree of each existing member checkout:
+
+```sh
+ozagia federation code-search "shared cache eviction" --root ~/work/service-a --limit 10
+```
+
+The same operation is `federation.code_search(root, query, roots=None,
+limit=20, include_snippet=False, cache_dir=None)` and the
+MCP `federation_search` tool with `mode: "code"`; `mode` defaults to `"graph"`,
+so existing callers keep the snapshot-only behaviour. The graph and code arms
+resolve members with the same discovery, explicit-root and freshness rules and
+return the same qualified-key prefix (`<checkout-id>::file:<member-relative
+path>`).
+
+Code search reads member source read-only. It does not refresh a member index,
+import target code, run adapters, or write into a member checkout. Its tag and
+term caches default to `<anchor state>/federation-search/`, with one stable file
+per member keyed by alias and a hash of the member root path. If that directory
+would fall inside another member or is not writable, a temporary directory is
+used and reported. Cache files are never placed under a non-anchor member or
+its `.ozagia`.
+
+Each member contributes at most 50 files (or the requested global limit when it
+is smaller). Per-member scores are normalized by that member's best score, then
+merged and sorted by rank score, member id and path. Code mode is
+relevance-ranked only; it has no family boost. Missing or unreadable member
+roots are reported and skipped rather than failing the whole query. Snippets are
+opt-in and bounded.
+
+Current source is not evidence that a member snapshot is fresh. Every report
+carries member `state`/`snapshot` fields separately from success at reading
+source, and notes that indexes were not refreshed. On the curated Bigville
+tasks the code arm reached 62.5% hit@1/3/5 versus 0% hit@5 for snapshot-only
+graph search. An experimental local `+0.15` family arm was rejected and removed:
+it did not improve any family task and pushed the rankable out-of-family
+control out of the top 20. Graph-mode family ranking remains unchanged and
+opt-in. See `docs/results/family_retrieval_code_2026-11-27.md`.
+
 ## MCP tools
 
 The tools `federation_status`, `federation_search`, `federation_node`, and
 `federation_check` use the server workspace as their anchor. Each accepts an
 optional `roots` array to select explicit member roots and a `no_sync` boolean
-to opt out of updating designated references. They are available on both the
-full and graph tool surfaces. They do not refresh indexes or invoke project
-adapters. Automatic updates may access the network and change the clean,
-explicitly designated Git checkouts as described above.
+to opt out of updating designated references. `federation_search` also accepts
+`mode: "graph" | "code"` (default `"graph"`); code mode reads current member
+source and caches outside member checkouts as described above. Code mode is
+relevance-ranked only: `family_boost` remains a graph-mode option and a code
+request with `family_boost=true` returns a structured error instead of silently
+ignoring it. They are available on both the full and graph tool surfaces. They
+do not refresh indexes or invoke project adapters. Automatic updates may access
+the network and change the clean, explicitly designated Git checkouts as
+described above.
 
 `federation check` and `federation_check` run offline static checks for
 declared API relationships, code-to-infrastructure links, declared package
@@ -426,7 +472,7 @@ entries are reported and omitted; valid entries are kept.
 
 ### Family-aware retrieval
 
-Federated search can prefer hits from members that share a declared family
+Federated graph search can prefer hits from members that share a declared family
 with the anchor, but only when the caller opts in:
 
 ```python
@@ -434,21 +480,23 @@ result = federation.search(root, "shared cache", family_boost=True)
 ```
 
 `family_boost` defaults to `False`, and the default ordering is exactly the
-lexical baseline. The flag is exposed on the library search API, the federation
-CLI (`ozagia federation search QUERY --family-boost`) and the `federation_search`
-MCP tool; every surface keeps it off unless the caller sets it. When enabled,
-the anchor is the first selected member; hits from a member in one of the
-anchor's families gain an additive `0.15` rank boost, capped at `1.0`. The
-original lexical `score` is retained and `rank_score` carries the boosted value.
-Non-family hits remain visible and are only re-ranked, never filtered.
+lexical baseline. The flag is exposed on the graph library search API, the
+federation CLI (`ozagia federation search QUERY --family-boost`) and the
+`federation_search` MCP tool in graph mode; every surface keeps it off unless
+the caller sets it. Code mode is relevance-ranked only and has no family boost.
+When enabled, the anchor is the first selected member; hits from a member in one
+of the anchor's families gain an additive `0.15` rank boost, capped at `1.0`.
+The original lexical `score` is retained and `rank_score` carries the boosted
+value. Non-family hits remain visible and are only re-ranked, never filtered.
 Rank-score ties prefer family matches, then the baseline member-id/key order, so
 repeated searches are deterministic.
 
-Each hit reports `family_match` and its declared `families`. The result carries
-`family_boost` and a `families` section with `state` (`disabled`, `absent`,
-`ok`, `partial` or `invalid`), `by_member`, the declared records and normalized
-`errors`. Missing or invalid declarations do not fail the search; they leave
-the ranking unchanged and are reported.
+Each graph hit reports `family_match` and its declared `families`. The result
+carries `family_boost` and a `families` section with `state` (`disabled`,
+`absent`, `ok`, `partial` or `invalid`), `by_member`, the declared records and
+normalized `errors`. Missing or invalid declarations do not fail the search;
+they leave the ranking unchanged and are reported. Code-mode results carry none
+of these family fields.
 
 The paired fixture evaluation in `evaluation/family_retrieval/` moves four
 constructed family answers from rank 2 to rank 1 while a control query is
@@ -459,11 +507,15 @@ control (`docs/results/family_retrieval_real_2026-11-27.md`). A replay of the
 curated Bigville retrieval tasks found most expected files outside the
 federated lexical top 20 and no meaningful family gain
 (`docs/results/family_retrieval_tasks_2026-11-27.md`); that task set is not a
-suitable family benchmark. These are mechanism and robustness checks, not
-evidence of general retrieval benefit or the rate at which real queries are
-near-ties. The default therefore stays off. Changing it is gated by a
-representative paired evaluation on real queries with no regression and a
-meaningful gain; that evaluation has not been run.
+suitable family benchmark. The opt-in code arm found 62.5% of the same curated
+answers at rank 1. Its experimental `+0.15` family arm was rejected and removed
+from the shipped API: it did not improve any family task and pushed the
+rankable out-of-family control out of the top 20
+(`docs/results/family_retrieval_code_2026-11-27.md`). These are mechanism and
+robustness checks, not evidence of general retrieval benefit or the rate at
+which real queries are near-ties. The graph default therefore stays off.
+Changing it is gated by a representative paired evaluation on real queries with
+no regression and a meaningful gain; that evaluation has not been run.
 
 ### API relationships and references
 

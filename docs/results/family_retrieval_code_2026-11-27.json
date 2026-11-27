@@ -1,0 +1,1607 @@
+{
+  "cache": {
+    "dir": "/tmp/opencode/family-real/bigville/.ozagia/federation-search",
+    "fallback": false,
+    "files": {
+      "bigville": "/tmp/opencode/family-real/bigville/.ozagia/federation-search/bigville-5e1bcc0c4718e417.tags.json",
+      "ocelot": "/tmp/opencode/family-real/bigville/.ozagia/federation-search/ocelot-8c08fb7b4d81f068.tags.json",
+      "ozagia": "/tmp/opencode/family-real/bigville/.ozagia/federation-search/ozagia-62444122c83318f3.tags.json"
+    },
+    "scope": "anchor state directory",
+    "state": "anchor-state"
+  },
+  "cache_outside_members": true,
+  "changed_ranks": [],
+  "checks": {
+    "cache_outside_members": true,
+    "member_writes": {
+      "ocelot": false,
+      "ozagia": false
+    },
+    "note": "non-anchor member files are probed before and after; only the anchor state cache and the temporary staging area may change",
+    "passed": true
+  },
+  "code_vs_graph_baseline": {
+    "controls": {
+      "hit@1": -0.5,
+      "hit@3": -0.5,
+      "hit@5": -0.5,
+      "mrr": -0.5
+    },
+    "family": {
+      "hit@1": 0.625,
+      "hit@3": 0.625,
+      "hit@5": 0.625,
+      "mrr": 0.6059
+    }
+  },
+  "control_regression": {
+    "definition": "a control that was rankable in the baseline lost its answer or moved to a worse rank in the local experimental family arm",
+    "detected": true,
+    "outside_source_universe": [
+      "ozagia-federation-control"
+    ],
+    "tasks": [
+      "ozagia-supergraph-control"
+    ]
+  },
+  "controls": [
+    {
+      "baseline_hit": null,
+      "baseline_rank": null,
+      "delta": null,
+      "expected": [
+        "docs/federation.md"
+      ],
+      "experimental_hit": null,
+      "experimental_rank": null,
+      "id": "ozagia-federation-control",
+      "kind": "control",
+      "query": "federated repository graphs discovery membership",
+      "seconds": {
+        "baseline": 2.85,
+        "experimental": 0.0
+      },
+      "source_universe": "outside code-search source universe",
+      "top_baseline": [
+        {
+          "expected": false,
+          "key": "bigville::file:tests/test_bigville_graph_persistence.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "tests/test_bigville_graph_persistence.py",
+          "rank": 1,
+          "rank_score": 1.0,
+          "score": 0.017006
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:scripts/substrate_vision_settle_single_sweep_scale_v1_3.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "scripts/substrate_vision_settle_single_sweep_scale_v1_3.py",
+          "rank": 2,
+          "rank_score": 1.0,
+          "score": 0.016471
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:evaluation/family_retrieval/real_tasks.py",
+          "member": "ozagia",
+          "normalized_score": 1.0,
+          "path": "evaluation/family_retrieval/real_tasks.py",
+          "rank": 3,
+          "rank_score": 1.0,
+          "score": 0.016818
+        },
+        {
+          "expected": false,
+          "key": "bigville::file:tests/test_bigville_world_persistence.py",
+          "member": "bigville",
+          "normalized_score": 0.994649,
+          "path": "tests/test_bigville_world_persistence.py",
+          "rank": 4,
+          "rank_score": 0.994649,
+          "score": 0.016915
+        },
+        {
+          "expected": false,
+          "key": "bigville::file:tests/management/test_capabilities.py",
+          "member": "bigville",
+          "normalized_score": 0.994355,
+          "path": "tests/management/test_capabilities.py",
+          "rank": 5,
+          "rank_score": 0.994355,
+          "score": 0.01691
+        }
+      ],
+      "top_experimental": [
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:tests/test_bigville_graph_persistence.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "tests/test_bigville_graph_persistence.py",
+          "rank": 1,
+          "rank_score": 1.15,
+          "score": 0.017006
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/substrate_vision_settle_single_sweep_scale_v1_3.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "scripts/substrate_vision_settle_single_sweep_scale_v1_3.py",
+          "rank": 2,
+          "rank_score": 1.15,
+          "score": 0.016471
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:tests/test_bigville_world_persistence.py",
+          "member": "bigville",
+          "normalized_score": 0.994649,
+          "path": "tests/test_bigville_world_persistence.py",
+          "rank": 3,
+          "rank_score": 1.144649,
+          "score": 0.016915
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:tests/management/test_capabilities.py",
+          "member": "bigville",
+          "normalized_score": 0.994355,
+          "path": "tests/management/test_capabilities.py",
+          "rank": 4,
+          "rank_score": 1.144355,
+          "score": 0.01691
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/substrate_vision_settle_single_sweep_scale_v1_4.py",
+          "member": "ocelot",
+          "normalized_score": 0.983972,
+          "path": "scripts/substrate_vision_settle_single_sweep_scale_v1_4.py",
+          "rank": 5,
+          "rank_score": 1.133972,
+          "score": 0.016207
+        }
+      ]
+    },
+    {
+      "baseline_hit": "ozagia::file:src/ozagia/core/supergraph.py",
+      "baseline_rank": 3,
+      "delta": null,
+      "expected": [
+        "src/ozagia/core/supergraph.py"
+      ],
+      "experimental_hit": null,
+      "experimental_rank": null,
+      "id": "ozagia-supergraph-control",
+      "kind": "control",
+      "query": "persisted relationship supergraph source hash freshness",
+      "seconds": {
+        "baseline": 2.83,
+        "experimental": 0.0
+      },
+      "source_universe": "code",
+      "top_baseline": [
+        {
+          "expected": false,
+          "key": "bigville::file:worlds/bigville_world.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "worlds/bigville_world.py",
+          "rank": 1,
+          "rank_score": 1.0,
+          "score": 0.017987
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:tools/build_modulator_seeds.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "tools/build_modulator_seeds.py",
+          "rank": 2,
+          "rank_score": 1.0,
+          "score": 0.017184
+        },
+        {
+          "expected": true,
+          "key": "ozagia::file:src/ozagia/core/supergraph.py",
+          "member": "ozagia",
+          "normalized_score": 1.0,
+          "path": "src/ozagia/core/supergraph.py",
+          "rank": 3,
+          "rank_score": 1.0,
+          "score": 0.017337
+        },
+        {
+          "expected": false,
+          "key": "bigville::file:bigville/held_board_games.py",
+          "member": "bigville",
+          "normalized_score": 0.99811,
+          "path": "bigville/held_board_games.py",
+          "rank": 4,
+          "rank_score": 0.99811,
+          "score": 0.017953
+        },
+        {
+          "expected": false,
+          "key": "bigville::file:tests/management/test_backends.py",
+          "member": "bigville",
+          "normalized_score": 0.973314,
+          "path": "tests/management/test_backends.py",
+          "rank": 5,
+          "rank_score": 0.973314,
+          "score": 0.017507
+        }
+      ],
+      "top_experimental": [
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:worlds/bigville_world.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "worlds/bigville_world.py",
+          "rank": 1,
+          "rank_score": 1.15,
+          "score": 0.017987
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:tools/build_modulator_seeds.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "tools/build_modulator_seeds.py",
+          "rank": 2,
+          "rank_score": 1.15,
+          "score": 0.017184
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:bigville/held_board_games.py",
+          "member": "bigville",
+          "normalized_score": 0.99811,
+          "path": "bigville/held_board_games.py",
+          "rank": 3,
+          "rank_score": 1.14811,
+          "score": 0.017953
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:tests/management/test_backends.py",
+          "member": "bigville",
+          "normalized_score": 0.973314,
+          "path": "tests/management/test_backends.py",
+          "rank": 4,
+          "rank_score": 1.123314,
+          "score": 0.017507
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/core_emotions_measure.py",
+          "member": "ocelot",
+          "normalized_score": 0.967237,
+          "path": "scripts/core_emotions_measure.py",
+          "rank": 5,
+          "rank_score": 1.117237,
+          "score": 0.016621
+        }
+      ]
+    }
+  ],
+  "date": "2026-11-27",
+  "default_behavior": "code search is relevance-ranked only and has no family_boost; graph-mode family_boost remains opt-in and unchanged",
+  "evaluation": "federated code search on curated Bigville tasks",
+  "experimental_arm": "local _experimental_family_boost only; applies the old +0.15 rule over a deeper candidate pool; never exposed by the shipped code API, CLI or MCP code mode",
+  "experimental_boost": 0.15,
+  "graph_reference": {
+    "metrics": {
+      "controls": {
+        "baseline": {
+          "hit@1": 0.5,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "mrr": 0.6666666666666666,
+          "n": 2
+        },
+        "family_boost": {
+          "hit@1": 0.5,
+          "hit@3": 1.0,
+          "hit@5": 1.0,
+          "mrr": 0.6666666666666666,
+          "n": 2
+        }
+      },
+      "family": {
+        "baseline": {
+          "hit@1": 0.0,
+          "hit@3": 0.0,
+          "hit@5": 0.0,
+          "mrr": 0.019078947368421053,
+          "n": 8
+        },
+        "family_boost": {
+          "hit@1": 0.0,
+          "hit@3": 0.0,
+          "hit@5": 0.0,
+          "mrr": 0.02046783625730994,
+          "n": 8
+        }
+      }
+    },
+    "note": "snapshot-only graph search from the same curated tasks; the source universe and scoring differ",
+    "path": "docs/results/family_retrieval_tasks_2026-11-27.json"
+  },
+  "kind": "current member source + existing curated retrieval tasks",
+  "limitations": [
+    "source trees are staged into the temporary members from the real checkouts; generated/run directories and adapters are excluded",
+    "snapshot state is reported separately; a current-source hit is not proof that the member snapshot is fresh",
+    "code search indexes code-file extensions only, so the Markdown control is outside its source universe",
+    "one anchor, one family member and one distractor; the task set is small and Bigville-only",
+    "answers are matched by exact member-relative path; matching symbols or snippets are not counted separately",
+    "the cache is written under the anchor's temporary state directory; no non-anchor member is written and no index is refreshed",
+    "the shipped code arm is relevance-ranked only; the +0.15 family row is a local evaluation experiment that was rejected and removed",
+    "lexical search only; no embeddings, model calls, network access or target writes"
+  ],
+  "member_writes": {
+    "ocelot": false,
+    "ozagia": false
+  },
+  "members": [
+    {
+      "cache": "/tmp/opencode/family-real/bigville/.ozagia/federation-search/bigville-5e1bcc0c4718e417.tags.json",
+      "detail": "snapshot root differs from checkout path",
+      "edges": 37302,
+      "generated_at": "2026-11-27T14:26:43",
+      "head": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+      "id": "bigville",
+      "identity_source": "derived",
+      "mode": "code",
+      "name": "bigville",
+      "nodes": 9385,
+      "root": "/tmp/opencode/family-real/bigville",
+      "search": {
+        "index": {
+          "files": 453,
+          "terms": 24225
+        },
+        "results": 50,
+        "state": "ok"
+      },
+      "snapshot": "/tmp/opencode/family-real/bigville/.ozagia/graph.json",
+      "source_state": "ok",
+      "state": "stale"
+    },
+    {
+      "cache": "/tmp/opencode/family-real/bigville/.ozagia/federation-search/ocelot-8c08fb7b4d81f068.tags.json",
+      "detail": "snapshot root differs from checkout path",
+      "edges": 253080,
+      "generated_at": "2026-11-27T14:26:47",
+      "head": "b7fda1c9dcc7a0c86f259f4083f66f65260605aa",
+      "id": "ocelot",
+      "identity_source": "declared",
+      "mode": "code",
+      "name": "ocelot",
+      "nodes": 87857,
+      "root": "/tmp/opencode/family-real/ocelot",
+      "search": {
+        "index": {
+          "files": 5265,
+          "terms": 180952
+        },
+        "results": 50,
+        "state": "ok"
+      },
+      "snapshot": "/tmp/opencode/family-real/ocelot/.ozagia/graph.json",
+      "source_state": "ok",
+      "state": "stale"
+    },
+    {
+      "cache": "/tmp/opencode/family-real/bigville/.ozagia/federation-search/ozagia-62444122c83318f3.tags.json",
+      "detail": "snapshot root differs from checkout path",
+      "edges": 66657,
+      "generated_at": "2026-11-27T14:28:25",
+      "head": "dc3bc2367dcc88039f43a6b9fd844a304ea21a74",
+      "id": "ozagia",
+      "identity_source": "declared",
+      "mode": "code",
+      "name": "ozagia",
+      "nodes": 20470,
+      "root": "/tmp/opencode/family-real/ozagia",
+      "search": {
+        "index": {
+          "files": 799,
+          "terms": 46979
+        },
+        "results": 50,
+        "state": "ok"
+      },
+      "snapshot": "/tmp/opencode/family-real/ozagia/.ozagia/graph.json",
+      "source_state": "ok",
+      "state": "stale"
+    }
+  ],
+  "metrics": {
+    "controls": {
+      "baseline": {
+        "hit@1": 0.0,
+        "hit@3": 0.5,
+        "hit@5": 0.5,
+        "mrr": 0.16666666666666666,
+        "n": 2
+      },
+      "experimental": {
+        "hit@1": 0.0,
+        "hit@3": 0.0,
+        "hit@5": 0.0,
+        "mrr": 0.0,
+        "n": 2
+      }
+    },
+    "family": {
+      "baseline": {
+        "hit@1": 0.625,
+        "hit@3": 0.625,
+        "hit@5": 0.625,
+        "mrr": 0.625,
+        "n": 8
+      },
+      "experimental": {
+        "hit@1": 0.625,
+        "hit@3": 0.625,
+        "hit@5": 0.625,
+        "mrr": 0.625,
+        "n": 8
+      }
+    }
+  },
+  "mode": "code",
+  "note": "Curated Bigville tasks, not a family benchmark. Code search reads current member source and does not refresh snapshots. The shipped code arm is relevance-only; the experimental family row is local evaluation evidence and was rejected.",
+  "rank_limit": 20,
+  "root": "/tmp/opencode/family-real/bigville",
+  "shipped_status": {
+    "code_family_boost": "rejected and removed",
+    "code_surface": "relevance-ranked only",
+    "graph_family_boost": "unchanged; opt-in and default off",
+    "reason": "the experimental +0.15 arm did not improve any curated family task and pushed the rankable out-of-family supergraph control out of the top 20"
+  },
+  "source_staging": {
+    "members": {
+      "bigville": {
+        "bytes": 433065421,
+        "dirs": [
+          {
+            "dir": "bigville",
+            "state": "present"
+          },
+          {
+            "dir": "worlds",
+            "state": "present"
+          },
+          {
+            "dir": "tests",
+            "state": "present"
+          },
+          {
+            "dir": "docs",
+            "state": "present"
+          },
+          {
+            "dir": "seeds",
+            "state": "present"
+          },
+          {
+            "dir": "scenarios",
+            "state": "present"
+          },
+          {
+            "dir": "tools",
+            "state": "present"
+          }
+        ],
+        "files": 2582,
+        "source": "/applications/data/projects/bigville",
+        "target": "/tmp/opencode/family-real/bigville"
+      },
+      "ocelot": {
+        "bytes": 164244489,
+        "dirs": [
+          {
+            "dir": "runners/dsl/src",
+            "state": "present"
+          },
+          {
+            "dir": "runners/dsl/tests",
+            "state": "present"
+          },
+          {
+            "dir": "domains",
+            "state": "present"
+          },
+          {
+            "dir": "domains_rs",
+            "state": "present"
+          },
+          {
+            "dir": "worlds",
+            "state": "present"
+          },
+          {
+            "dir": "substrate",
+            "state": "present"
+          },
+          {
+            "dir": "tools",
+            "state": "present"
+          },
+          {
+            "dir": "scripts",
+            "state": "present"
+          }
+        ],
+        "files": 6615,
+        "source": "/applications/data/projects/ocelot",
+        "target": "/tmp/opencode/family-real/ocelot"
+      },
+      "ozagia": {
+        "bytes": 166394042,
+        "dirs": [
+          {
+            "dir": "src",
+            "state": "present"
+          },
+          {
+            "dir": "tests",
+            "state": "present"
+          },
+          {
+            "dir": "evaluation",
+            "state": "present"
+          },
+          {
+            "dir": "docs",
+            "state": "present"
+          }
+        ],
+        "files": 3416,
+        "source": "/home/matt/ozmadev/ozagia",
+        "target": "/tmp/opencode/family-real/ozagia"
+      }
+    },
+    "restage": false,
+    "writes": "workdir only"
+  },
+  "source_universe": "code-file extensions only; Markdown docs are not indexed",
+  "tasks": [
+    {
+      "baseline_hit": null,
+      "baseline_rank": null,
+      "delta": null,
+      "expected": [
+        "bigville/game_persistence.py",
+        "tests/test_bigville_game_persistence.py"
+      ],
+      "experimental_hit": null,
+      "experimental_rank": null,
+      "id": "game-checkpoint-roundtrip",
+      "kind": "family-task",
+      "query": "Saving and restoring a running session should preserve enough state to continue the same simulation after restart.",
+      "seconds": {
+        "baseline": 11.24,
+        "experimental": 0.0
+      },
+      "top_baseline": [
+        {
+          "expected": false,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/game.py",
+          "rank": 1,
+          "rank_score": 1.0,
+          "score": 0.020035
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:scripts/jabberwock_daemon.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "scripts/jabberwock_daemon.py",
+          "rank": 2,
+          "rank_score": 1.0,
+          "score": 0.016641
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:tests/test_graph_engine.py",
+          "member": "ozagia",
+          "normalized_score": 1.0,
+          "path": "tests/test_graph_engine.py",
+          "rank": 3,
+          "rank_score": 1.0,
+          "score": 0.019202
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:src/ozagia/core/graph_engine.py",
+          "member": "ozagia",
+          "normalized_score": 0.994948,
+          "path": "src/ozagia/core/graph_engine.py",
+          "rank": 4,
+          "rank_score": 0.994948,
+          "score": 0.019105
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:scripts/integration_check.py",
+          "member": "ocelot",
+          "normalized_score": 0.992909,
+          "path": "scripts/integration_check.py",
+          "rank": 5,
+          "rank_score": 0.992909,
+          "score": 0.016523
+        }
+      ],
+      "top_experimental": [
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/game.py",
+          "rank": 1,
+          "rank_score": 1.15,
+          "score": 0.020035
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/jabberwock_daemon.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "scripts/jabberwock_daemon.py",
+          "rank": 2,
+          "rank_score": 1.15,
+          "score": 0.016641
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/integration_check.py",
+          "member": "ocelot",
+          "normalized_score": 0.992909,
+          "path": "scripts/integration_check.py",
+          "rank": 3,
+          "rank_score": 1.142909,
+          "score": 0.016523
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:domains/auto_approve.py",
+          "member": "ocelot",
+          "normalized_score": 0.974521,
+          "path": "domains/auto_approve.py",
+          "rank": 4,
+          "rank_score": 1.124521,
+          "score": 0.016217
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:domains/issue_reopen.py",
+          "member": "ocelot",
+          "normalized_score": 0.965507,
+          "path": "domains/issue_reopen.py",
+          "rank": 5,
+          "rank_score": 1.115507,
+          "score": 0.016067
+        }
+      ]
+    },
+    {
+      "baseline_hit": "bigville::file:bigville/reporting.py",
+      "baseline_rank": 1,
+      "delta": 0,
+      "expected": [
+        "bigville/reporting.py",
+        "tests/test_phase091_food_reporting.py"
+      ],
+      "experimental_hit": "bigville::file:bigville/reporting.py",
+      "experimental_rank": 1,
+      "id": "deterministic-population-report",
+      "kind": "family-task",
+      "query": "Repeated population summaries with the same sampling seed should report stable estimates and uncertainty while retaining exact counts.",
+      "seconds": {
+        "baseline": 2.96,
+        "experimental": 0.0
+      },
+      "top_baseline": [
+        {
+          "expected": true,
+          "key": "bigville::file:bigville/reporting.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/reporting.py",
+          "rank": 1,
+          "rank_score": 1.0,
+          "score": 0.019604
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:domains/self_model.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "domains/self_model.py",
+          "rank": 2,
+          "rank_score": 1.0,
+          "score": 0.016576
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:src/ozagia/core/memory.py",
+          "member": "ozagia",
+          "normalized_score": 1.0,
+          "path": "src/ozagia/core/memory.py",
+          "rank": 3,
+          "rank_score": 1.0,
+          "score": 0.020227
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:scripts/analyze_live_frame_rule_scope_structural_v1_2.py",
+          "member": "ocelot",
+          "normalized_score": 0.977015,
+          "path": "scripts/analyze_live_frame_rule_scope_structural_v1_2.py",
+          "rank": 4,
+          "rank_score": 0.977015,
+          "score": 0.016195
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:scripts/analyze_live_frame_rule_scope_structural_v1_3.py",
+          "member": "ocelot",
+          "normalized_score": 0.977015,
+          "path": "scripts/analyze_live_frame_rule_scope_structural_v1_3.py",
+          "rank": 5,
+          "rank_score": 0.977015,
+          "score": 0.016195
+        }
+      ],
+      "top_experimental": [
+        {
+          "expected": true,
+          "family_match": true,
+          "key": "bigville::file:bigville/reporting.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/reporting.py",
+          "rank": 1,
+          "rank_score": 1.15,
+          "score": 0.019604
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:domains/self_model.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "domains/self_model.py",
+          "rank": 2,
+          "rank_score": 1.15,
+          "score": 0.016576
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/analyze_live_frame_rule_scope_structural_v1_2.py",
+          "member": "ocelot",
+          "normalized_score": 0.977015,
+          "path": "scripts/analyze_live_frame_rule_scope_structural_v1_2.py",
+          "rank": 3,
+          "rank_score": 1.127015,
+          "score": 0.016195
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/analyze_live_frame_rule_scope_structural_v1_3.py",
+          "member": "ocelot",
+          "normalized_score": 0.977015,
+          "path": "scripts/analyze_live_frame_rule_scope_structural_v1_3.py",
+          "rank": 4,
+          "rank_score": 1.127015,
+          "score": 0.016195
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/analyze_geninfer_repeated_predicate_recovery_probe_v1_1.py",
+          "member": "ocelot",
+          "normalized_score": 0.94661,
+          "path": "scripts/analyze_geninfer_repeated_predicate_recovery_probe_v1_1.py",
+          "rank": 5,
+          "rank_score": 1.09661,
+          "score": 0.015691
+        }
+      ]
+    },
+    {
+      "baseline_hit": "bigville::file:bigville/game.py",
+      "baseline_rank": 1,
+      "delta": 0,
+      "expected": [
+        "bigville/game.py",
+        "tests/test_lazy_evaluation.py"
+      ],
+      "experimental_hit": "bigville::file:bigville/game.py",
+      "experimental_rank": 1,
+      "id": "lazy-affordance-mode",
+      "kind": "family-task",
+      "query": "Large action menus should be generated on demand when the configured automatic mode detects that eager enumeration is too costly.",
+      "seconds": {
+        "baseline": 2.69,
+        "experimental": 0.0
+      },
+      "top_baseline": [
+        {
+          "expected": true,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/game.py",
+          "rank": 1,
+          "rank_score": 1.0,
+          "score": 0.018399
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:runners/dsl/src/scale_audit.rs",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "runners/dsl/src/scale_audit.rs",
+          "rank": 2,
+          "rank_score": 1.0,
+          "score": 0.017619
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:src/ozagia/core/memory.py",
+          "member": "ozagia",
+          "normalized_score": 1.0,
+          "path": "src/ozagia/core/memory.py",
+          "rank": 3,
+          "rank_score": 1.0,
+          "score": 0.019723
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:src/ozagia/core/repo_review.py",
+          "member": "ozagia",
+          "normalized_score": 0.988491,
+          "path": "src/ozagia/core/repo_review.py",
+          "rank": 4,
+          "rank_score": 0.988491,
+          "score": 0.019496
+        },
+        {
+          "expected": false,
+          "key": "bigville::file:tests/management/test_cast_generation.py",
+          "member": "bigville",
+          "normalized_score": 0.963368,
+          "path": "tests/management/test_cast_generation.py",
+          "rank": 5,
+          "rank_score": 0.963368,
+          "score": 0.017725
+        }
+      ],
+      "top_experimental": [
+        {
+          "expected": true,
+          "family_match": true,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/game.py",
+          "rank": 1,
+          "rank_score": 1.15,
+          "score": 0.018399
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:runners/dsl/src/scale_audit.rs",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "runners/dsl/src/scale_audit.rs",
+          "rank": 2,
+          "rank_score": 1.15,
+          "score": 0.017619
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:tests/management/test_cast_generation.py",
+          "member": "bigville",
+          "normalized_score": 0.963368,
+          "path": "tests/management/test_cast_generation.py",
+          "rank": 3,
+          "rank_score": 1.113368,
+          "score": 0.017725
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:bigville/management/drafts.py",
+          "member": "bigville",
+          "normalized_score": 0.963259,
+          "path": "bigville/management/drafts.py",
+          "rank": 4,
+          "rank_score": 1.113259,
+          "score": 0.017723
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:tests/test_phase078_npc.py",
+          "member": "bigville",
+          "normalized_score": 0.960487,
+          "path": "tests/test_phase078_npc.py",
+          "rank": 5,
+          "rank_score": 1.110487,
+          "score": 0.017672
+        }
+      ]
+    },
+    {
+      "baseline_hit": "bigville::file:worlds/tick_graph.py",
+      "baseline_rank": 1,
+      "delta": 0,
+      "expected": [
+        "worlds/tick_graph.py",
+        "tests/test_tick_graph_executor.py"
+      ],
+      "experimental_hit": "bigville::file:worlds/tick_graph.py",
+      "experimental_rank": 1,
+      "id": "tick-graph-resource-conflicts",
+      "kind": "family-task",
+      "query": "When concurrent actions claim the same scarce item, resolution should choose a deterministic winner and leave conflicting claims rejected.",
+      "seconds": {
+        "baseline": 2.83,
+        "experimental": 0.0
+      },
+      "top_baseline": [
+        {
+          "expected": true,
+          "key": "bigville::file:worlds/tick_graph.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "worlds/tick_graph.py",
+          "rank": 1,
+          "rank_score": 1.0,
+          "score": 0.019806
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:scripts/arc6_arc_goals_measure.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "scripts/arc6_arc_goals_measure.py",
+          "rank": 2,
+          "rank_score": 1.0,
+          "score": 0.0165
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:tests/test_model_api_edit.py",
+          "member": "ozagia",
+          "normalized_score": 1.0,
+          "path": "tests/test_model_api_edit.py",
+          "rank": 3,
+          "rank_score": 1.0,
+          "score": 0.017495
+        },
+        {
+          "expected": false,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 0.998637,
+          "path": "bigville/game.py",
+          "rank": 4,
+          "rank_score": 0.998637,
+          "score": 0.019779
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:domains/global_workspace.py",
+          "member": "ocelot",
+          "normalized_score": 0.984485,
+          "path": "domains/global_workspace.py",
+          "rank": 5,
+          "rank_score": 0.984485,
+          "score": 0.016244
+        }
+      ],
+      "top_experimental": [
+        {
+          "expected": true,
+          "family_match": true,
+          "key": "bigville::file:worlds/tick_graph.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "worlds/tick_graph.py",
+          "rank": 1,
+          "rank_score": 1.15,
+          "score": 0.019806
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/arc6_arc_goals_measure.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "scripts/arc6_arc_goals_measure.py",
+          "rank": 2,
+          "rank_score": 1.15,
+          "score": 0.0165
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 0.998637,
+          "path": "bigville/game.py",
+          "rank": 3,
+          "rank_score": 1.148637,
+          "score": 0.019779
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:domains/global_workspace.py",
+          "member": "ocelot",
+          "normalized_score": 0.984485,
+          "path": "domains/global_workspace.py",
+          "rank": 4,
+          "rank_score": 1.134485,
+          "score": 0.016244
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:domains/self_verification.py",
+          "member": "ocelot",
+          "normalized_score": 0.972485,
+          "path": "domains/self_verification.py",
+          "rank": 5,
+          "rank_score": 1.122485,
+          "score": 0.016046
+        }
+      ]
+    },
+    {
+      "baseline_hit": "bigville::file:bigville/runtime.py",
+      "baseline_rank": 1,
+      "delta": 0,
+      "expected": [
+        "bigville/runtime.py",
+        "tests/test_node_origins.py"
+      ],
+      "experimental_hit": "bigville::file:bigville/runtime.py",
+      "experimental_rank": 1,
+      "id": "seed-manifest-recovery",
+      "kind": "family-task",
+      "query": "Restoring a saved knowledge graph should preserve loaded seed manifests and reject malformed manifest data instead of silently losing it.",
+      "seconds": {
+        "baseline": 2.84,
+        "experimental": 0.0
+      },
+      "top_baseline": [
+        {
+          "expected": true,
+          "key": "bigville::file:bigville/runtime.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/runtime.py",
+          "rank": 1,
+          "rank_score": 1.0,
+          "score": 0.020161
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:scripts/jabberwock_plans_llm_independence.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "scripts/jabberwock_plans_llm_independence.py",
+          "rank": 2,
+          "rank_score": 1.0,
+          "score": 0.016486
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:src/ozagia/core/memory.py",
+          "member": "ozagia",
+          "normalized_score": 1.0,
+          "path": "src/ozagia/core/memory.py",
+          "rank": 3,
+          "rank_score": 1.0,
+          "score": 0.019024
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:domains/teach.py",
+          "member": "ocelot",
+          "normalized_score": 0.985806,
+          "path": "domains/teach.py",
+          "rank": 4,
+          "rank_score": 0.985806,
+          "score": 0.016252
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:scripts/arc4_endgame_battery.py",
+          "member": "ocelot",
+          "normalized_score": 0.98435,
+          "path": "scripts/arc4_endgame_battery.py",
+          "rank": 5,
+          "rank_score": 0.98435,
+          "score": 0.016228
+        }
+      ],
+      "top_experimental": [
+        {
+          "expected": true,
+          "family_match": true,
+          "key": "bigville::file:bigville/runtime.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/runtime.py",
+          "rank": 1,
+          "rank_score": 1.15,
+          "score": 0.020161
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/jabberwock_plans_llm_independence.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "scripts/jabberwock_plans_llm_independence.py",
+          "rank": 2,
+          "rank_score": 1.15,
+          "score": 0.016486
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:domains/teach.py",
+          "member": "ocelot",
+          "normalized_score": 0.985806,
+          "path": "domains/teach.py",
+          "rank": 3,
+          "rank_score": 1.135806,
+          "score": 0.016252
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/arc4_endgame_battery.py",
+          "member": "ocelot",
+          "normalized_score": 0.98435,
+          "path": "scripts/arc4_endgame_battery.py",
+          "rank": 4,
+          "rank_score": 1.13435,
+          "score": 0.016228
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:scripts/audit_substrate_python_source_coverage_v1_1.py",
+          "member": "ocelot",
+          "normalized_score": 0.954931,
+          "path": "scripts/audit_substrate_python_source_coverage_v1_1.py",
+          "rank": 5,
+          "rank_score": 1.104931,
+          "score": 0.015743
+        }
+      ]
+    },
+    {
+      "baseline_hit": "bigville::file:bigville/game.py",
+      "baseline_rank": 1,
+      "delta": 0,
+      "expected": [
+        "bigville/backends/protocol.py",
+        "bigville/game.py",
+        "tests/test_bigville_backends.py"
+      ],
+      "experimental_hit": "bigville::file:bigville/game.py",
+      "experimental_rank": 1,
+      "id": "backend-action-boundary",
+      "kind": "family-task",
+      "query": "All cognition providers should submit decisions through one shared contract so a provider cannot bypass the world's action checks.",
+      "seconds": {
+        "baseline": 2.89,
+        "experimental": 0.0
+      },
+      "top_baseline": [
+        {
+          "expected": true,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/game.py",
+          "rank": 1,
+          "rank_score": 1.0,
+          "score": 0.020035
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:substrate/world_adapter.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "substrate/world_adapter.py",
+          "rank": 2,
+          "rank_score": 1.0,
+          "score": 0.019531
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:src/ozagia/core/secrets.py",
+          "member": "ozagia",
+          "normalized_score": 1.0,
+          "path": "src/ozagia/core/secrets.py",
+          "rank": 3,
+          "rank_score": 1.0,
+          "score": 0.01912
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:src/ozagia/core/memory.py",
+          "member": "ozagia",
+          "normalized_score": 0.961506,
+          "path": "src/ozagia/core/memory.py",
+          "rank": 4,
+          "rank_score": 0.961506,
+          "score": 0.018384
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:src/ozagia/core/task_preflight.py",
+          "member": "ozagia",
+          "normalized_score": 0.948849,
+          "path": "src/ozagia/core/task_preflight.py",
+          "rank": 5,
+          "rank_score": 0.948849,
+          "score": 0.018142
+        }
+      ],
+      "top_experimental": [
+        {
+          "expected": true,
+          "family_match": true,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/game.py",
+          "rank": 1,
+          "rank_score": 1.15,
+          "score": 0.020035
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:substrate/world_adapter.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "substrate/world_adapter.py",
+          "rank": 2,
+          "rank_score": 1.15,
+          "score": 0.019531
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:tests/test_phase031_llm_backend.py",
+          "member": "bigville",
+          "normalized_score": 0.941802,
+          "path": "tests/test_phase031_llm_backend.py",
+          "rank": 3,
+          "rank_score": 1.091802,
+          "score": 0.018869
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:bigville/held_board_games.py",
+          "member": "bigville",
+          "normalized_score": 0.929923,
+          "path": "bigville/held_board_games.py",
+          "rank": 4,
+          "rank_score": 1.079923,
+          "score": 0.018631
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:tests/test_phase061_speech_parser.py",
+          "member": "bigville",
+          "normalized_score": 0.86299,
+          "path": "tests/test_phase061_speech_parser.py",
+          "rank": 5,
+          "rank_score": 1.01299,
+          "score": 0.01729
+        }
+      ]
+    },
+    {
+      "baseline_hit": null,
+      "baseline_rank": null,
+      "delta": null,
+      "expected": [
+        "bigville/scenarios.py",
+        "tests/test_bigville_scenarios.py"
+      ],
+      "experimental_hit": null,
+      "experimental_rank": null,
+      "id": "scenario-input-validation",
+      "kind": "family-task",
+      "query": "Scenario loading should accept structured in memory definitions and file paths while producing a clear validation failure for malformed input.",
+      "seconds": {
+        "baseline": 2.82,
+        "experimental": 0.0
+      },
+      "top_baseline": [
+        {
+          "expected": false,
+          "key": "bigville::file:bigville/management/runs.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/management/runs.py",
+          "rank": 1,
+          "rank_score": 1.0,
+          "score": 0.018373
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:runners/dsl/src/substrate.rs",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "runners/dsl/src/substrate.rs",
+          "rank": 2,
+          "rank_score": 1.0,
+          "score": 0.018339
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:tests/test_eval_agent.py",
+          "member": "ozagia",
+          "normalized_score": 1.0,
+          "path": "tests/test_eval_agent.py",
+          "rank": 3,
+          "rank_score": 1.0,
+          "score": 0.018876
+        },
+        {
+          "expected": false,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 0.990149,
+          "path": "bigville/game.py",
+          "rank": 4,
+          "rank_score": 0.990149,
+          "score": 0.018192
+        },
+        {
+          "expected": false,
+          "key": "bigville::file:tests/test_phase060_speech_in.py",
+          "member": "bigville",
+          "normalized_score": 0.967398,
+          "path": "tests/test_phase060_speech_in.py",
+          "rank": 5,
+          "rank_score": 0.967398,
+          "score": 0.017774
+        }
+      ],
+      "top_experimental": [
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:bigville/management/runs.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/management/runs.py",
+          "rank": 1,
+          "rank_score": 1.15,
+          "score": 0.018373
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:runners/dsl/src/substrate.rs",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "runners/dsl/src/substrate.rs",
+          "rank": 2,
+          "rank_score": 1.15,
+          "score": 0.018339
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 0.990149,
+          "path": "bigville/game.py",
+          "rank": 3,
+          "rank_score": 1.140149,
+          "score": 0.018192
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:tests/test_phase060_speech_in.py",
+          "member": "bigville",
+          "normalized_score": 0.967398,
+          "path": "tests/test_phase060_speech_in.py",
+          "rank": 4,
+          "rank_score": 1.117398,
+          "score": 0.017774
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:tests/test_phase031_llm_backend.py",
+          "member": "bigville",
+          "normalized_score": 0.959397,
+          "path": "tests/test_phase031_llm_backend.py",
+          "rank": 5,
+          "rank_score": 1.109397,
+          "score": 0.017627
+        }
+      ]
+    },
+    {
+      "baseline_hit": null,
+      "baseline_rank": null,
+      "delta": null,
+      "expected": [
+        "bigville/api.py",
+        "tests/test_engine_defaults.py"
+      ],
+      "experimental_hit": null,
+      "experimental_rank": null,
+      "id": "public-game-construction",
+      "kind": "family-task",
+      "query": "The public entry point should build a game from a selected scenario and seed while keeping provider and runtime choices configurable.",
+      "seconds": {
+        "baseline": 2.82,
+        "experimental": 0.0
+      },
+      "top_baseline": [
+        {
+          "expected": false,
+          "key": "bigville::file:bigville/management/runs.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/management/runs.py",
+          "rank": 1,
+          "rank_score": 1.0,
+          "score": 0.018893
+        },
+        {
+          "expected": false,
+          "key": "ocelot::file:substrate/world_adapter.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "substrate/world_adapter.py",
+          "rank": 2,
+          "rank_score": 1.0,
+          "score": 0.018399
+        },
+        {
+          "expected": false,
+          "key": "ozagia::file:src/ozagia/core/memory.py",
+          "member": "ozagia",
+          "normalized_score": 1.0,
+          "path": "src/ozagia/core/memory.py",
+          "rank": 3,
+          "rank_score": 1.0,
+          "score": 0.01925
+        },
+        {
+          "expected": false,
+          "key": "bigville::file:worlds/bigville_world.py",
+          "member": "bigville",
+          "normalized_score": 0.913354,
+          "path": "worlds/bigville_world.py",
+          "rank": 4,
+          "rank_score": 0.913354,
+          "score": 0.017256
+        },
+        {
+          "expected": false,
+          "key": "bigville::file:bigville/world_persistence.py",
+          "member": "bigville",
+          "normalized_score": 0.913037,
+          "path": "bigville/world_persistence.py",
+          "rank": 5,
+          "rank_score": 0.913037,
+          "score": 0.01725
+        }
+      ],
+      "top_experimental": [
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:bigville/management/runs.py",
+          "member": "bigville",
+          "normalized_score": 1.0,
+          "path": "bigville/management/runs.py",
+          "rank": 1,
+          "rank_score": 1.15,
+          "score": 0.018893
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "ocelot::file:substrate/world_adapter.py",
+          "member": "ocelot",
+          "normalized_score": 1.0,
+          "path": "substrate/world_adapter.py",
+          "rank": 2,
+          "rank_score": 1.15,
+          "score": 0.018399
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:worlds/bigville_world.py",
+          "member": "bigville",
+          "normalized_score": 0.913354,
+          "path": "worlds/bigville_world.py",
+          "rank": 3,
+          "rank_score": 1.063354,
+          "score": 0.017256
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:bigville/world_persistence.py",
+          "member": "bigville",
+          "normalized_score": 0.913037,
+          "path": "bigville/world_persistence.py",
+          "rank": 4,
+          "rank_score": 1.063037,
+          "score": 0.01725
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "key": "bigville::file:bigville/game.py",
+          "member": "bigville",
+          "normalized_score": 0.912507,
+          "path": "bigville/game.py",
+          "rank": 5,
+          "rank_score": 1.062507,
+          "score": 0.01724
+        }
+      ]
+    }
+  ],
+  "workdir": "/tmp/opencode/family-real"
+}

@@ -73,3 +73,13 @@ controls are unchanged. The curated task set was designed for richer
 single-repository retrieval, so it is not a suitable family-ranking benchmark.
 See `docs/results/family_retrieval_tasks_2026-11-27.md`; the default remains
 off.
+
+### Curated tasks through the code arm
+
+[`real_tasks_code.py`](real_tasks_code.py) replays the same curated tasks
+through the opt-in `federation.code_search` arm over staged current source.
+Code search reaches **62.5% hit@1/3/5** on the eight tasks versus **0% hit@5**
+for snapshot-only graph search. Code mode is relevance-ranked only: an
+experimental `+0.15` family arm did not improve any family task and pushed the
+rankable out-of-family control out of the top 20, so it was rejected and is
+not shipped. See `docs/results/family_retrieval_code_2026-11-27.md`.

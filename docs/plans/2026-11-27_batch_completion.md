@@ -14,7 +14,7 @@ is tracked under "Audit remediation" below.
 | W1 Ocelot workspace | complete | 126 Ocelot/task-library tests, Ruff clean, CLI/MCP surface checked |
 | W2 repo/API relationships | complete | 76 targeted tests, Ruff clean, five new edge-case tests |
 | W3 Bigville integration | complete | Bigville adapter/project-invariant tests 10 passed; docs example validated |
-| W4 combined verification | complete | 7,318 passed, 27 skipped; Ruff clean; 47 reference pages and REPO_SHAPE current |
+| W4 combined verification | complete | 7,326 passed, 27 skipped; Ruff clean; 47 reference pages and REPO_SHAPE current |
 | W5 adapter-declared bridges | complete | 50 focused tests, 106 broader tests, Ruff clean, Bigville evidence spot check |
 | W6 persisted supergraph | complete | 14 new tests, 47 targeted tests, Ruff clean, CLI smoke |
 | W7 family-aware retrieval | complete | 39 core tests + CLI/MCP surface tests (69 in the follow-up), fixture, real-snapshot near-tie and curated-task robustness checks recorded, Ruff clean |
@@ -278,12 +278,13 @@ Final run, 2026-11-27:
 
 | Check | Result |
 | --- | --- |
-| Full suite | 7,318 passed, 27 skipped, 0 failed |
+| Full suite | 7,326 passed, 27 skipped, 0 failed |
 | Ruff | clean across `src`, `tests`, `addins`, evaluation and docs generator |
 | Reference docs | 47 pages, up to date; deterministic at width 80 and 140 |
 | `REPO_SHAPE.md` | current; `ozagia overview --check` passes |
 | Task library | 15 built-in classes, valid |
 | Family ranking | fixture + real-snapshot near-tie + curated-task robustness checks; curated-task replay showed limited lexical recall; default remains off pending a representative real-query evaluation |
+| Federated code search | opt-in current-source arm; 62.5% hit@5 on curated Bigville tasks vs 0% graph; code mode relevance-only; family boost rejected after control regression |
 | Target writes / live calls | none; real Ocelot applies and live evaluation remain approval-gated |
 
 ## Risks

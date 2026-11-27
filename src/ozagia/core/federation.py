@@ -716,6 +716,27 @@ def search(root: str | Path | None, query: str,
             "members": [_public_member(item) for item in _members(root, roots)]}
 
 
+def code_search(root: str | Path | None, query: str,
+                roots: Iterable[str | Path] | None = None, limit: int = 20,
+                include_snippet: bool = False,
+                cache_dir: str | Path | None = None) -> dict[str, Any]:
+    """Opt-in, read-only code search over current member source checkouts.
+
+    Members are resolved with :func:`_members`; each existing member root is
+    searched with :func:`ozagia.core.search.code_search`. Caches live under the
+    anchor state directory (or a temporary fallback) and never under another
+    member. No index is refreshed and no member is written. Code mode is
+    relevance-ranked only; graph-mode ``search(family_boost=True)`` is
+    unchanged. See :mod:`ozagia.core.federation_code` for the merge and
+    provenance fields.
+    """
+    from ozagia.core import federation_code
+
+    return federation_code.code_search(
+        root, query, roots=roots, limit=limit,
+        include_snippet=include_snippet, cache_dir=cache_dir)
+
+
 def node(root: str | Path | None, qualified_key: str,
          roots: Iterable[str | Path] | None = None) -> dict[str, Any]:
     """Return one qualified node and its in-snapshot incident edges."""
@@ -760,5 +781,6 @@ def node(root: str | Path | None, qualified_key: str,
             "cross_repository_link_errors": link_data["errors"]}
 
 
-__all__ = ["discover", "status", "search", "node", "sync_references",
-           "reference_status", "request_reference_sync", "without_reference_sync"]
+__all__ = ["discover", "status", "search", "code_search", "node",
+           "sync_references", "reference_status", "request_reference_sync",
+           "without_reference_sync"]

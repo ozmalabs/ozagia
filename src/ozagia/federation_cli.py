@@ -4,6 +4,7 @@ Usage::
 
     ozagia federation status [--root R] [--repo R ...]
     ozagia federation search QUERY [--root R] [--repo R ...] [--limit N] [--family-boost]
+    ozagia federation code-search QUERY [--root R] [--repo R ...] [--limit N]
     ozagia federation node QUALIFIED_KEY [--root R] [--repo R ...]
     ozagia federation check [--root R] [--repo R ...]
     ozagia federation relations [--root R] [--repo R ...] [--write|--cached] [--out PATH]
@@ -31,6 +32,7 @@ def _parser(prog: str) -> argparse.ArgumentParser:
     for name, help_text in (
         ("status", "show discovered repositories and snapshot freshness"),
         ("search", "search indexed snapshots without refreshing them"),
+        ("code-search", "search current member source with caches outside members"),
         ("node", "inspect a qualified node and its edges"),
         ("check", "check declared cross-repository relationships"),
         ("relations", "show declared, package-derived and API repository "
@@ -48,6 +50,9 @@ def _parser(prog: str) -> argparse.ArgumentParser:
                 "--family-boost", action="store_true",
                 help="prefer hits from members sharing a declared family with "
                      "the anchor (opt-in; default off)")
+        elif name == "code-search":
+            item.add_argument("query")
+            item.add_argument("--limit", type=int, default=20)
         elif name == "node":
             item.add_argument("qualified_key")
         if name in {"build", "graph", "relations"}:
@@ -103,6 +108,9 @@ def run(argv: list[str] | None = None, *, prog: str = "ozagia federation") -> in
                 result = F.search(root, args.query, roots=roots,
                                   limit=args.limit,
                                   family_boost=args.family_boost)
+            elif args.command == "code-search":
+                result = F.code_search(root, args.query, roots=roots,
+                                       limit=args.limit)
             elif args.command == "node":
                 result = F.node(root, args.qualified_key, roots=roots)
             elif args.command == "build":

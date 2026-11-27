@@ -90,7 +90,8 @@ breadth third, live operations last**. New surface area is not a release theme.
 | `2026-11-17_opencode_intent_graph_retrieval.md` | Stages A–C done; D partial; E initial offline check | Matches | Broader shell/task intent linking, richer paired and end-to-end evaluation | 0.4 |
 | `2026-11-17_federated_graphs.md` | Base delivery plus declared-dependency, stable-identity, relation/API, bridge and supergraph slices | Discovery, explicit members, qualified identities, status/search/node inspection, cross-repo checks, declared dependency links, stable declared ids, repository families/relationships, contract-first API references, explicit API consumer/test edges, adapter-declared dynamic bridges, an optional persisted relationship supergraph, and opt-in family ranking landed | Representative real-query family-ranking evaluation, full node-union supergraph, incremental member cache/freshness certification, SCIP identities, org manifests/access control | 0.4 |
 | `2026-11-27_repo_relationships.md` | Implemented 2026-11-27 | Matches; W5 bridges, W6 supergraph and opt-in W7 family ranking landed in the same batch; fixture, real-snapshot near-tie and curated-task robustness checks recorded | Representative real-query family evaluation with adequate retrieval; docs-derived API references; full node-union supergraph; organization manifests | 0.4 |
-| `2026-11-27_batch_completion.md` | Complete 2026-11-27 | Matches; Ocelot second slice, Bigville integration, relations/API, bridges, supergraph and family arm are landed; 7,318 tests pass, generated docs and `REPO_SHAPE.md` current | Live Ocelot model-task eval (approval-gated); UI panel; representative real-query family evaluation | — |
+| `2026-11-27_batch_completion.md` | Complete 2026-11-27 | Matches; Ocelot second slice, Bigville integration, relations/API, bridges, supergraph and family arm are landed; 7,326 tests pass, generated docs and `REPO_SHAPE.md` current | Live Ocelot model-task eval (approval-gated); UI panel; representative real-query family evaluation | — |
+| `2026-11-27_federated_code_search.md` | Complete 2026-11-27 | Opt-in `federation.code_search` over current member source, CLI/MCP modes, caches outside members, and a 62.5% hit@5 curated-task replay versus 0% for graph search; code mode is relevance-only | Broader federated retrieval evaluation; family-aware code ranking remains unproven and is not shipped | 0.4 |
 | `2026-11-16_sre_iac_extensions.md` | Offline workstreams implemented; live remains | Matches | Live cloud/cluster providers, semantic IaC validation, broader config families, real-host relay matrix, remote background services | 0.5 |
 | `2026-11-16_iac_cloud_context.md`, `2026-11-16_runtime_services_tunnels.md` | Implemented offline | Opt-in source-only IaC context and the offline runtime/service/tunnel layer are implemented; live remote operations are not | Live cloud/cluster state, remote service ownership, measured savings | 0.5 |
 | `2026-11-16_ui_and_agent_features.md` | Waves merged | Matches; "Not yet" list still open, except project-model config migration, which landed in 0.1.5 | Live Desktop smoke, live model/provider adapters, live security tool matrix/DAST | 0.1.5 / 0.3 |
@@ -495,6 +496,9 @@ real fixtures, provenance-preserving and still opt-in.
   - a persisted relationship supergraph with source-hash freshness and atomic
     writes (implemented 2026-11-27; full node-union and per-member incremental
     refresh remain);
+  - opt-in federated code search over current member source with caches outside
+    members and CLI/MCP mode selection (implemented 2026-11-27; 62.5% hit@5 on
+    the curated Bigville tasks versus 0% for snapshot-only graph search);
   - opt-in family-aware federation ranking with fixture, real-snapshot near-tie
     and curated-task robustness checks (implemented 2026-11-27; the curated-task
     replay showed much of that task set falls outside federated lexical recall,

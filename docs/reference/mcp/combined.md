@@ -760,14 +760,15 @@ Read-only inspection of a qualified federated node and its snapshot-local edges.
 | `no_sync` | boolean |  | false | — |
 ### `federation_search`
 
-Read-only lexical search over discovered or explicitly selected repository snapshots. Designated references may be fetched and fast-forwarded over Git; set no_sync to opt out. Results retain provenance; no index is refreshed. Set family_boost true to prefer hits from members sharing a declared anchor family; it is opt-in and defaults to false.
+Read-only search over discovered or explicitly selected repository members. The default graph mode searches existing snapshots; code mode is opt-in and searches current member source, writes only its cache outside member checkouts, does not refresh indexes, and is relevance-ranked only. Designated references may be fetched and fast-forwarded over Git; set no_sync to opt out. Results retain provenance. In graph mode, set family_boost true to prefer hits from members sharing a declared anchor family; it is opt-in and defaults to false. Code mode rejects family_boost.
 
 | parameter | type | required | default | description |
 |---|---|---|---|---|
 | `query` | string | yes |  | — |
 | `roots` | array |  |  | Optional explicit member roots. |
 | `limit` | integer |  | 20 | — |
-| `family_boost` | boolean |  | false | Prefer hits from members sharing a declared anchor family (opt-in; default off). |
+| `mode` | string |  | "graph" | graph reads member snapshots; code reads current member source and caches outside member checkouts (opt-in, relevance-only). |
+| `family_boost` | boolean |  | false | Graph mode only: prefer hits from members sharing a declared anchor family (opt-in; default off). Code mode rejects true. |
 | `no_sync` | boolean |  | false | — |
 ### `federation_status`
 
