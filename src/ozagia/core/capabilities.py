@@ -70,7 +70,7 @@ CAPABILITY_VERSION = "1.0"
 DOMAINS = (
     "graph", "edit", "test", "goals", "tasks", "environment", "resources",
     "toolchain", "status", "federation", "research", "runtime", "actions",
-    "eval",
+    "eval", "outcomes",
 )
 EXPOSURES = ("cli", "daemon", "internal", "mcp")
 SIDE_EFFECTS = ("none", "read", "write", "execute", "network", "model")
@@ -367,6 +367,7 @@ _DOCS = {
     "supply_chain": "doc:docs/supply_chain.md",
     "status": "doc:docs/status.md",
     "federation": "doc:docs/federation.md",
+    "outcomes": "doc:docs/outcomes.md",
     "research": "doc:docs/research.md",
     "runtime": "doc:docs/runtime.md",
     "secrets": "doc:docs/secrets.md",
@@ -435,6 +436,8 @@ _TESTS = {
     "federation_surface": "test:tests/test_federation_surface.py",
     "repo_relations": "test:tests/test_repo_relations.py",
     "api_relationships": "test:tests/test_api_relationships.py",
+    "outcomes": "test:tests/test_outcomes.py",
+    "outcomes_view": "test:tests/test_outcomes_view.py",
     "repo_bridges": "test:tests/test_repo_bridges.py",
     "supergraph": "test:tests/test_supergraph.py",
     "family_ranking": "test:tests/test_family_ranking.py",
@@ -2055,6 +2058,26 @@ _BUILTIN_DEFINITIONS: tuple[dict[str, Any], ...] = (
         tests=_tests("federation_surface", "repo_relations",
                      "api_relationships", "repo_bridges"),
         docs=_docs("federation"),
+    ),
+    # outcomes -------------------------------------------------------------
+    _def(
+        id="cap:outcomes.view",
+        domain="outcomes",
+        purpose=("Project durable intent revisions, work, attempts, decisions, "
+                 "effects and evidence as a read-only list-first view."),
+        owner="ozagia.core.outcomes.view",
+        side_effect="read",
+        exposure=["cli"],
+        impl=["impl:ozagia.core.outcomes.view.view",
+              "impl:ozagia.core.outcomes.view.list_view"],
+        surfaces=["cli:ozagia.outcomes"],
+        prerequisites=["durable outcome journal"],
+        limits=["read-only; never appends, recovers or truncates the journal",
+                "view schema is ozagia.outcomes.view.v1; unknown types render "
+                "generically"],
+        authorization=_READ,
+        tests=_tests("outcomes_view", "outcomes"),
+        docs=_docs("outcomes"),
     ),
     # research -------------------------------------------------------------
     _def(

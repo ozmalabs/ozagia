@@ -83,6 +83,8 @@ The ozagia command: the graph, the daemon, the integrations and the agent.
                     [--budget-s S] [--max-modules N] [--check PATH]
                                                   (one deterministic reference
                                                   page; docs/repo_shape.md)
+    ozagia outcomes show|list|events ...          (read-only durable outcome
+                                                  views; docs/outcomes.md)
     ozagia --version
 
 `daemon`, `bg`, `mcp`, `eval` and `check` pass every argument after their name to
@@ -2802,3 +2804,62 @@ usage: ozagia mesh prune [-h] [--root ROOT] [--json] [--harness HARNESS]
 | `--delivered-before` | float |  |  | — |
 | `--apply` |  |  |  | delete the planned messages |
 | `--root-ignored` |  |  |  | ==SUPPRESS== |
+
+## `ozagia outcomes`
+
+```
+usage: ozagia outcomes [-h] {show,list,events} ...
+```
+
+### `ozagia outcomes show`
+
+```
+usage: ozagia outcomes show [-h] [--root ROOT] [--state-dir STATE_DIR] [--json]
+                            [--events-limit EVENTS_LIMIT]
+                            intent
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `intent` |  |  | yes | intent id |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--state-dir` |  |  |  | explicit outcome state directory |
+| `--json` |  |  |  | print versioned JSON |
+| `--events-limit` | int |  | 50 | recent event rows (default 50) |
+
+### `ozagia outcomes list`
+
+```
+usage: ozagia outcomes list [-h] [--root ROOT] [--state-dir STATE_DIR] [--json]
+                            [--limit LIMIT]
+```
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--state-dir` |  |  |  | explicit outcome state directory |
+| `--json` |  |  |  | print versioned JSON |
+| `--limit` | int |  | 100 | maximum rows (default 100) |
+
+### `ozagia outcomes events`
+
+```
+usage: ozagia outcomes events [-h] [--root ROOT] [--state-dir STATE_DIR]
+                              [--json] [--after AFTER] [--limit LIMIT]
+                              intent
+```
+
+| argument | type | values | required | help |
+|---|---|---|---|---|
+| `intent` |  |  | yes | intent id |
+
+| option | type | values | default | help |
+|---|---|---|---|---|
+| `--root` |  |  |  | repository root |
+| `--state-dir` |  |  |  | explicit outcome state directory |
+| `--json` |  |  |  | print versioned JSON |
+| `--after` | int |  | 0 | exclusive sequence cursor (default 0) |
+| `--limit` | int |  | 100 | maximum records (default 100) |

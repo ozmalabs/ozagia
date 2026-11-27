@@ -76,6 +76,8 @@
                     [--budget-s S] [--max-modules N] [--check PATH]
                                                   (one deterministic reference
                                                   page; docs/repo_shape.md)
+    ozagia outcomes show|list|events ...          (read-only durable outcome
+                                                  views; docs/outcomes.md)
     ozagia --version
 
 `daemon`, `bg`, `mcp`, `eval` and `check` pass every argument after their name to
@@ -1942,6 +1944,8 @@ def build_parser() -> argparse.ArgumentParser:
     _assets_parser(sub)
     from ozagia.mesh_cli import add_parser as _mesh_parser
     _mesh_parser(sub)
+    from ozagia.outcomes_cli import add_parser as _outcomes_parser
+    _outcomes_parser(sub)
     return p
 
 
@@ -1987,7 +1991,7 @@ _COMMANDS = frozenset({"index", "agent", "install", "who", "replace",
                        "review-repo", "goal", "capabilities", "engine",
                        "profile-run", "task-preflight", "overview", "shape",
                        "languages", "supply-chain", "migration", "tmp",
-                       "assets", "mesh", *DELEGATES})
+                       "assets", "mesh", "outcomes", *DELEGATES})
 # Agent options that may lead a bare `ozagia ...` (the TUI).
 _AGENT_FLAGS = frozenset({"--research", "--mcp", "--model", "-m", "--workdir",
                           "--root", "--clone", "--prompt", "--prompt-file",
@@ -2070,6 +2074,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "goal":
         from ozagia.goals_cli import run as _goal_run
         return _goal_run(args)
+    if args.command == "outcomes":
+        from ozagia.outcomes_cli import run as _outcomes_run
+        return _outcomes_run(args)
     if args.command == "replace":
         return _cmd_replace(args)
     if args.command == "review-repo":

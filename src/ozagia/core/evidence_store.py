@@ -23,6 +23,12 @@ Record kinds
 ``declaration``
     A caller or model claim.  It is stored as ``evidence="declared"`` with
     ``freshness="unknown"`` and is never current evidence.
+``validation``
+    A deterministic command validation (S1-B outcome slice): command, exit
+    code, target, expected/observed base, artifact digest, method, coverage and
+    per-check results.  The existing observation and assessment kinds join
+    owner records or carry a preflight report; neither can represent a generic
+    command result without overloading its declared sections.
 
 Evidence words
 --------------
@@ -90,7 +96,7 @@ EVIDENCE_DIR = "evidence"
 JOURNAL_NAME = "records.jsonl"
 LOCK_NAME = ".lock"
 
-RECORD_KINDS = ("assessment", "declaration", "observation")
+RECORD_KINDS = ("assessment", "declaration", "observation", "validation")
 STORE_STATES = ("absent", "current", "partial", "invalid", "unsupported")
 RECORD_EVIDENCE = ("declared", "observed", "verified")
 RUN_STATES = ("absent", "incomplete", "invalid", "present", "unknown")
@@ -126,14 +132,14 @@ _TOP_FIELDS = frozenset({
     "schema", "record_version", "record_id", "idempotency_key", "kind",
     "source", "observed_at", "created_at", "evidence", "freshness",
     "complete", "reason", "subject", "goal", "criteria", "runs", "tests",
-    "environments", "assessment", "declaration", "verification", "refs",
-    "record_hash",
+    "environments", "assessment", "declaration", "validation", "verification",
+    "refs", "record_hash",
 })
 _INPUT_FIELDS = frozenset({
     "schema", "record_version", "kind", "source", "observed_at", "evidence",
     "freshness", "complete", "reason", "goal", "criteria", "runs", "tests",
-    "environments", "assessment", "declaration", "verification", "refs",
-    "idempotency_key",
+    "environments", "assessment", "declaration", "validation", "verification",
+    "refs", "idempotency_key",
 })
 _REF_KEYS = frozenset({
     "declared_hash", "goal_hash", "output_digest", "preflight_hash",
@@ -162,6 +168,13 @@ _ASSESSMENT_ENVIRONMENT_KEYS = frozenset({
     "selected", "candidates", "readiness", "reason",
 })
 _DECLARATION_KEYS = frozenset({"statement"})
+_VALIDATION_KEYS = frozenset({
+    "command", "exit_code", "target", "expected_base", "observed_base",
+    "artifact_digest", "method", "coverage", "passed", "checks",
+})
+_VALIDATION_CHECK_KEYS = frozenset({
+    "name", "command", "exit_code", "state", "output_digest",
+})
 _VERIFICATION_KEYS = frozenset({"state", "method", "checks", "reasons"})
 _CHECK_KEYS = frozenset({"name", "state"})
 _CHECK_STATES = frozenset({"failed", "passed", "unknown"})
@@ -565,6 +578,57 @@ def _declaration_ref(value: Any) -> dict[str, Any]:
     return {"statement": statement}
 
 
+def _validation_check_ref(value: Any, where: str) -> dict[str, Any]:
+    row = _mapping(value, where)
+    _keys(row, _VALIDATION_CHECK_KEYS, where)
+    name = _redacted(row.get("name"), 60)
+    if not name:
+        raise EvidenceStoreError(f"{where} needs a name")
+    state = row.get("state")
+    if state not in _CHECK_STATES:
+        raise EvidenceStoreError(f"{where}.state is invalid")
+    command = _redacted(row.get("command"), MAX_TEXT) or None
+    exit_code = row.get("exit_code")
+    if exit_code is not None:
+        exit_code = _nonneg_int(exit_code, f"{where}.exit_code")
+    return {
+        "name": name,
+        "command": command,
+        "exit_code": exit_code,
+        "state": state,
+        "output_digest": _sha(row.get("output_digest")),
+    }
+
+
+def _validation_ref(value: Any) -> dict[str, Any]:
+    row = _mapping(value, "validation")
+    _keys(row, _VALIDATION_KEYS, "validation")
+    command = _redacted(row.get("command"), MAX_TEXT)
+    if not command:
+        raise EvidenceStoreError("validation.command is required")
+    target = _redacted(row.get("target"), MAX_REF)
+    if not target:
+        raise EvidenceStoreError("validation.target is required")
+    method = _redacted(row.get("method"), 120)
+    if not method:
+        raise EvidenceStoreError("validation.method is required")
+    checks = [_validation_check_ref(item, f"validation.checks[{index}]")
+              for index, item in enumerate(
+                  _list(row.get("checks", []), "validation.checks", MAX_CHECKS))]
+    return {
+        "command": command,
+        "exit_code": _nonneg_int(row.get("exit_code"), "validation.exit_code"),
+        "target": target,
+        "expected_base": _sha(row.get("expected_base")),
+        "observed_base": _sha(row.get("observed_base")),
+        "artifact_digest": _sha(row.get("artifact_digest")),
+        "method": method,
+        "coverage": _redacted(row.get("coverage"), 120) or None,
+        "passed": _bool(row.get("passed"), "validation.passed"),
+        "checks": checks,
+    }
+
+
 def _verification_ref(value: Any) -> dict[str, Any]:
     row = _mapping(value, "verification")
     _keys(row, _VERIFICATION_KEYS, "verification")
@@ -627,13 +691,16 @@ def _declared_verification() -> dict[str, Any]:
 def _subject(kind: str, goal: Mapping[str, Any] | None,
              runs: Sequence[Mapping[str, Any]],
              tests: Sequence[Mapping[str, Any]],
-             declaration: Mapping[str, Any] | None) -> str:
+             declaration: Mapping[str, Any] | None,
+             validation: Mapping[str, Any] | None = None) -> str:
     if goal:
         base = f"goal:{goal['id']}"
     elif runs:
         base = f"run:{runs[0]['run_id']}"
     elif tests:
         base = f"test:{tests[0]['key']}"
+    elif validation:
+        base = f"validation:{validation['target']}"
     else:
         base = "global"
     if kind == "declaration" and declaration:
@@ -681,13 +748,18 @@ def _normalize_record(raw: Mapping[str, Any], *,
                   if raw.get("assessment") is not None else None)
     declaration = (_declaration_ref(raw["declaration"])
                    if raw.get("declaration") is not None else None)
+    validation = (_validation_ref(raw["validation"])
+                  if raw.get("validation") is not None else None)
     refs = _refs(raw["refs"]) if raw.get("refs") is not None else {}
     reason = _redacted(raw.get("reason"), MAX_REASON) or None
 
     if kind == "declaration":
         if declaration is None:
             raise EvidenceStoreError("a declaration record needs a declaration")
-        if assessment is not None or criteria or environments:
+        if assessment is not None or validation is not None:
+            raise EvidenceStoreError(
+                "a declaration is not an assessment or validation")
+        if criteria or environments:
             raise EvidenceStoreError(
                 "a declaration cannot carry observed sections")
         if any(run.get("state") != "unknown" or run.get("status")
@@ -708,6 +780,8 @@ def _normalize_record(raw: Mapping[str, Any], *,
             raise EvidenceStoreError("an assessment record needs an assessment")
         if declaration is not None:
             raise EvidenceStoreError("an assessment is not a declaration")
+        if validation is not None:
+            raise EvidenceStoreError("an assessment is not a validation")
         evidence = "verified" if assessment["green"] else "observed"
         freshness = ("current" if assessment["status"] in ("green", "failed")
                      else "unknown")
@@ -725,10 +799,32 @@ def _normalize_record(raw: Mapping[str, Any], *,
             }
         else:
             verification = _verification_ref(raw["verification"])
-    else:
+    elif kind == "validation":
+        if validation is None:
+            raise EvidenceStoreError("a validation record needs validation")
         if declaration is not None or assessment is not None:
             raise EvidenceStoreError(
-                "an observation cannot carry declaration/assessment sections")
+                "a validation cannot carry declaration/assessment sections")
+        if goal is not None or runs or tests or criteria or environments:
+            raise EvidenceStoreError(
+                "a validation cannot carry goal/run/test/environment sections")
+        evidence = "verified" if validation["passed"] else "observed"
+        freshness = "current" if complete else "unknown"
+        checks = [{"name": item["name"], "state": item["state"]}
+                  for item in validation["checks"]]
+        verification = {
+            "state": "verified" if validation["passed"] else "unverified",
+            "method": validation["method"],
+            "checks": checks,
+            "reasons": ([] if validation["passed"]
+                        else ["validation did not pass"]),
+        }
+    else:
+        if declaration is not None or assessment is not None \
+                or validation is not None:
+            raise EvidenceStoreError(
+                "an observation cannot carry declaration/assessment/"
+                "validation sections")
         evidence = raw.get("evidence")
         if evidence not in ("observed", "verified"):
             raise EvidenceStoreError(
@@ -769,7 +865,7 @@ def _normalize_record(raw: Mapping[str, Any], *,
         "freshness": freshness,
         "complete": complete,
         "reason": reason,
-        "subject": _subject(kind, goal, runs, tests, declaration),
+        "subject": _subject(kind, goal, runs, tests, declaration, validation),
         "goal": goal,
         "criteria": criteria,
         "runs": runs,
@@ -777,6 +873,7 @@ def _normalize_record(raw: Mapping[str, Any], *,
         "environments": environments,
         "assessment": assessment,
         "declaration": declaration,
+        "validation": validation,
         "verification": verification,
         "refs": refs,
     }
@@ -878,6 +975,8 @@ def _validate_record(record: Any, *, line: int) -> dict[str, Any]:
                   if record.get("assessment") is not None else None)
     declaration = (_declaration_ref(record["declaration"])
                    if record.get("declaration") is not None else None)
+    validation = (_validation_ref(record["validation"])
+                  if record.get("validation") is not None else None)
     verification = _verification_ref(record.get("verification"))
     _refs(record.get("refs") or {})
     if record["kind"] == "declaration" and verification["state"] != "unverified":
@@ -899,12 +998,37 @@ def _validate_record(record: Any, *, line: int) -> dict[str, Any]:
             raise EvidenceStoreError(
                 f"{where} assessment evidence/freshness disagree")
     if record.get("subject") != _subject(
-            record["kind"], goal, runs, tests, declaration):
+            record["kind"], goal, runs, tests, declaration, validation):
         raise EvidenceStoreError(f"{where} subject does not match its refs")
     if record["kind"] == "declaration" and declaration is None:
         raise EvidenceStoreError(f"{where} declaration has no declaration")
+    if record["kind"] == "validation":
+        if validation is None:
+            raise EvidenceStoreError(f"{where} validation has no validation")
+        if declaration is not None or assessment is not None:
+            raise EvidenceStoreError(
+                f"{where} validation carries a foreign section")
+        if (record.get("goal") is not None or record.get("runs")
+                or record.get("tests") or record.get("criteria")
+                or record.get("environments")):
+            raise EvidenceStoreError(
+                f"{where} validation carries observed join sections")
+        expected_evidence = ("verified" if validation["passed"]
+                             else "observed")
+        if record["evidence"] != expected_evidence:
+            raise EvidenceStoreError(
+                f"{where} validation evidence disagrees")
+        if record["freshness"] not in ("current", "unknown"):
+            raise EvidenceStoreError(
+                f"{where} validation has invalid freshness")
+    elif record["kind"] != "declaration" and validation is not None:
+        raise EvidenceStoreError(
+            f"{where} {record['kind']} carries a validation section")
     if record["kind"] == "declaration":
-        if assessment is not None or criteria or environments:
+        if assessment is not None or validation is not None:
+            raise EvidenceStoreError(
+                f"{where} declaration carries an assessment or validation")
+        if criteria or environments:
             raise EvidenceStoreError(
                 f"{where} declaration carries observed sections")
         if any(run.get("state") != "unknown" or run.get("status")
@@ -919,8 +1043,9 @@ def _validate_record(record: Any, *, line: int) -> dict[str, Any]:
                 f"{where} declaration carries observed test results")
     if record["kind"] == "assessment" and assessment is None:
         raise EvidenceStoreError(f"{where} assessment has no assessment")
-    if record["kind"] == "observation" and (assessment is not None
-                                            or declaration is not None):
+    if record["kind"] == "observation" and (
+            assessment is not None or declaration is not None
+            or validation is not None):
         raise EvidenceStoreError(f"{where} observation has a foreign section")
     return dict(record)
 
@@ -1651,6 +1776,55 @@ def record_assessment(
                          max_records=max_records, max_age_ms=max_age_ms)
 
 
+def record_validation(
+        root: str | Path, *, source: str, command: str, exit_code: int,
+        target: str, method: str, passed: bool,
+        observed_at: int | str | None = None,
+        expected_base: str | None = None,
+        observed_base: str | None = None,
+        artifact_digest: str | None = None,
+        coverage: str | None = None,
+        checks: Sequence[Mapping[str, Any]] = (),
+        refs: Mapping[str, Any] | None = None,
+        now_ms: int | None = None,
+        idempotency_key: str | None = None,
+        max_records: int = MAX_RECORDS,
+        max_age_ms: int = MAX_AGE_MS) -> dict[str, Any]:
+    """Store one deterministic command-validation result.
+
+    This is the additive adapter for outcome validation (S1-B): the existing
+    observation/assessment kinds are joins or preflight reports and cannot
+    carry a command, exit code and artifact digest without overloading their
+    declared sections.  The record keeps the same envelope, lock, idempotency
+    and retention semantics as every other evidence record.
+    """
+    record: dict[str, Any] = {
+        "kind": "validation",
+        "source": _source(source),
+        "observed_at": ("unknown" if observed_at is None else observed_at),
+        "evidence": "verified" if passed else "observed",
+        "freshness": "current",
+        "complete": True,
+        "reason": None,
+        "validation": {
+            "command": command,
+            "exit_code": exit_code,
+            "target": target,
+            "expected_base": expected_base,
+            "observed_base": observed_base,
+            "artifact_digest": artifact_digest,
+            "method": method,
+            "coverage": coverage,
+            "passed": passed,
+            "checks": list(checks),
+        },
+        "refs": dict(refs or {}),
+    }
+    return append_record(root, record, now_ms=now_ms,
+                         idempotency_key=idempotency_key,
+                         max_records=max_records, max_age_ms=max_age_ms)
+
+
 # ---------------------------------------------------------------------------
 # Public read API
 # ---------------------------------------------------------------------------
@@ -1840,5 +2014,6 @@ __all__ = [
     "RECORD_VERSION", "STORE_NAMESPACE", "STORE_STATES", "STORE_VERSION",
     "append_record", "compact_store", "journal_path", "latest_record",
     "read_store", "record_assessment", "record_declaration",
-    "record_observation", "record_partial", "store_dir", "store_summary",
+    "record_observation", "record_partial", "record_validation", "store_dir",
+    "store_summary",
 ]
