@@ -23,6 +23,40 @@ From least to most inclusive:
 | `package` | All tests in the changed files' packages/modules, still capped. |
 | `all` | Every discovered test file, still capped and with omissions reported. |
 
+Adapter-specific relationships such as a test mentioning a scenario, seed,
+pack, or table are descriptive evidence only. They do not establish complete
+behavioral coverage and do not suppress the configured fallback. A narrower
+data-driven plan requires an explicit completeness declaration in validated
+project configuration; Ozagia core does not infer that contract from mentions.
+Graph-derived test paths are accepted only when repository-relative and free
+of traversal components. JSON data files are source changes unless their
+recognized filename identifies them as configuration.
+
+An optional `[test_coverage]` section in the repository's `.ozagia.toml` can
+declare complete mappings when the project has reviewed its data loading and
+test coverage. User and environment config cannot assert project coverage.
+Every mapping must
+name changed-path globs, existing discovered test files, `complete = true`,
+and a non-empty evidence note:
+
+```toml
+[[test_coverage.rules]]
+paths = ["scenarios/**", "seeds/**"]
+tests = ["tests/test_scenario_loading.py", "tests/test_seed_loading.py"]
+complete = true
+evidence = "These tests cover all runtime consumers of scenario and seed data."
+```
+
+The planner validates this contract on each plan. Invalid declarations are
+reported and ignored. Rules apply only to matching changed paths; in a mixed
+change, every other source file still needs usable graph or package evidence,
+or the configured fallback runs. The declaration selects named test files; it
+does not claim those tests passed.
+
+These declarations affect `ozagia.core.testing.plan` only. Captured pytest
+commands continue to use `[tests] select` or `testing.captured`; a project
+coverage declaration never narrows a command typed as `pytest`.
+
 A changed test file, a test file that failed in the last known run and a test
 file containing a flaky test are **mandatory**: they are selected whole-file
 and are never silently dropped by `max_tests`. If the mandatory set itself

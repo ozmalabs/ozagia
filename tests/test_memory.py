@@ -8,6 +8,7 @@ Ocelot tree.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -196,6 +197,108 @@ def test_build_and_query(tmp_path: Path, seed_adapter) -> None:
     related = mem.related(int(fail["id"]))
     assert any(x["label"] == "test_add_negative"
                for x in related.get("refers_to", []))
+
+
+def test_context_skips_adapter_hits_without_readable_snippets(
+        tmp_path: Path, seed_adapter) -> None:
+    _fixture(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    build_index(tmp_path, out, include_docs="features",
+                include_git=False, include_scripts=False)
+    mem = DevMemory(out, tmp_path / "var" / "journal.jsonl")
+    file_id = next(nid for nid, node in mem.nodes.items()
+                   if node.get("type") == "File"
+                   and node.get("attrs", {}).get("path") == "domains/foo.py")
+    adapter_id = mem._next_id
+    mem._next_id += 1
+    mem.nodes[adapter_id] = {
+        "id": adapter_id, "type": "AdapterOnlyRecord",
+        "attrs": {"name": "mystery retrieval anchor"},
+    }
+
+    # Model the graph search ordering seen when a project adapter contributes
+    # custom nodes that have no file-backed snippet.
+    mem.search = lambda _text, **_kwargs: [
+        mem.view(adapter_id), mem.view(file_id)]
+    ctx = mem.context("mystery retrieval anchor", max_items=1)
+
+    assert len(ctx["items"]) == 1
+    assert ctx["items"][0]["attrs"]["path"] == "domains/foo.py"
+    assert ctx["items"][0]["snippet"]["text"].strip()
+
+
+def test_anchor_leaves_ambiguous_single_words_to_fuzzy_search(
+        tmp_path: Path, seed_adapter) -> None:
+    _fixture(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    build_index(tmp_path, out, include_docs="features",
+                include_git=False, include_scripts=False)
+    mem = DevMemory(out, tmp_path / "var" / "journal.jsonl")
+
+    def add_file(path: str) -> int:
+        nid = mem._next_id
+        mem._next_id += 1
+        mem.nodes[nid] = {"id": nid, "type": "File",
+                          "attrs": {"path": path, "name": path}}
+        mem._index_add(nid)
+        return nid
+
+    first = add_file("domains/knowledge.py")
+    assert first in mem._anchor_nodes("knowledge")
+
+    second = add_file("packs/knowledge.json")
+    anchors = mem._anchor_nodes("knowledge")
+    assert first not in anchors
+    assert second not in anchors
+
+
+def test_search_ranking_is_stable_when_another_node_type_grows(
+        tmp_path: Path, seed_adapter) -> None:
+    _fixture(tmp_path)
+    out = tmp_path / "var" / "dev_graph.json"
+    build_index(tmp_path, out, include_docs="features",
+                include_git=False, include_scripts=False)
+    mem = DevMemory(out, tmp_path / "var" / "journal.jsonl")
+
+    def add_node(typ: str, attrs: dict[str, str]) -> int:
+        nid = mem._next_id
+        mem._next_id += 1
+        mem.nodes[nid] = {"id": nid, "type": typ, "attrs": attrs}
+        mem._index_add(nid)
+        return nid
+
+    file_id = add_node("File", {"path": "domains/quartz.py"})
+    test_id = add_node("Test", {"name": "test_zircon"})
+    pair = {file_id, test_id}
+    before = [int(hit["id"]) for hit in mem.search("quartz zircon")
+              if int(hit["id"]) in pair]
+    original_idf = mem._idf
+
+    def global_idf(token: str, _type_name: str | None = None) -> float:
+        df = mem._df.get(token, 0)
+        return math.log((mem._n_labels + 1) / (df + 1)) + 1.0
+
+    mem._idf = global_idf
+    global_before = [int(hit["id"])
+                     for hit in mem.search("quartz zircon")
+                     if int(hit["id"]) in pair]
+    mem._idf = original_idf
+
+    for number in range(100):
+        add_node("AdapterNoise", {"name": f"quartz_note_{number}"})
+    mem._n_labels = len(mem.nodes)
+    after = [int(hit["id"]) for hit in mem.search("quartz zircon")
+             if int(hit["id"]) in pair]
+    mem._idf = global_idf
+    global_after = [int(hit["id"])
+                    for hit in mem.search("quartz zircon")
+                    if int(hit["id"]) in pair]
+    mem._idf = original_idf
+
+    assert before == after
+    assert after[0] == file_id
+    assert global_before[0] == file_id
+    assert global_after[0] == test_id
 
 
 def test_changed(tmp_path: Path) -> None:

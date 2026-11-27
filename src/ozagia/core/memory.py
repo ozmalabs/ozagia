@@ -2057,6 +2057,8 @@ class DevMemory:
         # hit by how distinctive its matched words are. This is a mechanical
         # retrieval heuristic, not an agent decision.
         self._df: dict[str, int] = {}
+        self._type_df: dict[str, dict[str, int]] = {}
+        self._type_label_counts: dict[str, int] = {}
         # Exact normalized-name index for task anchors (seed/file/rule/doc/
         # test), so `context` does not scan every node for every phrasing.
         self._anchor_index: dict[str, list[tuple[int, int]]] = {}
@@ -2106,6 +2108,12 @@ class DevMemory:
             self._type_ids.setdefault(type_name, {})[nid] = None
         for t in self._label_tokens(nid):
             self._df[t] = self._df.get(t, 0) + 1
+            if isinstance(type_name, str):
+                type_df = self._type_df.setdefault(type_name, {})
+                type_df[t] = type_df.get(t, 0) + 1
+        if isinstance(type_name, str):
+            self._type_label_counts[type_name] = (
+                self._type_label_counts.get(type_name, 0) + 1)
         names = self._anchor_names(nid)
         if names:
             prio = self._ANCHOR_PRIO[self.nodes[nid]["type"]]
@@ -2131,6 +2139,20 @@ class DevMemory:
                 self._df[t] = left
             else:
                 self._df.pop(t, None)
+            if isinstance(type_name, str):
+                type_df = self._type_df.get(type_name, {})
+                type_left = type_df.get(t, 0) - 1
+                if type_left > 0:
+                    type_df[t] = type_left
+                else:
+                    type_df.pop(t, None)
+        if isinstance(type_name, str):
+            count = self._type_label_counts.get(type_name, 0) - 1
+            if count > 0:
+                self._type_label_counts[type_name] = count
+            else:
+                self._type_label_counts.pop(type_name, None)
+                self._type_df.pop(type_name, None)
         names = self._anchor_names(nid)
         if names:
             prio = self._ANCHOR_PRIO[self.nodes[nid]["type"]]
@@ -2255,7 +2277,11 @@ class DevMemory:
                 if e["type"] == edge_type]
 
     # -- search ------------------------------------------------------------- #
-    def _idf(self, token: str) -> float:
+    def _idf(self, token: str, type_name: str | None = None) -> float:
+        if type_name is not None:
+            df = self._type_df.get(type_name, {}).get(_stem(token), 0)
+            count = self._type_label_counts.get(type_name, 0)
+            return math.log((count + 1) / (df + 1)) + 1.0
         df = self._df.get(_stem(token), 0)
         return math.log((self._n_labels + 1) / (df + 1)) + 1.0
 
@@ -2276,7 +2302,7 @@ class DevMemory:
             qstem = [_stem(t) for t in toks]
             matched = [t for t in qstem if t in label_toks]
             coverage = len(matched) / max(1, len(qstem))
-            idf_sum = sum(self._idf(t) for t in matched)
+            idf_sum = sum(self._idf(t, n["type"]) for t in matched)
             score = 0.0
             if label == q:
                 score += 100
@@ -2294,7 +2320,8 @@ class DevMemory:
                     hmatched = [t for t in qstem if t in hay]
                     if hmatched:
                         hcov = len(hmatched) / max(1, len(qstem))
-                        score += 4.0 * sum(self._idf(t) for t in hmatched) \
+                        score += 4.0 * sum(self._idf(t, n["type"])
+                                           for t in hmatched) \
                                  + 8.0 * hcov
             if score <= 0:
                 continue
@@ -2964,7 +2991,18 @@ class DevMemory:
         # seed, not every helper named *_seed_rule*. Use dev_symbol/search for
         # an explicitly named function.
         for phrase in phrases:
-            for _prio, nid in self._anchor_index.get(phrase, []):
+            matches = self._anchor_index.get(phrase, [])
+            # A lone common word is not an exact anchor when several files or
+            # documents share it. Let fuzzy search weigh the full query in
+            # that case; otherwise an ambiguous word can crowd out the actual
+            # task evidence. Multi-word identifiers remain exact anchors.
+            if "_" not in phrase and matches:
+                best_prio = min(prio for prio, _nid in matches)
+                best_matches = [row for row in matches if row[0] == best_prio]
+                if len({nid for _prio, nid in best_matches}) > 1:
+                    continue
+                matches = best_matches
+            for _prio, nid in matches:
                 if nid not in found:
                     found.append(nid)
             if len(found) >= 6:
@@ -3076,10 +3114,69 @@ class DevMemory:
         expanded.sort(key=lambda h: order.get(h["type"], 9))
         hits.extend(expanded)
         seen_ids = {x["id"] for x in hits}
+        # A project's explicit key-doc list is evidence of intended reading
+        # priority. Promote matching indexed docs ahead of fuzzy document
+        # hits; this does not infer freshness or mark other docs historical.
+        from ozagia.config import load_project_config
+        from ozagia.core.project_invariants import meaningful_terms
+        key_doc_paths = load_project_config(self.raw_repo_root).key_docs
+        task_terms = {
+            _stem(token) for token in meaningful_terms(task)
+            if token not in _STOPWORDS | _GENERIC_QUERY_TOKENS
+        }
+        preferred_docs: list[tuple[int, int, dict[str, Any]]] = []
+        for rank, path in enumerate(key_doc_paths[:20]):
+            for doc_id in self._nodes_of("Doc"):
+                attrs = (self.node(doc_id) or {}).get("attrs") or {}
+                if attrs.get("path") != path or doc_id in seen_ids:
+                    continue
+                text = " ".join((str(attrs.get("title") or ""),
+                                 self._read(path))).lower()
+                doc_terms = {
+                    _stem(token) for token in meaningful_terms(text)
+                    if token not in _STOPWORDS | _GENERIC_QUERY_TOKENS
+                }
+                overlap = len(task_terms & doc_terms)
+                label_terms = {
+                    _stem(token) for token in meaningful_terms(
+                        str(attrs.get("title") or "") + " " + path)
+                    if token not in _STOPWORDS | _GENERIC_QUERY_TOKENS
+                }
+                if overlap >= 2 or task_terms & label_terms:
+                    preferred_docs.append((rank, -overlap, {
+                        "id": doc_id, "type": "Doc",
+                        "label": self.label(doc_id),
+                        "why": "matches task and is listed in [index] key_docs",
+                    }))
+        preferred_docs.sort(key=lambda item: (item[0], item[1]))
+        for _rank, _overlap, hit in preferred_docs:
+            if hit["id"] not in seen_ids:
+                hits.append(hit)
+                seen_ids.add(hit["id"])
         for h in self.search(task, limit=max_items * 5):
             if h["id"] not in seen_ids:
                 hits.append(h)
                 seen_ids.add(h["id"])
+        # Reserve a bounded share for matching project invariants. Their
+        # source/check paths are useful task context, so they count against
+        # the same token budget as graph snippets.
+        from ozagia.core.project_invariants import declarations
+        invariant_context = declarations(self.raw_repo_root, task)
+        total_budget = max(0, int(budget_tokens))
+        invariant_budget = min(total_budget // 4, 1200)
+        selected_invariants: list[dict[str, Any]] = []
+        invariant_tokens = 0
+        for row in invariant_context["invariants"]:
+            cost = self._estimate_tokens(json.dumps(row, ensure_ascii=False,
+                                                    sort_keys=True))
+            if invariant_tokens + cost <= invariant_budget:
+                selected_invariants.append(row)
+                invariant_tokens += cost
+        invariant_context["invariants"] = selected_invariants
+        invariant_context["estimated_tokens"] = invariant_tokens
+        invariant_context["budget_tokens"] = invariant_budget
+        item_budget = total_budget - invariant_tokens
+
         picked: list[dict[str, Any]] = []
         total_tokens = 0
         per_type: dict[str, int] = {}
@@ -3091,7 +3188,6 @@ class DevMemory:
             typ = h["type"]
             if per_type.get(typ, 0) >= type_caps.get(typ, 1):
                 continue
-            per_type[typ] = per_type.get(typ, 0) + 1
             nid = int(h["id"])
             # `auto` gives the first two anchors the full body and compresses
             # the rest to signatures/headings; `outline` compresses everything.
@@ -3101,14 +3197,22 @@ class DevMemory:
                            or (mode == "auto" and len(picked) >= 2))
             snap = self.outline(nid) if use_outline else self.snippet(nid)
             text = snap.get("text", "")
-            item_cap = min(max_chars, 6000)
+            # Adapter graph nodes can be useful search hits without having a
+            # readable source snippet. Do not let those empty entries consume
+            # the context item limit and hide later source-backed results.
+            if not text.strip():
+                continue
+            item_cap = min(max(0, max_chars), 6000)
             if len(text) > item_cap:
                 text = text[:item_cap] + "\n... (truncated)"
                 snap["text"] = text
-            est = int(snap.get("estimated_tokens")
-                      or self._estimate_tokens(text))
-            if picked and total_tokens + est > budget_tokens:
-                break
+            # Truncation changes the cost; discard the original snippet's
+            # estimate so a shortened first hit can fit the real budget.
+            est = self._estimate_tokens(text)
+            if total_tokens + est > item_budget:
+                # A large high-ranked hit must not hide a later compact one.
+                # It also must not consume the type quota when it is omitted.
+                continue
             snap["estimated_tokens"] = est
             picked.append({
                 "node": h,
@@ -3118,6 +3222,7 @@ class DevMemory:
                 "related": self.related(nid, limit=4),
             })
             total_tokens += est
+            per_type[typ] = per_type.get(typ, 0) + 1
             max_chars -= len(text)
             if max_chars <= 0:
                 break
@@ -3126,10 +3231,12 @@ class DevMemory:
             repo = self.view(nid) | {"attrs": (self.node(nid) or {}).get("attrs", {})}
         changed = self.changed(limit=20)
         return {"task": task, "repo": repo, "items": picked,
+                "invariants": invariant_context,
                 "changed": (changed.get("files") if changed.get("ok") else []),
                 "budget": {"mode": mode, "budget_tokens": int(budget_tokens),
-                           "estimated_tokens": total_tokens,
-                           "items": len(picked)},
+                           "estimated_tokens": total_tokens + invariant_tokens,
+                           "items": len(picked),
+                           "invariants": len(selected_invariants)},
                 "journal": self.journal_decisions(5),
                 "snapshot": self.staleness()}
 
@@ -3288,6 +3395,16 @@ class DevMemory:
                     lines.append("```")
             lines.append("")
             lines.append("budget: " + json.dumps(ctx.get("budget", {})))
+            declared = (ctx.get("invariants") or {}).get("invariants") or []
+            if declared:
+                lines.append("")
+                lines.append("## Project-declared behavioral invariants")
+                lines.append("Evidence: declared; source and check paths are pointers, not pass results.")
+                for item in declared:
+                    lines.append(f"- **{item['id']}**: {item['statement']}")
+                    lines.append("  source: " + ", ".join(item["sources"]))
+                    if item["checks"]:
+                        lines.append("  checks: " + ", ".join(item["checks"]))
         text = "\n".join(lines).strip() + "\n"
         out_path = None
         if write:

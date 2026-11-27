@@ -1,0 +1,56 @@
+{
+  "schema": "ozagia.retrieval.tasks.v1",
+  "title": "Bigville adapter navigation retrieval probes",
+  "source_root": "/applications/data/projects/bigville",
+  "provenance": "Six frozen tasks selected from distinct Bigville scenario, seed-dependency, generated-seed, pack, and route examples. Expected paths are the source records at the ends of the requested navigation; representative graph relationships are independently asserted by navigation_eval.py.",
+  "tasks": [
+    {
+      "id": "scenario-seed-ambiguity",
+      "task": "For the house argument scenario, locate its conversation knowledge definition and determine which source copy the runtime reference can mean.",
+      "style": "symptom",
+      "area": "seeds_boot",
+      "expected_files": ["scenarios/house_argument.json", "seeds/conversation.json", "bigville/seeds/conversation.json"],
+      "notes": "Exercises scenario-to-seed navigation and path-distinct duplicate ID handling."
+    },
+    {
+      "id": "generated-charter-source-pack",
+      "task": "Trace the generated council charter knowledge back to the authored pack table and identify the declared source provenance.",
+      "style": "symptom",
+      "area": "seeds_boot",
+      "expected_files": ["bigville/seeds/gen_charter_bigville_council_charter.json", "packs/bigville/pack.json", "packs/bigville/frames/charters.json"],
+      "notes": "Exercises generated seed to pack table provenance navigation."
+    },
+    {
+      "id": "generated-terrain-movement-source-pack",
+      "task": "Find the authored terrain movement rules table that produced the packaged terrain movement knowledge, including its pack declaration.",
+      "style": "symptom",
+      "area": "seeds_boot",
+      "expected_files": ["bigville/seeds/bigville_terrain_movement.json", "packs/bigville/pack.json", "packs/bigville/world/terrain_movement.json"],
+      "notes": "Second generated seed/table example from a different pack domain."
+    },
+    {
+      "id": "seed-dependency-ambiguous-copy",
+      "task": "The packaged bell schedule declares a dependency on shared bell knowledge. Find every available manifest for that dependency and determine whether the ID selects one copy.",
+      "style": "symptom",
+      "area": "seeds_boot",
+      "expected_files": ["bigville/seeds/bigville_bell_schedule.json", "seeds/bigville_bells.json", "bigville/seeds/bigville_bells.json"],
+      "notes": "Exercises a manifest dependency edge with duplicate path-distinct target IDs."
+    },
+    {
+      "id": "monopoly-scenario-seed-ambiguity",
+      "task": "For the four player Monopoly scenario, find both conversation manifests and both conversation reply manifests that its ID-only seed references can resolve to.",
+      "style": "symptom",
+      "area": "seeds_boot",
+      "expected_files": ["scenarios/monopoly_four_players.json", "seeds/conversation.json", "bigville/seeds/conversation.json", "seeds/conversation_reply.json", "bigville/seeds/conversation_reply.json"],
+      "notes": "Second scenario exercises ambiguity across two seed IDs rather than one reference."
+    },
+    {
+      "id": "backend-profiles-browser-server-route",
+      "task": "Trace the management browser's backend profile listing request to the server handler that implements the same HTTP endpoint.",
+      "style": "symptom",
+      "area": "worlds_or_tools",
+      "expected_files": ["bigville/management/http.py", "bigville/management/static/management.js"],
+      "notes": "Exercises explicit browser request to server route joining."
+    }
+  ]
+}

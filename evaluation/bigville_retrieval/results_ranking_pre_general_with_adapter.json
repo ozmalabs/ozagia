@@ -1,0 +1,1254 @@
+{
+  "ok": true,
+  "tool": "ocelot_repo_map_eval",
+  "version": 2,
+  "root": "/applications/data/projects/bigville",
+  "tasks_path": "/home/matt/ozmadev/ozagia/evaluation/bigville_retrieval/tasks.json",
+  "task_set": {
+    "schema": "ozagia.retrieval.tasks.v1",
+    "title": "Bigville offline retrieval set",
+    "source_root": "/applications/data/projects/bigville",
+    "provenance": "Expected files were selected by reading Bigville implementations and focused tests in the read-only checkout. These frozen labels are supplied to Ozagia; the evaluator never imports Bigville."
+  },
+  "task_set_summary": {
+    "tasks": 8,
+    "by_area": {
+      "seeds_boot": 1,
+      "worlds_or_tools": 7
+    },
+    "by_style": {
+      "symptom": 8
+    },
+    "expected_files_total": 17
+  },
+  "task_count": 8,
+  "source_files": 501,
+  "budgets": [
+    300,
+    700,
+    1300
+  ],
+  "arms": [
+    "dev_context"
+  ],
+  "arm_descriptions": {
+    "dev_context": "DevMemory.context items/snippets, executed at the budget."
+  },
+  "cache_path": "/tmp/ozagia-bigville-eval/tags-with-adapter.json",
+  "memory_path": "/tmp/ozagia-bigville-eval/fresh-with-adapter.json",
+  "memory_staleness": {
+    "snapshot_root": "/applications/data/projects/bigville",
+    "root": "/applications/data/projects/bigville",
+    "root_mismatch": false,
+    "snapshot_head": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+    "head": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+    "tree_changed": false,
+    "current_tree_digest": "78f71dd46d52dad691191abd4e66b00ef6ef6513f18058f61078d064f26255b7",
+    "stale": false,
+    "freshness": "fresh",
+    "verification_errors": [],
+    "generated_at": "2026-11-26T23:50:40"
+  },
+  "allow_stale": false,
+  "expected_files_outside_source_universe": [],
+  "total_elapsed_seconds": 14.128,
+  "deterministic_fingerprint": "5ad11de6abf7098a6ec7b0cffab2ea959d0820b22996fbfbad921cdbe0e2ce25",
+  "tasks": [
+    {
+      "id": "game-checkpoint-roundtrip",
+      "task": "Saving and restoring a running session should preserve enough state to continue the same simulation after restart.",
+      "expected_files": [
+        "bigville/game_persistence.py",
+        "tests/test_bigville_game_persistence.py"
+      ],
+      "notes": "Session checkpoint implementation and focused roundtrip tests.",
+      "style": "symptom",
+      "area": "worlds_or_tools"
+    },
+    {
+      "id": "deterministic-population-report",
+      "task": "Repeated population summaries with the same sampling seed should report stable estimates and uncertainty while retaining exact counts.",
+      "expected_files": [
+        "bigville/reporting.py",
+        "tests/test_phase091_food_reporting.py"
+      ],
+      "notes": "Reporting computes exact values and seeded finite population sample estimates.",
+      "style": "symptom",
+      "area": "worlds_or_tools"
+    },
+    {
+      "id": "lazy-affordance-mode",
+      "task": "Large action menus should be generated on demand when the configured automatic mode detects that eager enumeration is too costly.",
+      "expected_files": [
+        "bigville/game.py",
+        "tests/test_lazy_evaluation.py"
+      ],
+      "notes": "Mode resolution lives in Game; lazy evaluation behavior has dedicated tests.",
+      "style": "symptom",
+      "area": "worlds_or_tools"
+    },
+    {
+      "id": "tick-graph-resource-conflicts",
+      "task": "When concurrent actions claim the same scarce item, resolution should choose a deterministic winner and leave conflicting claims rejected.",
+      "expected_files": [
+        "worlds/tick_graph.py",
+        "tests/test_tick_graph_executor.py"
+      ],
+      "notes": "Pure claim arbitration and its executor tests are the relevant implementation and validation sites.",
+      "style": "symptom",
+      "area": "worlds_or_tools"
+    },
+    {
+      "id": "seed-manifest-recovery",
+      "task": "Restoring a saved knowledge graph should preserve loaded seed manifests and reject malformed manifest data instead of silently losing it.",
+      "expected_files": [
+        "bigville/runtime.py",
+        "tests/test_node_origins.py"
+      ],
+      "notes": "Graph checkpoint encoding and seed manifest validation are implemented in runtime; node provenance tests cover loaded origins.",
+      "style": "symptom",
+      "area": "seeds_boot"
+    },
+    {
+      "id": "backend-action-boundary",
+      "task": "All cognition providers should submit decisions through one shared contract so a provider cannot bypass the world's action checks.",
+      "expected_files": [
+        "bigville/backends/protocol.py",
+        "bigville/game.py",
+        "tests/test_bigville_backends.py"
+      ],
+      "notes": "Backend interface, game decision loop, and backend contract tests.",
+      "style": "symptom",
+      "area": "worlds_or_tools"
+    },
+    {
+      "id": "scenario-input-validation",
+      "task": "Scenario loading should accept structured in memory definitions and file paths while producing a clear validation failure for malformed input.",
+      "expected_files": [
+        "bigville/scenarios.py",
+        "tests/test_bigville_scenarios.py"
+      ],
+      "notes": "Scenario loader and scenario validation suite.",
+      "style": "symptom",
+      "area": "worlds_or_tools"
+    },
+    {
+      "id": "public-game-construction",
+      "task": "The public entry point should build a game from a selected scenario and seed while keeping provider and runtime choices configurable.",
+      "expected_files": [
+        "bigville/api.py",
+        "tests/test_engine_defaults.py"
+      ],
+      "notes": "Public API construction and defaults tests.",
+      "style": "symptom",
+      "area": "worlds_or_tools"
+    }
+  ],
+  "aggregates": [
+    {
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "tasks": 8,
+      "mean_recall_at_budget": 0.0625,
+      "mean_recall_content_at_budget": 0.0625,
+      "mean_precision": 0.041667,
+      "mean_evidence_coverage": 0.277171,
+      "mean_evidence_density": 37.818825,
+      "mean_evidence_terms": 3.5,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 9.933912,
+      "mean_selected_files": 2.625,
+      "mean_content_files": 2.625,
+      "mean_estimated_tokens": 263.88,
+      "mean_elapsed_seconds": 0.5392,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 8,
+      "recall_1_tasks": 0
+    },
+    {
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "tasks": 8,
+      "mean_recall_at_budget": 0.1875,
+      "mean_recall_content_at_budget": 0.1875,
+      "mean_precision": 0.0875,
+      "mean_evidence_coverage": 0.410724,
+      "mean_evidence_density": 30.001775,
+      "mean_evidence_terms": 5.25,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 19.736325,
+      "mean_selected_files": 4.125,
+      "mean_content_files": 4.125,
+      "mean_estimated_tokens": 662.75,
+      "mean_elapsed_seconds": 0.5389,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 8,
+      "recall_1_tasks": 0
+    },
+    {
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "tasks": 8,
+      "mean_recall_at_budget": 0.125,
+      "mean_recall_content_at_budget": 0.125,
+      "mean_precision": 0.045833,
+      "mean_evidence_coverage": 0.498179,
+      "mean_evidence_density": 22.441588,
+      "mean_evidence_terms": 6.375,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 25.3123,
+      "mean_selected_files": 5.125,
+      "mean_content_files": 5.125,
+      "mean_estimated_tokens": 1153.12,
+      "mean_elapsed_seconds": 0.6138,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 8,
+      "recall_1_tasks": 0
+    }
+  ],
+  "runs": [
+    {
+      "task_id": "game-checkpoint-roundtrip",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "tests/test_phase066_session_log.py",
+        "tools/verify_deterministic_chance.py",
+        "docs/screenshots/bigville-simulation.gif"
+      ],
+      "estimated_tokens": 300,
+      "elapsed_seconds": 0.5289,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "bigville/game_persistence.py",
+        "tests/test_bigville_game_persistence.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/test_phase066_session_log.py",
+        "tools/verify_deterministic_chance.py",
+        "docs/screenshots/bigville-simulation.gif"
+      ],
+      "task_term_count": 11,
+      "evidence_terms": 5,
+      "evidence_symbols": 0,
+      "evidence_weight": 15.9861,
+      "evidence_coverage": 0.454545,
+      "evidence_density": 53.2871,
+      "items": 3
+    },
+    {
+      "task_id": "game-checkpoint-roundtrip",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_fix_llm_checkpoint.py",
+        "tests/test_mixed_ocelot_checkpoint_parity.py",
+        "tools/verify_deterministic_chance.py",
+        "docs/screenshots/bigville-simulation.gif"
+      ],
+      "estimated_tokens": 679,
+      "elapsed_seconds": 0.5263,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 5,
+      "hits": [],
+      "misses": [
+        "bigville/game_persistence.py",
+        "tests/test_bigville_game_persistence.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "README.md",
+        "tests/test_fix_llm_checkpoint.py",
+        "tests/test_mixed_ocelot_checkpoint_parity.py",
+        "tools/verify_deterministic_chance.py",
+        "docs/screenshots/bigville-simulation.gif"
+      ],
+      "task_term_count": 11,
+      "evidence_terms": 4,
+      "evidence_symbols": 0,
+      "evidence_weight": 15.5227,
+      "evidence_coverage": 0.363636,
+      "evidence_density": 22.8611,
+      "items": 5
+    },
+    {
+      "task_id": "game-checkpoint-roundtrip",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_energy_reserve_experiment.py",
+        "tests/test_mixed_ocelot_checkpoint_parity.py",
+        "tools/verify_deterministic_chance.py",
+        "docs/screenshots/bigville-simulation.gif",
+        "seeds/default_mode_core.json"
+      ],
+      "estimated_tokens": 1187,
+      "elapsed_seconds": 0.5366,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 6,
+      "hits": [],
+      "misses": [
+        "bigville/game_persistence.py",
+        "tests/test_bigville_game_persistence.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "README.md",
+        "tests/test_energy_reserve_experiment.py",
+        "tests/test_mixed_ocelot_checkpoint_parity.py",
+        "tools/verify_deterministic_chance.py",
+        "docs/screenshots/bigville-simulation.gif",
+        "seeds/default_mode_core.json"
+      ],
+      "task_term_count": 11,
+      "evidence_terms": 4,
+      "evidence_symbols": 0,
+      "evidence_weight": 16.0475,
+      "evidence_coverage": 0.363636,
+      "evidence_density": 13.5193,
+      "items": 6
+    },
+    {
+      "task_id": "deterministic-population-report",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "domains/population.py"
+      ],
+      "estimated_tokens": 298,
+      "elapsed_seconds": 0.574,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 1,
+      "hits": [],
+      "misses": [
+        "bigville/reporting.py",
+        "tests/test_phase091_food_reporting.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "domains/population.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 3,
+      "evidence_symbols": 0,
+      "evidence_weight": 7.9381,
+      "evidence_coverage": 0.230769,
+      "evidence_density": 26.638,
+      "items": 1
+    },
+    {
+      "task_id": "deterministic-population-report",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "domains/population.py",
+        "tests/test_phase065_impairment.py",
+        "bigville/reference_requirements.py",
+        "bigville/reporting.py"
+      ],
+      "estimated_tokens": 687,
+      "elapsed_seconds": 0.5523,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [
+        "bigville/reporting.py"
+      ],
+      "misses": [
+        "tests/test_phase091_food_reporting.py"
+      ],
+      "recall": 0.5,
+      "precision": 0.25,
+      "recall_content": 0.5,
+      "content_files": [
+        "domains/population.py",
+        "tests/test_phase065_impairment.py",
+        "bigville/reference_requirements.py",
+        "bigville/reporting.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 3,
+      "evidence_symbols": 0,
+      "evidence_weight": 11.6711,
+      "evidence_coverage": 0.230769,
+      "evidence_density": 16.9885,
+      "items": 4
+    },
+    {
+      "task_id": "deterministic-population-report",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "domains/population.py",
+        "tests/test_phase019_knowledge.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1203,
+      "elapsed_seconds": 0.5568,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "bigville/reporting.py",
+        "tests/test_phase091_food_reporting.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "domains/population.py",
+        "tests/test_phase019_knowledge.py",
+        "README.md"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 4,
+      "evidence_symbols": 0,
+      "evidence_weight": 16.1116,
+      "evidence_coverage": 0.307692,
+      "evidence_density": 13.3929,
+      "items": 5
+    },
+    {
+      "task_id": "lazy-affordance-mode",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "tests/test_food_search_policy.py"
+      ],
+      "estimated_tokens": 274,
+      "elapsed_seconds": 0.5322,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 1,
+      "hits": [],
+      "misses": [
+        "bigville/game.py",
+        "tests/test_lazy_evaluation.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/test_food_search_policy.py"
+      ],
+      "task_term_count": 12,
+      "evidence_terms": 3,
+      "evidence_symbols": 0,
+      "evidence_weight": 9.3561,
+      "evidence_coverage": 0.25,
+      "evidence_density": 34.1464,
+      "items": 1
+    },
+    {
+      "task_id": "lazy-affordance-mode",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_food_search_policy.py",
+        "bigville/management/drafts.py"
+      ],
+      "estimated_tokens": 646,
+      "elapsed_seconds": 0.5237,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "bigville/game.py",
+        "tests/test_lazy_evaluation.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "README.md",
+        "tests/test_food_search_policy.py",
+        "bigville/management/drafts.py"
+      ],
+      "task_term_count": 12,
+      "evidence_terms": 5,
+      "evidence_symbols": 0,
+      "evidence_weight": 19.2838,
+      "evidence_coverage": 0.416667,
+      "evidence_density": 29.8512,
+      "items": 3
+    },
+    {
+      "task_id": "lazy-affordance-mode",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_phase078_npc.py",
+        "seeds/default_mode_core.json",
+        "bigville/management/drafts.py"
+      ],
+      "estimated_tokens": 1203,
+      "elapsed_seconds": 0.8301,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "bigville/game.py",
+        "tests/test_lazy_evaluation.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "README.md",
+        "tests/test_phase078_npc.py",
+        "seeds/default_mode_core.json",
+        "bigville/management/drafts.py"
+      ],
+      "task_term_count": 12,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 24.0325,
+      "evidence_coverage": 0.5,
+      "evidence_density": 19.9771,
+      "items": 4
+    },
+    {
+      "task_id": "tick-graph-resource-conflicts",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "tests/test_tick_simultaneous.py",
+        "worlds/bigville_world.py",
+        "bigville/backends/npc.py",
+        "bigville/seeds/gen_law_giantville_theft_law.json"
+      ],
+      "estimated_tokens": 250,
+      "elapsed_seconds": 0.5351,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "worlds/tick_graph.py",
+        "tests/test_tick_graph_executor.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/test_tick_simultaneous.py",
+        "worlds/bigville_world.py",
+        "bigville/backends/npc.py",
+        "bigville/seeds/gen_law_giantville_theft_law.json"
+      ],
+      "task_term_count": 14,
+      "evidence_terms": 4,
+      "evidence_symbols": 0,
+      "evidence_weight": 11.488,
+      "evidence_coverage": 0.285714,
+      "evidence_density": 45.952,
+      "items": 4
+    },
+    {
+      "task_id": "tick-graph-resource-conflicts",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_tick_simultaneous.py",
+        "bigville/game.py",
+        "worlds/bigville_world.py",
+        "bigville/seeds/gen_law_giantville_theft_law.json"
+      ],
+      "estimated_tokens": 585,
+      "elapsed_seconds": 0.5329,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 5,
+      "hits": [],
+      "misses": [
+        "worlds/tick_graph.py",
+        "tests/test_tick_graph_executor.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "README.md",
+        "tests/test_tick_simultaneous.py",
+        "bigville/game.py",
+        "worlds/bigville_world.py",
+        "bigville/seeds/gen_law_giantville_theft_law.json"
+      ],
+      "task_term_count": 14,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 24.824,
+      "evidence_coverage": 0.5,
+      "evidence_density": 42.4342,
+      "items": 5
+    },
+    {
+      "task_id": "tick-graph-resource-conflicts",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_tick_simultaneous.py",
+        "bigville/game.py",
+        "worlds/bigville_world.py",
+        "seeds/bigville_drama_social.json"
+      ],
+      "estimated_tokens": 1271,
+      "elapsed_seconds": 0.5316,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 5,
+      "hits": [],
+      "misses": [
+        "worlds/tick_graph.py",
+        "tests/test_tick_graph_executor.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "README.md",
+        "tests/test_tick_simultaneous.py",
+        "bigville/game.py",
+        "worlds/bigville_world.py",
+        "seeds/bigville_drama_social.json"
+      ],
+      "task_term_count": 14,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 24.1954,
+      "evidence_coverage": 0.5,
+      "evidence_density": 19.0365,
+      "items": 5
+    },
+    {
+      "task_id": "seed-manifest-recovery",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "tests/test_graph_revisions.py",
+        "bigville/world_persistence.py",
+        "docs/phases/phase042/apply_hooks.py"
+      ],
+      "estimated_tokens": 299,
+      "elapsed_seconds": 0.5404,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "bigville/runtime.py",
+        "tests/test_node_origins.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/test_graph_revisions.py",
+        "bigville/world_persistence.py",
+        "docs/phases/phase042/apply_hooks.py"
+      ],
+      "task_term_count": 14,
+      "evidence_terms": 3,
+      "evidence_symbols": 0,
+      "evidence_weight": 7.0386,
+      "evidence_coverage": 0.214286,
+      "evidence_density": 23.5403,
+      "items": 3
+    },
+    {
+      "task_id": "seed-manifest-recovery",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_fix_llm_checkpoint.py",
+        "bigville/runtime.py",
+        "bigville/world_persistence.py"
+      ],
+      "estimated_tokens": 693,
+      "elapsed_seconds": 0.5546,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [
+        "bigville/runtime.py"
+      ],
+      "misses": [
+        "tests/test_node_origins.py"
+      ],
+      "recall": 0.5,
+      "precision": 0.25,
+      "recall_content": 0.5,
+      "content_files": [
+        "README.md",
+        "tests/test_fix_llm_checkpoint.py",
+        "bigville/runtime.py",
+        "bigville/world_persistence.py"
+      ],
+      "task_term_count": 14,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 24.5953,
+      "evidence_coverage": 0.428571,
+      "evidence_density": 35.4911,
+      "items": 4
+    },
+    {
+      "task_id": "seed-manifest-recovery",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_fix_llm_checkpoint.py",
+        "bigville/runtime.py",
+        "bigville/world_persistence.py",
+        "seeds/affective_state_core.json"
+      ],
+      "estimated_tokens": 907,
+      "elapsed_seconds": 0.5345,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 5,
+      "hits": [
+        "bigville/runtime.py"
+      ],
+      "misses": [
+        "tests/test_node_origins.py"
+      ],
+      "recall": 0.5,
+      "precision": 0.2,
+      "recall_content": 0.5,
+      "content_files": [
+        "README.md",
+        "tests/test_fix_llm_checkpoint.py",
+        "bigville/runtime.py",
+        "bigville/world_persistence.py",
+        "seeds/affective_state_core.json"
+      ],
+      "task_term_count": 14,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 28.8244,
+      "evidence_coverage": 0.5,
+      "evidence_density": 31.78,
+      "items": 5
+    },
+    {
+      "task_id": "backend-action-boundary",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "tests/test_phase059_autopilot.py"
+      ],
+      "estimated_tokens": 232,
+      "elapsed_seconds": 0.5502,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 1,
+      "hits": [],
+      "misses": [
+        "bigville/backends/protocol.py",
+        "bigville/game.py",
+        "tests/test_bigville_backends.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/test_phase059_autopilot.py"
+      ],
+      "task_term_count": 12,
+      "evidence_terms": 2,
+      "evidence_symbols": 0,
+      "evidence_weight": 4.3054,
+      "evidence_coverage": 0.166667,
+      "evidence_density": 18.5576,
+      "items": 1
+    },
+    {
+      "task_id": "backend-action-boundary",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_phase059_autopilot.py",
+        "bigville/providers/__init__.py"
+      ],
+      "estimated_tokens": 648,
+      "elapsed_seconds": 0.5597,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "bigville/backends/protocol.py",
+        "bigville/game.py",
+        "tests/test_bigville_backends.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "README.md",
+        "tests/test_phase059_autopilot.py",
+        "bigville/providers/__init__.py"
+      ],
+      "task_term_count": 12,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 19.1204,
+      "evidence_coverage": 0.5,
+      "evidence_density": 29.5068,
+      "items": 3
+    },
+    {
+      "task_id": "backend-action-boundary",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_phase059_autopilot.py",
+        "seeds/bigville_household.json",
+        "seeds/episodic_working_memory_core.json",
+        "bigville/providers/__init__.py",
+        "bigville/providers/dotenv.py"
+      ],
+      "estimated_tokens": 1258,
+      "elapsed_seconds": 0.8457,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 6,
+      "hits": [],
+      "misses": [
+        "bigville/backends/protocol.py",
+        "bigville/game.py",
+        "tests/test_bigville_backends.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "README.md",
+        "tests/test_phase059_autopilot.py",
+        "seeds/bigville_household.json",
+        "seeds/episodic_working_memory_core.json",
+        "bigville/providers/__init__.py",
+        "bigville/providers/dotenv.py"
+      ],
+      "task_term_count": 12,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 26.0091,
+      "evidence_coverage": 0.583333,
+      "evidence_density": 20.675,
+      "items": 6
+    },
+    {
+      "task_id": "scenario-input-validation",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "tests/management/test_drafts.py",
+        "tools/evaluate_affordance_modes.py",
+        "bigville/scenarios.py"
+      ],
+      "estimated_tokens": 175,
+      "elapsed_seconds": 0.5161,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [
+        "bigville/scenarios.py"
+      ],
+      "misses": [
+        "tests/test_bigville_scenarios.py"
+      ],
+      "recall": 0.5,
+      "precision": 0.333333,
+      "recall_content": 0.5,
+      "content_files": [
+        "tests/management/test_drafts.py",
+        "tools/evaluate_affordance_modes.py",
+        "bigville/scenarios.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 3,
+      "evidence_symbols": 0,
+      "evidence_weight": 8.203,
+      "evidence_coverage": 0.230769,
+      "evidence_density": 46.8743,
+      "items": 3
+    },
+    {
+      "task_id": "scenario-input-validation",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/management/test_drafts.py",
+        "tools/evaluate_affordance_modes.py",
+        "bigville/scenarios.py",
+        "seeds/bigville_affect_propagate.json"
+      ],
+      "estimated_tokens": 685,
+      "elapsed_seconds": 0.5236,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 5,
+      "hits": [
+        "bigville/scenarios.py"
+      ],
+      "misses": [
+        "tests/test_bigville_scenarios.py"
+      ],
+      "recall": 0.5,
+      "precision": 0.2,
+      "recall_content": 0.5,
+      "content_files": [
+        "README.md",
+        "tests/management/test_drafts.py",
+        "tools/evaluate_affordance_modes.py",
+        "bigville/scenarios.py",
+        "seeds/bigville_affect_propagate.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 5,
+      "evidence_symbols": 0,
+      "evidence_weight": 20.1919,
+      "evidence_coverage": 0.384615,
+      "evidence_density": 29.4772,
+      "items": 5
+    },
+    {
+      "task_id": "scenario-input-validation",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/management/test_drafts.py",
+        "tools/evaluate_affordance_modes.py",
+        "seeds/episodic_working_memory_core.json",
+        "bigville/scenarios.py",
+        "seeds/bigville_affect_propagate.json"
+      ],
+      "estimated_tokens": 1082,
+      "elapsed_seconds": 0.5364,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 6,
+      "hits": [
+        "bigville/scenarios.py"
+      ],
+      "misses": [
+        "tests/test_bigville_scenarios.py"
+      ],
+      "recall": 0.5,
+      "precision": 0.166667,
+      "recall_content": 0.5,
+      "content_files": [
+        "README.md",
+        "tests/management/test_drafts.py",
+        "tools/evaluate_affordance_modes.py",
+        "seeds/episodic_working_memory_core.json",
+        "bigville/scenarios.py",
+        "seeds/bigville_affect_propagate.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 28.5852,
+      "evidence_coverage": 0.538462,
+      "evidence_density": 26.4188,
+      "items": 6
+    },
+    {
+      "task_id": "public-game-construction",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "bigville/seeds/gen_law_public_order_law.json",
+        "bigville/seeds/gen_policy_giantville_public_health_baseline.json",
+        "bigville/seeds/bigville_body_choice.json"
+      ],
+      "estimated_tokens": 283,
+      "elapsed_seconds": 0.5364,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 5,
+      "hits": [],
+      "misses": [
+        "bigville/api.py",
+        "tests/test_engine_defaults.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "bigville/seeds/gen_law_public_order_law.json",
+        "bigville/seeds/gen_policy_giantville_public_health_baseline.json",
+        "bigville/seeds/bigville_body_choice.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 5,
+      "evidence_symbols": 0,
+      "evidence_weight": 15.156,
+      "evidence_coverage": 0.384615,
+      "evidence_density": 53.5549,
+      "items": 6
+    },
+    {
+      "task_id": "public-game-construction",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "bigville/seeds/gen_law_public_order_law.json",
+        "bigville/seeds/gen_policy_giantville_public_health_baseline.json"
+      ],
+      "estimated_tokens": 679,
+      "elapsed_seconds": 0.5378,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "bigville/api.py",
+        "tests/test_engine_defaults.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "bigville/seeds/gen_law_public_order_law.json",
+        "bigville/seeds/gen_policy_giantville_public_health_baseline.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 22.6814,
+      "evidence_coverage": 0.461538,
+      "evidence_density": 33.4041,
+      "items": 6
+    },
+    {
+      "task_id": "public-game-construction",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "README.md",
+        "bigville/seeds/adaptive_control_core.json",
+        "bigville/seeds/gen_law_public_order_law.json",
+        "bigville/seeds/gen_policy_giantville_public_health_baseline.json"
+      ],
+      "estimated_tokens": 1114,
+      "elapsed_seconds": 0.5383,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 6,
+      "hits": [],
+      "misses": [
+        "bigville/api.py",
+        "tests/test_engine_defaults.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "README.md",
+        "bigville/seeds/adaptive_control_core.json",
+        "bigville/seeds/gen_law_public_order_law.json",
+        "bigville/seeds/gen_policy_giantville_public_health_baseline.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 9,
+      "evidence_symbols": 0,
+      "evidence_weight": 38.6927,
+      "evidence_coverage": 0.692308,
+      "evidence_density": 34.7331,
+      "items": 8
+    }
+  ],
+  "markdown": "# Repo-map retrieval evaluation\n\n- Root: `/applications/data/projects/bigville`\n- Tasks: 8 (`/home/matt/ozmadev/ozagia/evaluation/bigville_retrieval/tasks.json`)\n- Source-file universe: 501\n- Budgets: 300, 700, 1300 tokens\n- Arms: dev_context\n- Dev-memory snapshot: stale=False (snapshot head `e243ea70eee2a9ca5a55dfe62b9e29214f82cc87`, HEAD `e243ea70eee2a9ca5a55dfe62b9e29214f82cc87`, root mismatch False, allow_stale=False)\n- Deterministic fingerprint: `5ad11de6abf7098a6ec7b0cffab2ea959d0820b22996fbfbad921cdbe0e2ce25`\n- Wall time: 14.128 s\n\n## Aggregate metrics\n\n| Budget | Arm | Tasks | Mean recall@budget | Mean recall (content tier) | Mean precision | Mean evidence coverage | Mean evidence symbols | Mean evidence/1k tokens | Mean files | Mean content files | Mean tokens | Mean s | Cache parsed | Cache reused |\n|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n| 300 | dev_context | 8 | 0.062 | 0.062 | 0.042 | 0.277 | 0.0 | 37.82 | 2.6 | 2.6 | 264 | 0.54 | 0 | 0 |\n| 700 | dev_context | 8 | 0.188 | 0.188 | 0.087 | 0.411 | 0.0 | 30.00 | 4.1 | 4.1 | 663 | 0.54 | 0 | 0 |\n| 1300 | dev_context | 8 | 0.125 | 0.125 | 0.046 | 0.498 | 0.0 | 22.44 | 5.1 | 5.1 | 1153 | 0.61 | 0 | 0 |\n\n## Recall by task\n\nEach cell is `recall (recall_content)`.\n\n### 300 tokens\n\n| Task | dev_context |\n|---|---:|\n| game-checkpoint-roundtrip | 0.00 (0.00) |\n| deterministic-population-report | 0.00 (0.00) |\n| lazy-affordance-mode | 0.00 (0.00) |\n| tick-graph-resource-conflicts | 0.00 (0.00) |\n| seed-manifest-recovery | 0.00 (0.00) |\n| backend-action-boundary | 0.00 (0.00) |\n| scenario-input-validation | 0.50 (0.50) |\n| public-game-construction | 0.00 (0.00) |\n\n### 700 tokens\n\n| Task | dev_context |\n|---|---:|\n| game-checkpoint-roundtrip | 0.00 (0.00) |\n| deterministic-population-report | 0.50 (0.50) |\n| lazy-affordance-mode | 0.00 (0.00) |\n| tick-graph-resource-conflicts | 0.00 (0.00) |\n| seed-manifest-recovery | 0.50 (0.50) |\n| backend-action-boundary | 0.00 (0.00) |\n| scenario-input-validation | 0.50 (0.50) |\n| public-game-construction | 0.00 (0.00) |\n\n### 1300 tokens\n\n| Task | dev_context |\n|---|---:|\n| game-checkpoint-roundtrip | 0.00 (0.00) |\n| deterministic-population-report | 0.00 (0.00) |\n| lazy-affordance-mode | 0.00 (0.00) |\n| tick-graph-resource-conflicts | 0.00 (0.00) |\n| seed-manifest-recovery | 0.50 (0.50) |\n| backend-action-boundary | 0.00 (0.00) |\n| scenario-input-validation | 0.50 (0.50) |\n| public-game-construction | 0.00 (0.00) |\n\n## Task set\n\n| Task | Style | Area | Expected files | Notes |\n|---|---|---|---|---|\n| game-checkpoint-roundtrip | symptom | worlds_or_tools | `bigville/game_persistence.py`<br>`tests/test_bigville_game_persistence.py` | Session checkpoint implementation and focused roundtrip tests. |\n| deterministic-population-report | symptom | worlds_or_tools | `bigville/reporting.py`<br>`tests/test_phase091_food_reporting.py` | Reporting computes exact values and seeded finite population sample estimates. |\n| lazy-affordance-mode | symptom | worlds_or_tools | `bigville/game.py`<br>`tests/test_lazy_evaluation.py` | Mode resolution lives in Game; lazy evaluation behavior has dedicated tests. |\n| tick-graph-resource-conflicts | symptom | worlds_or_tools | `worlds/tick_graph.py`<br>`tests/test_tick_graph_executor.py` | Pure claim arbitration and its executor tests are the relevant implementation and validation sites. |\n| seed-manifest-recovery | symptom | seeds_boot | `bigville/runtime.py`<br>`tests/test_node_origins.py` | Graph checkpoint encoding and seed manifest validation are implemented in runtime; node provenance tests cover loaded origins. |\n| backend-action-boundary | symptom | worlds_or_tools | `bigville/backends/protocol.py`<br>`bigville/game.py`<br>`tests/test_bigville_backends.py` | Backend interface, game decision loop, and backend contract tests. |\n| scenario-input-validation | symptom | worlds_or_tools | `bigville/scenarios.py`<br>`tests/test_bigville_scenarios.py` | Scenario loader and scenario validation suite. |\n| public-game-construction | symptom | worlds_or_tools | `bigville/api.py`<br>`tests/test_engine_defaults.py` | Public API construction and defaults tests. |\n\n## Reading these numbers\n\n- This is a **retrieval instrument**, not an end-to-end coding benchmark: it measures whether known-relevant files are selected, not whether an agent completes a change.\n- `baseline` is a sorted-path file-listing control, not a semantic retriever. `grep` is a lexical control: it counts distinct task words found in each file's text.\n- `recall` counts a hit at any tier. `recall_content` counts only hits whose file the arm showed as code (code_search snippet, dev_context item with snippet text, or repo-map `full`/`outline` tier). A listing-tier hit tells the reader the path exists, not what it contains.\n- Token estimates are each module's own ~4-chars/token heuristic. Cache counts apply only to repo-map arms.\n- `both` is the literal union of the two retrievers run at the same budget; its token cost and latency are the sum of the components, so its budget is per component (up to 2x the nominal budget). Compare it as a cost/recall trade-off, not as an equal-token arm.\n- `code_search` runs once per task; its elapsed time is the same call's time at every budget.\n- Ground truth is frozen in the task JSON. Re-run the scoped tests after moving or renaming an expected file.\n"
+}

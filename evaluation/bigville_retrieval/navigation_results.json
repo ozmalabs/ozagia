@@ -1,0 +1,153 @@
+{
+  "schema": "ozagia.bigville_navigation_eval.v1",
+  "ok": true,
+  "graph_path": "/tmp/ozagia-bigville-eval/nav-with-adapter-current.json",
+  "source_root": "/applications/data/projects/bigville",
+  "head": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+  "counts": {
+    "file_nodes": 1242,
+    "scenarios": 14,
+    "ambiguous_scenarios": 3,
+    "seed_manifests": 391,
+    "distinct_seed_ids": 211,
+    "duplicate_seed_ids": 180,
+    "generated_manifests": 31,
+    "generated_table_edges": 27,
+    "pack_tables": 596,
+    "routes": 36
+  },
+  "checks": {
+    "scenario_duplicate_id_preserved_as_ambiguous": {
+      "scenario": "house_argument",
+      "seed_id": "conversation",
+      "candidate_paths": [
+        "bigville/seeds/conversation.json",
+        "seeds/conversation.json"
+      ],
+      "resolution": "ambiguous_id_only"
+    },
+    "second_scenario_resolves_two_ids_ambiguously": {
+      "scenario": "monopoly_four_players",
+      "seed_ids": [
+        "conversation",
+        "conversation_reply"
+      ],
+      "candidate_paths": {
+        "conversation": [
+          "bigville/seeds/conversation.json",
+          "seeds/conversation.json"
+        ],
+        "conversation_reply": [
+          "bigville/seeds/conversation_reply.json",
+          "seeds/conversation_reply.json"
+        ]
+      },
+      "resolution": "ambiguous_id_only"
+    },
+    "generated_manifest_table_provenance": {
+      "manifest_path": "bigville/seeds/gen_charter_bigville_council_charter.json",
+      "manifest_id": "gen_charter_bigville_council_charter",
+      "pack": "bigville",
+      "tables": [
+        "CHARTERS"
+      ],
+      "declared_sha256": "c03f59ab696c85a5068e834d97ab337cc997173332ce60a9cc2d8089b73c2458",
+      "freshness": "unverified_declared_generation",
+      "linked_table_paths": [
+        "packs/bigville/frames/charters.json"
+      ]
+    },
+    "second_generated_manifest_table_provenance": {
+      "manifest_path": "bigville/seeds/bigville_terrain_movement.json",
+      "pack": "bigville",
+      "tables": [
+        "TERRAIN_MOVEMENT"
+      ],
+      "declared_sha256": "6eaa95cc93626e3a429f12c54ee0049268f8f9399a4e1876e08a60107e14d9f1",
+      "linked_table_paths": [
+        "packs/bigville/world/terrain_movement.json"
+      ]
+    },
+    "seed_dependency_duplicate_id_preserved_as_ambiguous": {
+      "manifest_path": "bigville/seeds/bigville_bell_schedule.json",
+      "seed_id": "bigville_bells",
+      "candidate_paths": [
+        "bigville/seeds/bigville_bells.json",
+        "seeds/bigville_bells.json"
+      ],
+      "resolution": "ambiguous_id_only"
+    },
+    "all_generated_table_declarations_accounted_for": {
+      "manifest_count": 31,
+      "resolved_table_references": 27,
+      "unresolved_table_references": 7,
+      "unresolved_examples": [
+        {
+          "manifest_path": "bigville/seeds/gen_law_commons_and_land_law.json",
+          "linked_tables": [],
+          "unresolved_tables": [
+            "LAWS"
+          ]
+        },
+        {
+          "manifest_path": "bigville/seeds/gen_law_giantville_murder_law.json",
+          "linked_tables": [],
+          "unresolved_tables": [
+            "LAWS"
+          ]
+        },
+        {
+          "manifest_path": "bigville/seeds/gen_law_giantville_theft_law.json",
+          "linked_tables": [],
+          "unresolved_tables": [
+            "LAWS"
+          ]
+        },
+        {
+          "manifest_path": "bigville/seeds/gen_law_public_order_law.json",
+          "linked_tables": [],
+          "unresolved_tables": [
+            "LAWS"
+          ]
+        },
+        {
+          "manifest_path": "bigville/seeds/gen_policy_giantville_public_health_baseline.json",
+          "linked_tables": [],
+          "unresolved_tables": [
+            "POLICIES"
+          ]
+        },
+        {
+          "manifest_path": "bigville/seeds/gen_policy_water_safety_policy.json",
+          "linked_tables": [],
+          "unresolved_tables": [
+            "POLICIES"
+          ]
+        },
+        {
+          "manifest_path": "bigville/seeds/gen_policy_winter_food_reserve.json",
+          "linked_tables": [],
+          "unresolved_tables": [
+            "POLICIES"
+          ]
+        }
+      ]
+    },
+    "browser_route_has_handler_and_client_evidence": {
+      "method": "GET",
+      "path": "/api/management/v1/backend-profiles",
+      "grade": "explicit_handler_and_client",
+      "server_files": [
+        "bigville/management/http.py"
+      ],
+      "client_files": [
+        "bigville/management/static/management.js"
+      ]
+    }
+  },
+  "limitations": [
+    "A declared generated_from hash is recorded provenance; this runner does not regenerate manifests or certify current table bytes against it.",
+    "Route checks cover explicit bounded route evidence, not every dynamic server route.",
+    "Six representative graph paths are asserted; the counts describe this snapshot, not a general benchmark."
+  ]
+}

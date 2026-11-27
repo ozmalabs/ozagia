@@ -1,0 +1,152 @@
+{
+  "title": "M6 offline evidence path probe",
+  "tasks": [
+    {
+      "id": "selfgraph-readiness-separation",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Explain how this repository's capability catalogue separates declared capability facts from readiness, and what it says about coverage and missing observations. Give the readiness dimensions and one short coverage statement. Return JSON with keys dimensions (array of strings) and coverage (string).",
+      "expected_files": [
+        "docs/capabilities.md"
+      ]
+    },
+    {
+      "id": "maps-types-and-budgets",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. List the four implemented read-only map types and report the default and hard caps for map bytes, page items and graph neighbourhood depth. Return JSON with keys types (array), defaults (object) and hard_caps (object).",
+      "expected_files": [
+        "docs/model_api.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ]
+    },
+    {
+      "id": "maps-unsupported-and-fallback",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe what a map client receives when it asks for an unsupported capability or schema, and what happens to stale, cross-scope or malformed references. State the fallback rule and one thing that must never happen. Return JSON with keys unsupported (string), stale_or_cross_scope (string) and never (string).",
+      "expected_files": [
+        "docs/model_api.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ]
+    },
+    {
+      "id": "work-map-join-and-redaction",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe what the work/evidence map joins together and what it deliberately omits from its records. Return JSON with keys joins (array) and omits (array).",
+      "expected_files": [
+        "docs/model_api.md"
+      ]
+    },
+    {
+      "id": "evidence-grades-and-limits",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Explain the durable evidence store's evidence grades and what its strongest grade does not mean. Also state one link the recorded test outcome cannot establish. Return JSON with keys grades (array), strongest_grade_limit (string) and unknown_link (string).",
+      "expected_files": [
+        "docs/evidence.md"
+      ]
+    },
+    {
+      "id": "preflight-green-rules",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. State exactly when a task preflight may report green, and name at least three things it refuses to upgrade into evidence. Return JSON with keys green_when (string) and refuses (array). Include one missing-tool example and one stale-data example.",
+      "expected_files": [
+        "docs/task_preflight.md"
+      ]
+    },
+    {
+      "id": "action-readiness-mapping",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Explain how the task preflight maps observed service and tunnel readiness states into its own tri-state, which operation is always blocked in that read-only join, and which mutating calls the join avoids. Return JSON with keys mapping (object), always_blocked (string) and avoids (array).",
+      "expected_files": [
+        "docs/task_preflight.md"
+      ]
+    },
+    {
+      "id": "prefetch-allowed-and-refused",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. For the offline prefetch planner, list at least three allowed read-only work kinds, at least four forbidden work kinds, the main time/IO/concurrency bounds, and the refusal states for unsafe or stale candidates. Return JSON with keys allowed (array), forbidden (array), bounds (object) and refused (array).",
+      "expected_files": [
+        "docs/prefetch.md"
+      ]
+    },
+    {
+      "id": "capability-audit-directions",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. What two mismatch directions does the capability audit report, how exhaustive is its coverage, and what does it explicitly not observe or start? Return JSON with keys directions (array), coverage (string) and limits (array).",
+      "expected_files": [
+        "docs/capabilities.md"
+      ]
+    },
+    {
+      "id": "ocelot-readonly-boundary",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. How is Ocelot represented in the read-only research and preflight path, and what must a future optional adapter record so its result is not confused with a formal proof? Return JSON with keys state (string), not_done (array) and adapter_records (array).",
+      "expected_files": [
+        "docs/ocelot.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+        "docs/research_projection.md",
+        "docs/task_preflight.md"
+      ]
+    },
+    {
+      "id": "edit-transaction-safety",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe the file edit transaction's safety guarantees from preview through replacement. Cover the default mode, base-hash check, backup, atomic replacement and what happens if the file changes during the transaction. Return JSON with keys preview (string), guards (array) and write (string).",
+      "expected_files": [
+        "docs/cst_edit.md",
+        "src/ozagia/edit/txn.py"
+      ]
+    },
+    {
+      "id": "mcp-server-readonly-contract",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe the MCP server's dependency and transport shape, its behaviour toward the graph, and the only persistent state it appends. Return JSON with keys transport (string), graph_access (string) and state (string).",
+      "expected_files": [
+        "src/ozagia/integrations/mcp/server.py"
+      ]
+    },
+    {
+      "id": "daemon-socket-and-scope",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Where does the graph daemon listen by default, what environment variable overrides the socket path, and how many target repositories does one daemon serve? Return JSON with keys default (string), override (string) and scope (string).",
+      "expected_files": [
+        "src/ozagia/daemon/protocol.py"
+      ]
+    },
+    {
+      "id": "live-eval-approval-gate",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. What two gates must be present before a live model driver runs in the existing agent evaluation harness, and what does the harness do when either is missing? Return JSON with keys gates (array) and missing (string).",
+      "expected_files": [
+        "docs/eval_agent.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ]
+    },
+    {
+      "id": "secrets-by-reference",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe how secrets cross this system's boundaries and name the places where a resolved value must never appear. Return JSON with keys passing (string), reference_form (string) and never_in (array).",
+      "expected_files": [
+        "docs/secrets.md"
+      ]
+    },
+    {
+      "id": "snapshot-staleness",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. When does a dev-memory snapshot count as stale relative to its checkout, and what freshness is reported when the tree digest cannot be computed? Return JSON with keys stale_when (array) and digest_failure (string).",
+      "expected_files": [
+        "docs/memory_mcp.md"
+      ]
+    },
+    {
+      "id": "code-search-signals",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Which retrieval signals does the code-search surface combine, what does it explicitly not use, and where does its default cache live? Return JSON with keys signals (array), excluded (array) and cache (string).",
+      "expected_files": [
+        "docs/code_search.md"
+      ]
+    },
+    {
+      "id": "mcp-graph-surface",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Name the MCP server's two tool surfaces, the eight graph-surface verbs, and what a full-surface dev_* call receives on the graph surface. Return JSON with keys surfaces (array), verbs (array) and dev_call (string). Also state how the surface is selected.",
+      "expected_files": [
+        "docs/graph_surface.md"
+      ]
+    },
+    {
+      "id": "linked-checkout-readonly-join",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. How does the task preflight treat a selected linked checkout's authorization and read scope, and which federation or refresh operations does it avoid? Return JSON with keys authorization (string), forbidden_operations (array) and unknown_when (string).",
+      "expected_files": [
+        "docs/task_preflight.md"
+      ]
+    },
+    {
+      "id": "core-boundaries",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. State this project's core dependency rule, its rule about target projects, and its write boundary. Return JSON with keys dependencies (string), target_imports (string) and writes (string).",
+      "expected_files": [
+        "AGENTS.md"
+      ]
+    }
+  ]
+}

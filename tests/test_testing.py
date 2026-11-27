@@ -310,6 +310,211 @@ def test_plan_docs_or_config_only_selects_none(repo) -> None:
     assert "tests/test_app.py" in plan["selected_files"]
 
 
+def test_json_data_change_is_source_and_never_docs_only(repo) -> None:
+    root = repo["root"]
+    _write(root, "scenarios/new.json", '{"id":"new"}')
+    plan = T.plan(root, changed=["README.md", "scenarios/new.json"])
+    assert plan["changed_kinds"]["scenarios/new.json"] == "source"
+    assert plan["mode"] == "all"
+    assert plan["fallback_used"] is True
+
+
+def test_complete_project_coverage_declaration_is_explicit_and_scoped(repo) -> None:
+    root = repo["root"]
+    _write(root, "scenarios/new.json", '{"id":"new"}')
+    _write(root, ".ozagia.toml", """
+[[test_coverage.rules]]
+paths = ["scenarios/**"]
+tests = ["tests/test_app.py"]
+complete = true
+evidence = "Reviewed scenario loader matrix in tests/test_app.py"
+""")
+    plan = T.plan(root, changed=["scenarios/new.json"])
+    assert plan["mode"] == "affected"
+    assert plan["fallback_used"] is False
+    assert plan["selected_files"] == ["tests/test_app.py"]
+    assert plan["selected_tests"][0]["sources"] == [
+        "complete_project_declaration"]
+    assert plan["test_coverage_declaration"]["status"] == "valid"
+    _write(root, ".ozagia.toml", """
+[[test_coverage.rules]]
+paths = ["scenarios/**"]
+tests = ["tests/test_app.py", "tests/test_other.py"]
+complete = true
+evidence = "both scenario test groups are required"
+""")
+    capped = T.plan(root, changed=["scenarios/new.json"], max_tests=1)
+    assert capped["selected_files"] == [
+        "tests/test_app.py", "tests/test_other.py"]
+    assert capped["counts"]["cap_exceeded"] is True
+    assert any("complete-project coverage" in note
+               for note in capped["not_assessed"])
+
+    # A declaration for scenario data does not establish coverage for an
+    # unrelated code change in the same task.
+    mixed = T.plan(root, changed=["scenarios/new.json", "src/other.py"])
+    assert mixed["fallback_used"] is True
+    assert mixed["mode"] == "all"
+
+
+def test_invalid_or_unsafe_coverage_declaration_keeps_fallback(repo) -> None:
+    root = repo["root"]
+    _write(root, "scenarios/new.json", '{"id":"new"}')
+    for declaration in (
+        '[[test_coverage.rules]]\npaths=["scenarios/**"]\n'
+        'tests=["tests/test_app.py"]\ncomplete=false\n'
+        'evidence="not complete"\n',
+        '[[test_coverage.rules]]\npaths=["scenarios/**"]\n'
+        'tests=["../../outside.py"]\ncomplete=true\n'
+        'evidence="unsafe test path"\n',
+    ):
+        _write(root, ".ozagia.toml", declaration)
+        plan = T.plan(root, changed=["scenarios/new.json"])
+        assert plan["test_coverage_declaration"]["status"] == "invalid"
+        assert plan["fallback_used"] is True
+        assert plan["mode"] == "all"
+        assert plan["warnings"]
+
+
+def test_project_coverage_declaration_is_not_overridden_by_user_config(
+        repo, tmp_path: Path, monkeypatch) -> None:
+    root = repo["root"]
+    _write(root, "scenarios/new.json", '{"id":"new"}')
+    _write(root, ".ozagia.toml", """
+[[test_coverage.rules]]
+paths = ["scenarios/**"]
+tests = ["tests/test_app.py"]
+complete = true
+evidence = "reviewed project declaration"
+""")
+    user_config = tmp_path / "user-ozagia.toml"
+    user_config.write_text("""
+[[test_coverage.rules]]
+paths = ["scenarios/**"]
+tests = ["tests/test_app.py"]
+complete = true
+evidence = "user-level assertion"
+""", encoding="utf-8")
+    monkeypatch.setenv("OZAGIA_CONFIG", str(user_config))
+    plan = T.plan(root, changed=["scenarios/new.json"])
+    assert plan["test_coverage_declaration"]["status"] == "valid"
+    assert plan["fallback_used"] is False
+    assert plan["selected_files"] == ["tests/test_app.py"]
+
+
+def test_coverage_config_symlink_outside_repo_is_rejected(repo,
+                                                          tmp_path: Path) -> None:
+    root = repo["root"]
+    _write(root, "scenarios/new.json", '{"id":"new"}')
+    external = tmp_path / "external-ozagia.toml"
+    external.write_text("""
+[[test_coverage.rules]]
+paths = ["scenarios/**"]
+tests = ["tests/test_app.py"]
+complete = true
+evidence = "must not trust a target-repo escape"
+""", encoding="utf-8")
+    (root / ".ozagia.toml").symlink_to(external)
+    plan = T.plan(root, changed=["scenarios/new.json"])
+    assert plan["test_coverage_declaration"]["status"] == "invalid"
+    assert "inside the repository" in plan["test_coverage_declaration"]["reason"]
+    assert plan["fallback_used"] is True
+
+
+def test_stale_graph_cannot_discover_test_for_coverage_declaration(
+        repo, monkeypatch) -> None:
+    root = repo["root"]
+    _write(root, "scenarios/new.json", '{"id":"new"}')
+    hidden_test = _write(root, "tests/test_stale_only.py", "def test_hidden(): pass\n")
+    _write(root, ".gitignore", ".ozagia/\ntests/test_stale_only.py\n")
+    _write(root, ".ozagia.toml", """
+[[test_coverage.rules]]
+paths = ["scenarios/**"]
+tests = ["tests/test_stale_only.py"]
+complete = true
+evidence = "test node appears only in the stale graph"
+""")
+    stale_graph = {"tests_by_file": {"tests/test_stale_only.py": {"test:stale"}},
+                   "file_tests": {}, "files_by_path": {}}
+    monkeypatch.setattr(
+        T, "_load_graph",
+        lambda *_args: ({"freshness": "stale", "reason": "fixture"}, stale_graph))
+    plan = T.plan(root, changed=["scenarios/new.json"])
+    assert hidden_test.is_file()
+    assert plan["test_coverage_declaration"]["status"] == "invalid"
+    assert "undiscovered test" in plan["test_coverage_declaration"]["reason"]
+    assert plan["fallback_used"] is True
+    assert "tests/test_stale_only.py" not in plan["selected_files"]
+
+
+def test_changed_test_with_stale_graph_keeps_default_fallback(repo) -> None:
+    root = repo["root"]
+    _write(root, "tests/test_app.py", "def test_f():\n    assert True\n# edit\n")
+    plan = T.plan(root, changed=["tests/test_app.py"])
+    assert plan["graph_freshness"] == "stale"
+    assert plan["fallback_used"] is True
+    assert plan["mode"] == "all"
+
+
+def test_complete_declaration_does_not_consume_stale_graph_edges(repo) -> None:
+    root = repo["root"]
+    _write(root, "src/app.py", "def f():\n    return 2\n")
+    _write(root, ".ozagia.toml", """
+[[test_coverage.rules]]
+paths = ["src/app.py"]
+tests = ["tests/test_other.py"]
+complete = true
+evidence = "Reviewed source behavior and test mapping"
+""")
+    plan = T.plan(root, changed=["src/app.py"])
+    assert plan["graph_freshness"] == "stale"
+    assert plan["fallback_used"] is False
+    assert plan["selected_files"] == ["tests/test_other.py"]
+
+
+def test_adapter_mentions_remain_advisory_and_graph_test_paths_are_safe(
+        repo, tmp_path: Path, monkeypatch) -> None:
+    class Graph:
+        nodes = {
+            1: {"type": "File", "attrs": {"path": "scenarios/a.json"}},
+            2: {"type": "Scenario", "attrs": {}},
+            3: {"type": "Test", "attrs": {"file": "tests/test_a.py"}},
+            4: {"type": "Test", "attrs": {"file": "../../outside.py"}},
+        }
+        edges = [
+            {"src": 1, "tgt": 2, "type": "defines"},
+            {"src": 3, "tgt": 2, "type": "mentions_scenario"},
+        ]
+
+        @staticmethod
+        def key_of(_nid: int) -> str:
+            return ""
+
+    indexed = T._graph_index(Graph())
+    assert indexed["tests_by_file"] == {
+        "tests/test_a.py": {"test:tests/test_a.py::"}}
+    assert indexed["file_tests"]["scenarios/a.json"] == set()
+    assert T._safe_repo_relpath("C:\\outside\\test.py") == ""
+    assert T._safe_repo_relpath("/outside/test.py") == ""
+    assert T._safe_repo_relpath("tests/../../outside.py") == ""
+    assert T._safe_repo_relpath("tests/\x00evil.py") == ""
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside.py"
+    outside.write_text("", encoding="utf-8")
+    (root / "tests").symlink_to(tmp_path, target_is_directory=True)
+    assert not T._is_repo_file(root, "tests/outside.py")
+
+    target_root = repo["root"]
+    _write(target_root, "scenarios/a.json", "{}")
+    monkeypatch.setattr(
+        T, "_load_graph",
+        lambda *_args: ({"freshness": "fresh", "reason": "fixture"}, indexed))
+    plan = T.plan(target_root, changed=["scenarios/a.json"])
+    assert plan["fallback_used"] is True
+    assert plan["mode"] == "all"
+
+
 def test_plan_unlinked_change_uses_fallback(repo) -> None:
     root = repo["root"]
     plan = T.plan(root, changed=["src/other.py"])
@@ -540,6 +745,22 @@ def test_captured_policy_precedence_and_off_alias(tmp_path: Path) -> None:
     clear_config_cache()
     assert A._settings(root) == ("all", False)
     clear_config_cache()
+
+
+def test_complete_coverage_declaration_does_not_narrow_captured_pytest(
+        tmp_path: Path) -> None:
+    from ozagia.intent import affected as A
+
+    root = tmp_path / "captured-coverage"
+    root.mkdir()
+    _write(root, ".ozagia.toml", """
+[[test_coverage.rules]]
+paths = ["scenarios/**"]
+tests = ["tests/test_scenario.py"]
+complete = true
+evidence = "reviewed project declaration"
+""")
+    assert A._settings(root) == ("all", False)
 
 
 # --------------------------------------------------------------------------- #

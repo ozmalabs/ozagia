@@ -202,7 +202,9 @@ parser with the offending file's path.
 `secret_allowlist` and `finding_allowlist`. `[secrets]` is consumed the same way
 by
 `ozagia.core.secrets`; it holds provider policy and never a secret value (see
-`docs/secrets.md`). Values from the other registry groups (`hints`, `models`,
+`docs/secrets.md`). `[test_coverage]` is read by `ozagia.core.testing` and
+declares reviewed complete changed-path to test-file mappings. Values from the
+other registry groups (`hints`, `models`,
 `ui`, `resources`, `worktrees`, `markdown`, `files`, `tasks`) stay with the
 modules that own them. The loader reports them, and any unknown key or nested
 table, in `ProjectConfig.unmapped` instead of silently ignoring them. The
@@ -605,6 +607,8 @@ _PROJECT_CONFIG_SECTIONS = frozenset(_KEYS) | _PROJECT_MODEL_SECTIONS | {"testin
 #: Registry groups another module reads. Reported once per group, never
 #: mapped into ProjectConfig and never copied into the legacy shape.
 _OWNED_SECTIONS = {
+    "invariants": "read by ozagia.core.project_invariants",
+    "test_coverage": "read by ozagia.core.testing",
     "hints": "read by ozagia.core.library_hints",
     "models": "read by ozagia.core.models",
     "ui": "UI presentation setting; not part of the index configuration",

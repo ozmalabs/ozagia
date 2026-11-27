@@ -1,0 +1,569 @@
+{
+  "ok": true,
+  "tool": "ocelot_repo_map_eval",
+  "version": 2,
+  "root": "/applications/data/projects/bigville",
+  "tasks_path": "/home/matt/ozmadev/ozagia/evaluation/bigville_retrieval/adapter_tasks.json",
+  "task_set": {
+    "schema": "ozagia.retrieval.tasks.v1",
+    "title": "Bigville adapter navigation retrieval probes",
+    "source_root": "/applications/data/projects/bigville",
+    "provenance": "Four frozen tasks selected to exercise relationships represented by the Bigville adapter. Labels name the source files supporting each requested navigation; graph links themselves are separately asserted by navigation_eval.py."
+  },
+  "task_set_summary": {
+    "tasks": 3,
+    "by_area": {
+      "seeds_boot": 2,
+      "worlds_or_tools": 1
+    },
+    "by_style": {
+      "symptom": 3
+    },
+    "expected_files_total": 8
+  },
+  "task_count": 3,
+  "source_files": 501,
+  "budgets": [
+    300,
+    700,
+    1300
+  ],
+  "arms": [
+    "dev_context"
+  ],
+  "arm_descriptions": {
+    "dev_context": "DevMemory.context items/snippets, executed at the budget."
+  },
+  "cache_path": "/tmp/ozagia-bigville-eval/tags-with-adapter.json",
+  "memory_path": "/tmp/ozagia-bigville-eval/fresh-with-adapter.json",
+  "memory_staleness": {
+    "snapshot_root": "/applications/data/projects/bigville",
+    "root": "/applications/data/projects/bigville",
+    "root_mismatch": false,
+    "snapshot_head": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+    "head": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+    "tree_changed": false,
+    "current_tree_digest": "78f71dd46d52dad691191abd4e66b00ef6ef6513f18058f61078d064f26255b7",
+    "stale": false,
+    "freshness": "fresh",
+    "verification_errors": [],
+    "generated_at": "2026-11-26T23:50:40"
+  },
+  "allow_stale": false,
+  "expected_files_outside_source_universe": [
+    "bigville/seeds/conversation.json",
+    "bigville/seeds/gen_charter_bigville_council_charter.json",
+    "packs/bigville/frames/charters.json",
+    "packs/bigville/pack.json",
+    "scenarios/house_argument.json",
+    "seeds/conversation.json"
+  ],
+  "total_elapsed_seconds": 5.617,
+  "deterministic_fingerprint": "68a528b99c984759817d5665d98562e8e4bbedc62486d25c1bb0c668c1555557",
+  "tasks": [
+    {
+      "id": "scenario-seed-ambiguity",
+      "task": "For the house argument scenario, locate its conversation knowledge definition and determine which source copy the runtime reference can mean.",
+      "expected_files": [
+        "scenarios/house_argument.json",
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json"
+      ],
+      "notes": "Exercises scenario-to-seed navigation and path-distinct duplicate ID handling.",
+      "style": "symptom",
+      "area": "seeds_boot"
+    },
+    {
+      "id": "generated-charter-source-pack",
+      "task": "Trace the generated council charter knowledge back to the authored pack table and identify the declared source provenance.",
+      "expected_files": [
+        "bigville/seeds/gen_charter_bigville_council_charter.json",
+        "packs/bigville/pack.json",
+        "packs/bigville/frames/charters.json"
+      ],
+      "notes": "Exercises generated seed to pack table provenance navigation.",
+      "style": "symptom",
+      "area": "seeds_boot"
+    },
+    {
+      "id": "backend-profiles-browser-server-route",
+      "task": "Trace the management browser's backend profile listing request to the server handler that implements the same HTTP endpoint.",
+      "expected_files": [
+        "bigville/management/http.py",
+        "bigville/management/static/management.js"
+      ],
+      "notes": "Exercises explicit browser request to server route joining.",
+      "style": "symptom",
+      "area": "worlds_or_tools"
+    }
+  ],
+  "aggregates": [
+    {
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "tasks": 3,
+      "mean_recall_at_budget": 0.5,
+      "mean_recall_content_at_budget": 0.5,
+      "mean_precision": 0.266667,
+      "mean_evidence_coverage": 0.435897,
+      "mean_evidence_density": 62.4578,
+      "mean_evidence_terms": 5.666667,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 17.7806,
+      "mean_selected_files": 3.6667,
+      "mean_content_files": 3.6667,
+      "mean_estimated_tokens": 287.33,
+      "mean_elapsed_seconds": 0.5272,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 3,
+      "recall_1_tasks": 1
+    },
+    {
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "tasks": 3,
+      "mean_recall_at_budget": 0.666667,
+      "mean_recall_content_at_budget": 0.666667,
+      "mean_precision": 0.4,
+      "mean_evidence_coverage": 0.512821,
+      "mean_evidence_density": 37.154233,
+      "mean_evidence_terms": 6.666667,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 25.8865,
+      "mean_selected_files": 4.3333,
+      "mean_content_files": 4.3333,
+      "mean_estimated_tokens": 696.0,
+      "mean_elapsed_seconds": 0.5151,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 3,
+      "recall_1_tasks": 1
+    },
+    {
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "tasks": 3,
+      "mean_recall_at_budget": 0.5,
+      "mean_recall_content_at_budget": 0.5,
+      "mean_precision": 0.311111,
+      "mean_evidence_coverage": 0.564103,
+      "mean_evidence_density": 25.277567,
+      "mean_evidence_terms": 7.333333,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 31.149933,
+      "mean_selected_files": 4.3333,
+      "mean_content_files": 4.3333,
+      "mean_estimated_tokens": 1227.33,
+      "mean_elapsed_seconds": 0.6407,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 3,
+      "recall_1_tasks": 0
+    }
+  ],
+  "runs": [
+    {
+      "task_id": "scenario-seed-ambiguity",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "scenarios/house_argument.json",
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json",
+        "bigville/backends/conversation.py",
+        "tests/test_bigville_game_api.py"
+      ],
+      "estimated_tokens": 296,
+      "elapsed_seconds": 0.5215,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 5,
+      "hits": [
+        "scenarios/house_argument.json",
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.6,
+      "recall_content": 1.0,
+      "content_files": [
+        "scenarios/house_argument.json",
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json",
+        "bigville/backends/conversation.py",
+        "tests/test_bigville_game_api.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 4,
+      "evidence_symbols": 0,
+      "evidence_weight": 12.8874,
+      "evidence_coverage": 0.307692,
+      "evidence_density": 43.5385,
+      "items": 5
+    },
+    {
+      "task_id": "scenario-seed-ambiguity",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "scenarios/house_argument.json",
+        "bigville/backends/conversation.py",
+        "seeds/conversation.json",
+        "bigville/scenarios.py"
+      ],
+      "estimated_tokens": 700,
+      "elapsed_seconds": 0.5121,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 4,
+      "hits": [
+        "scenarios/house_argument.json",
+        "seeds/conversation.json"
+      ],
+      "misses": [
+        "bigville/seeds/conversation.json"
+      ],
+      "recall": 0.666667,
+      "precision": 0.5,
+      "recall_content": 0.666667,
+      "content_files": [
+        "scenarios/house_argument.json",
+        "bigville/backends/conversation.py",
+        "seeds/conversation.json",
+        "bigville/scenarios.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 28.6834,
+      "evidence_coverage": 0.538462,
+      "evidence_density": 40.9763,
+      "items": 5
+    },
+    {
+      "task_id": "scenario-seed-ambiguity",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "scenarios/house_argument.json",
+        "bigville/backends/conversation.py",
+        "seeds/conversation.json",
+        "tests/test_bigville_game_api.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1119,
+      "elapsed_seconds": 0.5782,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 5,
+      "hits": [
+        "scenarios/house_argument.json",
+        "seeds/conversation.json"
+      ],
+      "misses": [
+        "bigville/seeds/conversation.json"
+      ],
+      "recall": 0.666667,
+      "precision": 0.4,
+      "recall_content": 0.666667,
+      "content_files": [
+        "scenarios/house_argument.json",
+        "bigville/backends/conversation.py",
+        "seeds/conversation.json",
+        "tests/test_bigville_game_api.py",
+        "README.md"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 24.7781,
+      "evidence_coverage": 0.461538,
+      "evidence_density": 22.1431,
+      "items": 8
+    },
+    {
+      "task_id": "generated-charter-source-pack",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "packs/bigville/frames/knowledge.json"
+      ],
+      "estimated_tokens": 293,
+      "elapsed_seconds": 0.5481,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 1,
+      "hits": [],
+      "misses": [
+        "bigville/seeds/gen_charter_bigville_council_charter.json",
+        "packs/bigville/pack.json",
+        "packs/bigville/frames/charters.json"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "packs/bigville/frames/knowledge.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 17.3963,
+      "evidence_coverage": 0.461538,
+      "evidence_density": 59.3729,
+      "items": 1
+    },
+    {
+      "task_id": "generated-charter-source-pack",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "packs/bigville/frames/knowledge.json",
+        "packs/test_hamlet/frames/knowledge.json",
+        "packs/bigville/pack.json",
+        "domains/knowledge.py",
+        "tests/test_phase004_located_gathering.py"
+      ],
+      "estimated_tokens": 690,
+      "elapsed_seconds": 0.5187,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 5,
+      "hits": [
+        "packs/bigville/pack.json"
+      ],
+      "misses": [
+        "bigville/seeds/gen_charter_bigville_council_charter.json",
+        "packs/bigville/frames/charters.json"
+      ],
+      "recall": 0.333333,
+      "precision": 0.2,
+      "recall_content": 0.333333,
+      "content_files": [
+        "packs/bigville/frames/knowledge.json",
+        "packs/test_hamlet/frames/knowledge.json",
+        "packs/bigville/pack.json",
+        "domains/knowledge.py",
+        "tests/test_phase004_located_gathering.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 19.2675,
+      "evidence_coverage": 0.461538,
+      "evidence_density": 27.9239,
+      "items": 6
+    },
+    {
+      "task_id": "generated-charter-source-pack",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "domains/knowledge.py",
+        "packs/bigville/frames/knowledge.json",
+        "packs/test_hamlet/frames/knowledge.json",
+        "tests/test_phase004_located_gathering.py",
+        "bigville/seeds/gen_charter_bigville_council_charter.json"
+      ],
+      "estimated_tokens": 1292,
+      "elapsed_seconds": 0.5298,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 5,
+      "hits": [
+        "bigville/seeds/gen_charter_bigville_council_charter.json"
+      ],
+      "misses": [
+        "packs/bigville/pack.json",
+        "packs/bigville/frames/charters.json"
+      ],
+      "recall": 0.333333,
+      "precision": 0.2,
+      "recall_content": 0.333333,
+      "content_files": [
+        "domains/knowledge.py",
+        "packs/bigville/frames/knowledge.json",
+        "packs/test_hamlet/frames/knowledge.json",
+        "tests/test_phase004_located_gathering.py",
+        "bigville/seeds/gen_charter_bigville_council_charter.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 26.589,
+      "evidence_coverage": 0.538462,
+      "evidence_density": 20.5797,
+      "items": 7
+    },
+    {
+      "task_id": "backend-profiles-browser-server-route",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "bigville/server.py",
+        "bigville/management/http.py",
+        "tests/test_bigville_reporting.py",
+        "README.md",
+        "tests/management/test_cast_browser.py"
+      ],
+      "estimated_tokens": 273,
+      "elapsed_seconds": 0.5119,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 5,
+      "hits": [
+        "bigville/management/http.py"
+      ],
+      "misses": [
+        "bigville/management/static/management.js"
+      ],
+      "recall": 0.5,
+      "precision": 0.2,
+      "recall_content": 0.5,
+      "content_files": [
+        "bigville/server.py",
+        "bigville/management/http.py",
+        "tests/test_bigville_reporting.py",
+        "README.md",
+        "tests/management/test_cast_browser.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 23.0581,
+      "evidence_coverage": 0.538462,
+      "evidence_density": 84.462,
+      "items": 5
+    },
+    {
+      "task_id": "backend-profiles-browser-server-route",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "bigville/management/static/management.js",
+        "bigville/server.py",
+        "bigville/management/http.py",
+        "tests/test_bigville_reporting.py"
+      ],
+      "estimated_tokens": 698,
+      "elapsed_seconds": 0.5145,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [
+        "bigville/management/http.py",
+        "bigville/management/static/management.js"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.5,
+      "recall_content": 1.0,
+      "content_files": [
+        "bigville/management/static/management.js",
+        "bigville/server.py",
+        "bigville/management/http.py",
+        "tests/test_bigville_reporting.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 29.7086,
+      "evidence_coverage": 0.538462,
+      "evidence_density": 42.5625,
+      "items": 4
+    },
+    {
+      "task_id": "backend-profiles-browser-server-route",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "bigville/management/static/management.js",
+        "bigville/server.py",
+        "tests/test_bigville_reporting.py"
+      ],
+      "estimated_tokens": 1271,
+      "elapsed_seconds": 0.8141,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [
+        "bigville/management/static/management.js"
+      ],
+      "misses": [
+        "bigville/management/http.py"
+      ],
+      "recall": 0.5,
+      "precision": 0.333333,
+      "recall_content": 0.5,
+      "content_files": [
+        "bigville/management/static/management.js",
+        "bigville/server.py",
+        "tests/test_bigville_reporting.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 9,
+      "evidence_symbols": 0,
+      "evidence_weight": 42.0827,
+      "evidence_coverage": 0.692308,
+      "evidence_density": 33.1099,
+      "items": 5
+    }
+  ],
+  "markdown": "# Repo-map retrieval evaluation\n\n- Root: `/applications/data/projects/bigville`\n- Tasks: 3 (`/home/matt/ozmadev/ozagia/evaluation/bigville_retrieval/adapter_tasks.json`)\n- Source-file universe: 501\n- Budgets: 300, 700, 1300 tokens\n- Arms: dev_context\n- Dev-memory snapshot: stale=False (snapshot head `e243ea70eee2a9ca5a55dfe62b9e29214f82cc87`, HEAD `e243ea70eee2a9ca5a55dfe62b9e29214f82cc87`, root mismatch False, allow_stale=False)\n- Deterministic fingerprint: `68a528b99c984759817d5665d98562e8e4bbedc62486d25c1bb0c668c1555557`\n- Wall time: 5.617 s\n- Warning: expected files outside the indexed source universe: `bigville/seeds/conversation.json`, `bigville/seeds/gen_charter_bigville_council_charter.json`, `packs/bigville/frames/charters.json`, `packs/bigville/pack.json`, `scenarios/house_argument.json`, `seeds/conversation.json`\n\n## Aggregate metrics\n\n| Budget | Arm | Tasks | Mean recall@budget | Mean recall (content tier) | Mean precision | Mean evidence coverage | Mean evidence symbols | Mean evidence/1k tokens | Mean files | Mean content files | Mean tokens | Mean s | Cache parsed | Cache reused |\n|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n| 300 | dev_context | 3 | 0.500 | 0.500 | 0.267 | 0.436 | 0.0 | 62.46 | 3.7 | 3.7 | 287 | 0.53 | 0 | 0 |\n| 700 | dev_context | 3 | 0.667 | 0.667 | 0.400 | 0.513 | 0.0 | 37.15 | 4.3 | 4.3 | 696 | 0.52 | 0 | 0 |\n| 1300 | dev_context | 3 | 0.500 | 0.500 | 0.311 | 0.564 | 0.0 | 25.28 | 4.3 | 4.3 | 1227 | 0.64 | 0 | 0 |\n\n## Recall by task\n\nEach cell is `recall (recall_content)`.\n\n### 300 tokens\n\n| Task | dev_context |\n|---|---:|\n| scenario-seed-ambiguity | 1.00 (1.00) |\n| generated-charter-source-pack | 0.00 (0.00) |\n| backend-profiles-browser-server-route | 0.50 (0.50) |\n\n### 700 tokens\n\n| Task | dev_context |\n|---|---:|\n| scenario-seed-ambiguity | 0.67 (0.67) |\n| generated-charter-source-pack | 0.33 (0.33) |\n| backend-profiles-browser-server-route | 1.00 (1.00) |\n\n### 1300 tokens\n\n| Task | dev_context |\n|---|---:|\n| scenario-seed-ambiguity | 0.67 (0.67) |\n| generated-charter-source-pack | 0.33 (0.33) |\n| backend-profiles-browser-server-route | 0.50 (0.50) |\n\n## Task set\n\n| Task | Style | Area | Expected files | Notes |\n|---|---|---|---|---|\n| scenario-seed-ambiguity | symptom | seeds_boot | `scenarios/house_argument.json`<br>`seeds/conversation.json`<br>`bigville/seeds/conversation.json` | Exercises scenario-to-seed navigation and path-distinct duplicate ID handling. |\n| generated-charter-source-pack | symptom | seeds_boot | `bigville/seeds/gen_charter_bigville_council_charter.json`<br>`packs/bigville/pack.json`<br>`packs/bigville/frames/charters.json` | Exercises generated seed to pack table provenance navigation. |\n| backend-profiles-browser-server-route | symptom | worlds_or_tools | `bigville/management/http.py`<br>`bigville/management/static/management.js` | Exercises explicit browser request to server route joining. |\n\n## Reading these numbers\n\n- This is a **retrieval instrument**, not an end-to-end coding benchmark: it measures whether known-relevant files are selected, not whether an agent completes a change.\n- `baseline` is a sorted-path file-listing control, not a semantic retriever. `grep` is a lexical control: it counts distinct task words found in each file's text.\n- `recall` counts a hit at any tier. `recall_content` counts only hits whose file the arm showed as code (code_search snippet, dev_context item with snippet text, or repo-map `full`/`outline` tier). A listing-tier hit tells the reader the path exists, not what it contains.\n- Token estimates are each module's own ~4-chars/token heuristic. Cache counts apply only to repo-map arms.\n- `both` is the literal union of the two retrievers run at the same budget; its token cost and latency are the sum of the components, so its budget is per component (up to 2x the nominal budget). Compare it as a cost/recall trade-off, not as an equal-token arm.\n- `code_search` runs once per task; its elapsed time is the same call's time at every budget.\n- Ground truth is frozen in the task JSON. Re-run the scoped tests after moving or renaming an expected file.\n"
+}

@@ -1,0 +1,895 @@
+{
+  "ok": true,
+  "tool": "ocelot_repo_map_eval",
+  "version": 2,
+  "root": "/applications/data/projects/bigville",
+  "tasks_path": "/home/matt/ozmadev/ozagia/evaluation/bigville_retrieval/adapter_tasks.json",
+  "task_set": {
+    "schema": "ozagia.retrieval.tasks.v1",
+    "title": "Bigville adapter navigation retrieval probes",
+    "source_root": "/applications/data/projects/bigville",
+    "provenance": "Five frozen tasks selected from distinct Bigville scenario, generated-seed, pack, and route examples. Expected paths are the source records at the ends of the requested navigation; representative graph relationships are independently asserted by navigation_eval.py."
+  },
+  "task_set_summary": {
+    "tasks": 5,
+    "by_area": {
+      "seeds_boot": 4,
+      "worlds_or_tools": 1
+    },
+    "by_style": {
+      "symptom": 5
+    },
+    "expected_files_total": 16
+  },
+  "task_count": 5,
+  "source_files": 501,
+  "budgets": [
+    300,
+    700,
+    1300
+  ],
+  "arms": [
+    "dev_context"
+  ],
+  "arm_descriptions": {
+    "dev_context": "DevMemory.context items/snippets, executed at the budget."
+  },
+  "cache_path": "/tmp/ozagia-bigville-eval/tags-with-adapter.json",
+  "memory_path": "/tmp/ozagia-bigville-eval/fresh-with-adapter.json",
+  "memory_staleness": {
+    "snapshot_root": "/applications/data/projects/bigville",
+    "root": "/applications/data/projects/bigville",
+    "root_mismatch": false,
+    "snapshot_head": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+    "head": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+    "tree_changed": false,
+    "current_tree_digest": "78f71dd46d52dad691191abd4e66b00ef6ef6513f18058f61078d064f26255b7",
+    "stale": false,
+    "freshness": "fresh",
+    "verification_errors": [],
+    "generated_at": "2026-11-26T23:50:40"
+  },
+  "allow_stale": false,
+  "expected_files_outside_source_universe": [
+    "bigville/seeds/bigville_terrain_movement.json",
+    "bigville/seeds/conversation.json",
+    "bigville/seeds/conversation_reply.json",
+    "bigville/seeds/gen_charter_bigville_council_charter.json",
+    "packs/bigville/frames/charters.json",
+    "packs/bigville/pack.json",
+    "packs/bigville/world/terrain_movement.json",
+    "scenarios/house_argument.json",
+    "scenarios/monopoly_four_players.json",
+    "seeds/conversation.json",
+    "seeds/conversation_reply.json"
+  ],
+  "total_elapsed_seconds": 8.983,
+  "deterministic_fingerprint": "b476177d7a258e27406ab4a41dce72a00381bcd404ed528871c887d74f17cba5",
+  "tasks": [
+    {
+      "id": "scenario-seed-ambiguity",
+      "task": "For the house argument scenario, locate its conversation knowledge definition and determine which source copy the runtime reference can mean.",
+      "expected_files": [
+        "scenarios/house_argument.json",
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json"
+      ],
+      "notes": "Exercises scenario-to-seed navigation and path-distinct duplicate ID handling.",
+      "style": "symptom",
+      "area": "seeds_boot"
+    },
+    {
+      "id": "generated-charter-source-pack",
+      "task": "Trace the generated council charter knowledge back to the authored pack table and identify the declared source provenance.",
+      "expected_files": [
+        "bigville/seeds/gen_charter_bigville_council_charter.json",
+        "packs/bigville/pack.json",
+        "packs/bigville/frames/charters.json"
+      ],
+      "notes": "Exercises generated seed to pack table provenance navigation.",
+      "style": "symptom",
+      "area": "seeds_boot"
+    },
+    {
+      "id": "generated-terrain-movement-source-pack",
+      "task": "Find the authored terrain movement rules table that produced the packaged terrain movement knowledge, including its pack declaration.",
+      "expected_files": [
+        "bigville/seeds/bigville_terrain_movement.json",
+        "packs/bigville/pack.json",
+        "packs/bigville/world/terrain_movement.json"
+      ],
+      "notes": "Second generated seed/table example from a different pack domain.",
+      "style": "symptom",
+      "area": "seeds_boot"
+    },
+    {
+      "id": "monopoly-scenario-seed-ambiguity",
+      "task": "For the four player Monopoly scenario, find both conversation manifests and both conversation reply manifests that its ID-only seed references can resolve to.",
+      "expected_files": [
+        "scenarios/monopoly_four_players.json",
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json",
+        "seeds/conversation_reply.json",
+        "bigville/seeds/conversation_reply.json"
+      ],
+      "notes": "Second scenario exercises ambiguity across two seed IDs rather than one reference.",
+      "style": "symptom",
+      "area": "seeds_boot"
+    },
+    {
+      "id": "backend-profiles-browser-server-route",
+      "task": "Trace the management browser's backend profile listing request to the server handler that implements the same HTTP endpoint.",
+      "expected_files": [
+        "bigville/management/http.py",
+        "bigville/management/static/management.js"
+      ],
+      "notes": "Exercises explicit browser request to server route joining.",
+      "style": "symptom",
+      "area": "worlds_or_tools"
+    }
+  ],
+  "aggregates": [
+    {
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "tasks": 5,
+      "mean_recall_at_budget": 0.42,
+      "mean_recall_content_at_budget": 0.42,
+      "mean_precision": 0.396667,
+      "mean_evidence_coverage": 0.446853,
+      "mean_evidence_density": 61.13308,
+      "mean_evidence_terms": 5.6,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 17.65562,
+      "mean_selected_files": 3.8,
+      "mean_content_files": 3.8,
+      "mean_estimated_tokens": 290.8,
+      "mean_elapsed_seconds": 0.5478,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 5,
+      "recall_1_tasks": 0
+    },
+    {
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "tasks": 5,
+      "mean_recall_at_budget": 0.52,
+      "mean_recall_content_at_budget": 0.52,
+      "mean_precision": 0.292381,
+      "mean_evidence_coverage": 0.504196,
+      "mean_evidence_density": 34.49698,
+      "mean_evidence_terms": 6.2,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 23.85144,
+      "mean_selected_files": 5.0,
+      "mean_content_files": 5.0,
+      "mean_estimated_tokens": 691.2,
+      "mean_elapsed_seconds": 0.5342,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 5,
+      "recall_1_tasks": 1
+    },
+    {
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "tasks": 5,
+      "mean_recall_at_budget": 0.553333,
+      "mean_recall_content_at_budget": 0.553333,
+      "mean_precision": 0.34,
+      "mean_evidence_coverage": 0.565734,
+      "mean_evidence_density": 29.36478,
+      "mean_evidence_terms": 7.0,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 27.88298,
+      "mean_selected_files": 5.2,
+      "mean_content_files": 5.2,
+      "mean_estimated_tokens": 977.0,
+      "mean_elapsed_seconds": 0.5985,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 5,
+      "recall_1_tasks": 0
+    }
+  ],
+  "runs": [
+    {
+      "task_id": "scenario-seed-ambiguity",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "scenarios/house_argument.json",
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "docs/research/reference_food_body_scenario.md",
+        "scenarios/reference/seasonal/victoria_apple_household_90d.json"
+      ],
+      "estimated_tokens": 291,
+      "elapsed_seconds": 0.5736,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 5,
+      "hits": [
+        "scenarios/house_argument.json"
+      ],
+      "misses": [
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json"
+      ],
+      "recall": 0.333333,
+      "precision": 0.2,
+      "recall_content": 0.333333,
+      "content_files": [
+        "scenarios/house_argument.json",
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "docs/research/reference_food_body_scenario.md",
+        "scenarios/reference/seasonal/victoria_apple_household_90d.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 18.437,
+      "evidence_coverage": 0.461538,
+      "evidence_density": 63.3572,
+      "items": 6
+    },
+    {
+      "task_id": "scenario-seed-ambiguity",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "scenarios/house_argument.json",
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "README.md",
+        "seeds/cognitive_scheduler.json"
+      ],
+      "estimated_tokens": 700,
+      "elapsed_seconds": 0.5414,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 5,
+      "hits": [
+        "scenarios/house_argument.json"
+      ],
+      "misses": [
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json"
+      ],
+      "recall": 0.333333,
+      "precision": 0.2,
+      "recall_content": 0.333333,
+      "content_files": [
+        "scenarios/house_argument.json",
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "README.md",
+        "seeds/cognitive_scheduler.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 5,
+      "evidence_symbols": 0,
+      "evidence_weight": 18.956,
+      "evidence_coverage": 0.384615,
+      "evidence_density": 27.08,
+      "items": 7
+    },
+    {
+      "task_id": "scenario-seed-ambiguity",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "scenarios/house_argument.json",
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "README.md",
+        "seeds/cognitive_scheduler.json"
+      ],
+      "estimated_tokens": 1215,
+      "elapsed_seconds": 0.5605,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 5,
+      "hits": [
+        "scenarios/house_argument.json"
+      ],
+      "misses": [
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json"
+      ],
+      "recall": 0.333333,
+      "precision": 0.2,
+      "recall_content": 0.333333,
+      "content_files": [
+        "scenarios/house_argument.json",
+        "bigville/runtime.py",
+        "tests/test_bigville_graph_persistence.py",
+        "README.md",
+        "seeds/cognitive_scheduler.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 5,
+      "evidence_symbols": 0,
+      "evidence_weight": 21.0102,
+      "evidence_coverage": 0.384615,
+      "evidence_density": 17.2924,
+      "items": 8
+    },
+    {
+      "task_id": "generated-charter-source-pack",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "tests/test_phase051_lexicon.py",
+        "bigville/seeds/gen_charter_bigville_council_charter.json"
+      ],
+      "estimated_tokens": 299,
+      "elapsed_seconds": 0.5407,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 2,
+      "hits": [
+        "bigville/seeds/gen_charter_bigville_council_charter.json"
+      ],
+      "misses": [
+        "packs/bigville/pack.json",
+        "packs/bigville/frames/charters.json"
+      ],
+      "recall": 0.333333,
+      "precision": 0.5,
+      "recall_content": 0.333333,
+      "content_files": [
+        "tests/test_phase051_lexicon.py",
+        "bigville/seeds/gen_charter_bigville_council_charter.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 19.7664,
+      "evidence_coverage": 0.461538,
+      "evidence_density": 66.1082,
+      "items": 3
+    },
+    {
+      "task_id": "generated-charter-source-pack",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_phase051_lexicon.py",
+        "bigville/seeds/bigville_hold.json"
+      ],
+      "estimated_tokens": 700,
+      "elapsed_seconds": 0.5322,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "bigville/seeds/gen_charter_bigville_council_charter.json",
+        "packs/bigville/pack.json",
+        "packs/bigville/frames/charters.json"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "README.md",
+        "tests/test_phase051_lexicon.py",
+        "bigville/seeds/bigville_hold.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 22.4656,
+      "evidence_coverage": 0.461538,
+      "evidence_density": 32.0938,
+      "items": 3
+    },
+    {
+      "task_id": "generated-charter-source-pack",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "README.md",
+        "tests/test_phase051_lexicon.py",
+        "bigville/seeds/bigville_hold.json",
+        "bigville/seeds/gen_charter_bigville_council_charter.json",
+        "packs/bigville/frames/charters.json",
+        "packs/test_hamlet/frames/charters.json"
+      ],
+      "estimated_tokens": 816,
+      "elapsed_seconds": 0.5307,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 6,
+      "hits": [
+        "bigville/seeds/gen_charter_bigville_council_charter.json",
+        "packs/bigville/frames/charters.json"
+      ],
+      "misses": [
+        "packs/bigville/pack.json"
+      ],
+      "recall": 0.666667,
+      "precision": 0.333333,
+      "recall_content": 0.666667,
+      "content_files": [
+        "README.md",
+        "tests/test_phase051_lexicon.py",
+        "bigville/seeds/bigville_hold.json",
+        "bigville/seeds/gen_charter_bigville_council_charter.json",
+        "packs/bigville/frames/charters.json",
+        "packs/test_hamlet/frames/charters.json"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 30.1105,
+      "evidence_coverage": 0.615385,
+      "evidence_density": 36.9002,
+      "items": 7
+    },
+    {
+      "task_id": "generated-terrain-movement-source-pack",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "packs/bigville/world/terrain_movement.json",
+        "packs/test_hamlet/world/terrain_movement.json",
+        "worlds/bigville_world.py"
+      ],
+      "estimated_tokens": 293,
+      "elapsed_seconds": 0.5373,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 3,
+      "hits": [
+        "packs/bigville/world/terrain_movement.json"
+      ],
+      "misses": [
+        "bigville/seeds/bigville_terrain_movement.json",
+        "packs/bigville/pack.json"
+      ],
+      "recall": 0.333333,
+      "precision": 0.333333,
+      "recall_content": 0.333333,
+      "content_files": [
+        "packs/bigville/world/terrain_movement.json",
+        "packs/test_hamlet/world/terrain_movement.json",
+        "worlds/bigville_world.py"
+      ],
+      "task_term_count": 12,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 18.8312,
+      "evidence_coverage": 0.5,
+      "evidence_density": 64.2702,
+      "items": 3
+    },
+    {
+      "task_id": "generated-terrain-movement-source-pack",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "packs/bigville/world/terrain_movement.json",
+        "packs/test_hamlet/world/terrain_movement.json",
+        "README.md",
+        "worlds/bigville_world.py",
+        "bigville/seeds/bigville_terrain_movement.json",
+        "tests/test_bigville_world_migrated.py"
+      ],
+      "estimated_tokens": 659,
+      "elapsed_seconds": 0.5248,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 6,
+      "hits": [
+        "bigville/seeds/bigville_terrain_movement.json",
+        "packs/bigville/world/terrain_movement.json"
+      ],
+      "misses": [
+        "packs/bigville/pack.json"
+      ],
+      "recall": 0.666667,
+      "precision": 0.333333,
+      "recall_content": 0.666667,
+      "content_files": [
+        "packs/bigville/world/terrain_movement.json",
+        "packs/test_hamlet/world/terrain_movement.json",
+        "README.md",
+        "worlds/bigville_world.py",
+        "bigville/seeds/bigville_terrain_movement.json",
+        "tests/test_bigville_world_migrated.py"
+      ],
+      "task_term_count": 12,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 21.8498,
+      "evidence_coverage": 0.5,
+      "evidence_density": 33.156,
+      "items": 8
+    },
+    {
+      "task_id": "generated-terrain-movement-source-pack",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "packs/bigville/world/terrain_movement.json",
+        "packs/test_hamlet/world/terrain_movement.json",
+        "README.md",
+        "worlds/bigville_world.py",
+        "bigville/seeds/bigville_terrain_movement.json",
+        "tests/test_bigville_world_migrated.py"
+      ],
+      "estimated_tokens": 659,
+      "elapsed_seconds": 0.8351,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 3,
+      "selected_count": 6,
+      "hits": [
+        "bigville/seeds/bigville_terrain_movement.json",
+        "packs/bigville/world/terrain_movement.json"
+      ],
+      "misses": [
+        "packs/bigville/pack.json"
+      ],
+      "recall": 0.666667,
+      "precision": 0.333333,
+      "recall_content": 0.666667,
+      "content_files": [
+        "packs/bigville/world/terrain_movement.json",
+        "packs/test_hamlet/world/terrain_movement.json",
+        "README.md",
+        "worlds/bigville_world.py",
+        "bigville/seeds/bigville_terrain_movement.json",
+        "tests/test_bigville_world_migrated.py"
+      ],
+      "task_term_count": 12,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 21.8498,
+      "evidence_coverage": 0.5,
+      "evidence_density": 33.156,
+      "items": 8
+    },
+    {
+      "task_id": "monopoly-scenario-seed-ambiguity",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "seeds/conversation_reply.json",
+        "bigville/seeds/conversation.json",
+        "seeds/conversation.json",
+        "tests/test_phase013a_packs.py"
+      ],
+      "estimated_tokens": 298,
+      "elapsed_seconds": 0.5595,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 5,
+      "selected_count": 4,
+      "hits": [
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json",
+        "seeds/conversation_reply.json"
+      ],
+      "misses": [
+        "scenarios/monopoly_four_players.json",
+        "bigville/seeds/conversation_reply.json"
+      ],
+      "recall": 0.6,
+      "precision": 0.75,
+      "recall_content": 0.6,
+      "content_files": [
+        "seeds/conversation_reply.json",
+        "bigville/seeds/conversation.json",
+        "seeds/conversation.json",
+        "tests/test_phase013a_packs.py"
+      ],
+      "task_term_count": 11,
+      "evidence_terms": 3,
+      "evidence_symbols": 0,
+      "evidence_weight": 8.1854,
+      "evidence_coverage": 0.272727,
+      "evidence_density": 27.4678,
+      "items": 4
+    },
+    {
+      "task_id": "monopoly-scenario-seed-ambiguity",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "seeds/conversation_reply.json",
+        "bigville/seeds/conversation_reply.json",
+        "README.md",
+        "scenarios/monopoly_four_players.json",
+        "tests/test_graph_revisions.py",
+        "bigville/world_persistence.py",
+        "domains/pack.py"
+      ],
+      "estimated_tokens": 699,
+      "elapsed_seconds": 0.5527,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 5,
+      "selected_count": 7,
+      "hits": [
+        "scenarios/monopoly_four_players.json",
+        "seeds/conversation_reply.json",
+        "bigville/seeds/conversation_reply.json"
+      ],
+      "misses": [
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json"
+      ],
+      "recall": 0.6,
+      "precision": 0.428571,
+      "recall_content": 0.6,
+      "content_files": [
+        "seeds/conversation_reply.json",
+        "bigville/seeds/conversation_reply.json",
+        "README.md",
+        "scenarios/monopoly_four_players.json",
+        "tests/test_graph_revisions.py",
+        "bigville/world_persistence.py",
+        "domains/pack.py"
+      ],
+      "task_term_count": 11,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 26.2772,
+      "evidence_coverage": 0.636364,
+      "evidence_density": 37.5926,
+      "items": 8
+    },
+    {
+      "task_id": "monopoly-scenario-seed-ambiguity",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "seeds/conversation_reply.json",
+        "bigville/seeds/conversation_reply.json",
+        "README.md",
+        "scenarios/monopoly_four_players.json",
+        "tests/test_graph_revisions.py",
+        "bigville/runtime.py"
+      ],
+      "estimated_tokens": 924,
+      "elapsed_seconds": 0.556,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 5,
+      "selected_count": 6,
+      "hits": [
+        "scenarios/monopoly_four_players.json",
+        "seeds/conversation_reply.json",
+        "bigville/seeds/conversation_reply.json"
+      ],
+      "misses": [
+        "seeds/conversation.json",
+        "bigville/seeds/conversation.json"
+      ],
+      "recall": 0.6,
+      "precision": 0.5,
+      "recall_content": 0.6,
+      "content_files": [
+        "seeds/conversation_reply.json",
+        "bigville/seeds/conversation_reply.json",
+        "README.md",
+        "scenarios/monopoly_four_players.json",
+        "tests/test_graph_revisions.py",
+        "bigville/runtime.py"
+      ],
+      "task_term_count": 11,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 24.3617,
+      "evidence_coverage": 0.636364,
+      "evidence_density": 26.3654,
+      "items": 8
+    },
+    {
+      "task_id": "backend-profiles-browser-server-route",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "bigville/server.py",
+        "bigville/management/http.py",
+        "tests/test_bigville_reporting.py",
+        "README.md",
+        "tests/management/test_cast_browser.py"
+      ],
+      "estimated_tokens": 273,
+      "elapsed_seconds": 0.5277,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 5,
+      "hits": [
+        "bigville/management/http.py"
+      ],
+      "misses": [
+        "bigville/management/static/management.js"
+      ],
+      "recall": 0.5,
+      "precision": 0.2,
+      "recall_content": 0.5,
+      "content_files": [
+        "bigville/server.py",
+        "bigville/management/http.py",
+        "tests/test_bigville_reporting.py",
+        "README.md",
+        "tests/management/test_cast_browser.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 23.0581,
+      "evidence_coverage": 0.538462,
+      "evidence_density": 84.462,
+      "items": 5
+    },
+    {
+      "task_id": "backend-profiles-browser-server-route",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "bigville/management/static/management.js",
+        "bigville/server.py",
+        "bigville/management/http.py",
+        "tests/test_bigville_reporting.py"
+      ],
+      "estimated_tokens": 698,
+      "elapsed_seconds": 0.5198,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [
+        "bigville/management/http.py",
+        "bigville/management/static/management.js"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.5,
+      "recall_content": 1.0,
+      "content_files": [
+        "bigville/management/static/management.js",
+        "bigville/server.py",
+        "bigville/management/http.py",
+        "tests/test_bigville_reporting.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 29.7086,
+      "evidence_coverage": 0.538462,
+      "evidence_density": 42.5625,
+      "items": 4
+    },
+    {
+      "task_id": "backend-profiles-browser-server-route",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "bigville/management/static/management.js",
+        "bigville/server.py",
+        "tests/test_bigville_reporting.py"
+      ],
+      "estimated_tokens": 1271,
+      "elapsed_seconds": 0.5102,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [
+        "bigville/management/static/management.js"
+      ],
+      "misses": [
+        "bigville/management/http.py"
+      ],
+      "recall": 0.5,
+      "precision": 0.333333,
+      "recall_content": 0.5,
+      "content_files": [
+        "bigville/management/static/management.js",
+        "bigville/server.py",
+        "tests/test_bigville_reporting.py"
+      ],
+      "task_term_count": 13,
+      "evidence_terms": 9,
+      "evidence_symbols": 0,
+      "evidence_weight": 42.0827,
+      "evidence_coverage": 0.692308,
+      "evidence_density": 33.1099,
+      "items": 5
+    }
+  ],
+  "markdown": "# Repo-map retrieval evaluation\n\n- Root: `/applications/data/projects/bigville`\n- Tasks: 5 (`/home/matt/ozmadev/ozagia/evaluation/bigville_retrieval/adapter_tasks.json`)\n- Source-file universe: 501\n- Budgets: 300, 700, 1300 tokens\n- Arms: dev_context\n- Dev-memory snapshot: stale=False (snapshot head `e243ea70eee2a9ca5a55dfe62b9e29214f82cc87`, HEAD `e243ea70eee2a9ca5a55dfe62b9e29214f82cc87`, root mismatch False, allow_stale=False)\n- Deterministic fingerprint: `b476177d7a258e27406ab4a41dce72a00381bcd404ed528871c887d74f17cba5`\n- Wall time: 8.983 s\n- Warning: expected files outside the indexed source universe: `bigville/seeds/bigville_terrain_movement.json`, `bigville/seeds/conversation.json`, `bigville/seeds/conversation_reply.json`, `bigville/seeds/gen_charter_bigville_council_charter.json`, `packs/bigville/frames/charters.json`, `packs/bigville/pack.json`, `packs/bigville/world/terrain_movement.json`, `scenarios/house_argument.json`, `scenarios/monopoly_four_players.json`, `seeds/conversation.json`, `seeds/conversation_reply.json`\n\n## Aggregate metrics\n\n| Budget | Arm | Tasks | Mean recall@budget | Mean recall (content tier) | Mean precision | Mean evidence coverage | Mean evidence symbols | Mean evidence/1k tokens | Mean files | Mean content files | Mean tokens | Mean s | Cache parsed | Cache reused |\n|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n| 300 | dev_context | 5 | 0.420 | 0.420 | 0.397 | 0.447 | 0.0 | 61.13 | 3.8 | 3.8 | 291 | 0.55 | 0 | 0 |\n| 700 | dev_context | 5 | 0.520 | 0.520 | 0.292 | 0.504 | 0.0 | 34.50 | 5.0 | 5.0 | 691 | 0.53 | 0 | 0 |\n| 1300 | dev_context | 5 | 0.553 | 0.553 | 0.340 | 0.566 | 0.0 | 29.36 | 5.2 | 5.2 | 977 | 0.60 | 0 | 0 |\n\n## Recall by task\n\nEach cell is `recall (recall_content)`.\n\n### 300 tokens\n\n| Task | dev_context |\n|---|---:|\n| scenario-seed-ambiguity | 0.33 (0.33) |\n| generated-charter-source-pack | 0.33 (0.33) |\n| generated-terrain-movement-source-pack | 0.33 (0.33) |\n| monopoly-scenario-seed-ambiguity | 0.60 (0.60) |\n| backend-profiles-browser-server-route | 0.50 (0.50) |\n\n### 700 tokens\n\n| Task | dev_context |\n|---|---:|\n| scenario-seed-ambiguity | 0.33 (0.33) |\n| generated-charter-source-pack | 0.00 (0.00) |\n| generated-terrain-movement-source-pack | 0.67 (0.67) |\n| monopoly-scenario-seed-ambiguity | 0.60 (0.60) |\n| backend-profiles-browser-server-route | 1.00 (1.00) |\n\n### 1300 tokens\n\n| Task | dev_context |\n|---|---:|\n| scenario-seed-ambiguity | 0.33 (0.33) |\n| generated-charter-source-pack | 0.67 (0.67) |\n| generated-terrain-movement-source-pack | 0.67 (0.67) |\n| monopoly-scenario-seed-ambiguity | 0.60 (0.60) |\n| backend-profiles-browser-server-route | 0.50 (0.50) |\n\n## Task set\n\n| Task | Style | Area | Expected files | Notes |\n|---|---|---|---|---|\n| scenario-seed-ambiguity | symptom | seeds_boot | `scenarios/house_argument.json`<br>`seeds/conversation.json`<br>`bigville/seeds/conversation.json` | Exercises scenario-to-seed navigation and path-distinct duplicate ID handling. |\n| generated-charter-source-pack | symptom | seeds_boot | `bigville/seeds/gen_charter_bigville_council_charter.json`<br>`packs/bigville/pack.json`<br>`packs/bigville/frames/charters.json` | Exercises generated seed to pack table provenance navigation. |\n| generated-terrain-movement-source-pack | symptom | seeds_boot | `bigville/seeds/bigville_terrain_movement.json`<br>`packs/bigville/pack.json`<br>`packs/bigville/world/terrain_movement.json` | Second generated seed/table example from a different pack domain. |\n| monopoly-scenario-seed-ambiguity | symptom | seeds_boot | `scenarios/monopoly_four_players.json`<br>`seeds/conversation.json`<br>`bigville/seeds/conversation.json`<br>`seeds/conversation_reply.json`<br>`bigville/seeds/conversation_reply.json` | Second scenario exercises ambiguity across two seed IDs rather than one reference. |\n| backend-profiles-browser-server-route | symptom | worlds_or_tools | `bigville/management/http.py`<br>`bigville/management/static/management.js` | Exercises explicit browser request to server route joining. |\n\n## Reading these numbers\n\n- This is a **retrieval instrument**, not an end-to-end coding benchmark: it measures whether known-relevant files are selected, not whether an agent completes a change.\n- `baseline` is a sorted-path file-listing control, not a semantic retriever. `grep` is a lexical control: it counts distinct task words found in each file's text.\n- `recall` counts a hit at any tier. `recall_content` counts only hits whose file the arm showed as code (code_search snippet, dev_context item with snippet text, or repo-map `full`/`outline` tier). A listing-tier hit tells the reader the path exists, not what it contains.\n- Token estimates are each module's own ~4-chars/token heuristic. Cache counts apply only to repo-map arms.\n- `both` is the literal union of the two retrievers run at the same budget; its token cost and latency are the sum of the components, so its budget is per component (up to 2x the nominal budget). Compare it as a cost/recall trade-off, not as an equal-token arm.\n- `code_search` runs once per task; its elapsed time is the same call's time at every budget.\n- Ground truth is frozen in the task JSON. Re-run the scoped tests after moving or renaming an expected file.\n"
+}

@@ -42,7 +42,8 @@ Planning is read-only:
   ``refuse`` for strict tasks, or ``affected_with_warning`` for a best-effort
   subset that does not claim affected coverage);
 - ``max_tests`` caps the selection, but mandatory tests (changed, failed,
-  flaky) are never silently dropped; the plan reports an exceeded cap.
+  flaky and explicitly declared complete-coverage tests) are never silently
+  dropped; the plan reports an exceeded cap.
 
 The plan reports ``mode``, changed files, selected test files and node ids,
 counts, omitted files, fallback reason, graph freshness and
@@ -55,6 +56,7 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable, Mapping, Sequence
@@ -100,7 +102,7 @@ _DOC_SUFFIXES = frozenset({
     ".md", ".markdown", ".rst", ".adoc", ".asciidoc", ".txt",
 })
 _CONFIG_SUFFIXES = frozenset({
-    ".toml", ".yaml", ".yml", ".json", ".jsonc", ".ini", ".cfg", ".conf",
+    ".toml", ".yaml", ".yml", ".jsonc", ".ini", ".cfg", ".conf",
     ".lock", ".xml", ".properties",
 })
 _CONFIG_NAMES = frozenset({
@@ -648,12 +650,12 @@ def _graph_index(dev: Any) -> dict[str, Any]:
         if not isinstance(attrs, Mapping):
             attrs = {}
         if node_type == "File":
-            path = str(attrs.get("path") or "")
+            path = _safe_repo_relpath(attrs.get("path"))
             if path:
                 files_by_path[path] = int(nid)
         elif node_type == "Test":
-            path = str(attrs.get("file") or "") or (
-                key_file(str(dev.key_of(int(nid)) or "")) or "")
+            path = _safe_repo_relpath(attrs.get("file")) or _safe_repo_relpath(
+                key_file(str(dev.key_of(int(nid)) or "")))
             if not path:
                 continue
             key = str(dev.key_of(int(nid)) or _TEST_KEY_PREFIX
@@ -661,6 +663,7 @@ def _graph_index(dev: Any) -> dict[str, Any]:
             tests_by_file.setdefault(path, set()).add(key)
             test_nodes[int(nid)] = (path, key)
     file_tests: dict[str, set[str]] = {}
+    file_for_node = {nid: path for path, nid in files_by_path.items()}
     for path, fid in files_by_path.items():
         file_tests.setdefault(path, set())
         try:
@@ -680,18 +683,15 @@ def _graph_index(dev: Any) -> dict[str, Any]:
             continue
         etype = str(edge.get("type") or "")
         if etype == "has_test":
-            file_path = str(((dev.node(src) or {}).get("attrs") or {}).get(
-                "path") or "")
+            file_path = file_for_node.get(src, "")
             test = test_nodes.get(tgt)
             if file_path and test is not None:
                 file_tests.setdefault(file_path, set()).add(test[0])
         elif etype in {"tests_module", "mentions_file", "tested_by_file"}:
             src_test = test_nodes.get(src)
             tgt_test = test_nodes.get(tgt)
-            tgt_file = str(((dev.node(tgt) or {}).get("attrs") or {}).get(
-                "path") or "")
-            src_file = str(((dev.node(src) or {}).get("attrs") or {}).get(
-                "path") or "")
+            tgt_file = file_for_node.get(tgt, "")
+            src_file = file_for_node.get(src, "")
             if src_test is not None and tgt_file:
                 file_tests.setdefault(tgt_file, set()).add(src_test[0])
             elif tgt_test is not None and src_file:
@@ -703,12 +703,142 @@ def _graph_index(dev: Any) -> dict[str, Any]:
     }
 
 
+def _safe_repo_relpath(value: Any) -> str:
+    """Return a canonical repository-relative graph path, or an empty string."""
+    if not isinstance(value, str) or not value:
+        return ""
+    path = value.replace("\\", "/")
+    if "\x00" in path or path.startswith("/") or re.match(r"^[A-Za-z]:", path):
+        return ""
+    parts = [part for part in path.split("/") if part not in ("", ".")]
+    if not parts or any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
+
+
+def _is_repo_file(root: Path, rel: str) -> bool:
+    """Check that a relative candidate resolves to a file inside root."""
+    safe = _safe_repo_relpath(rel)
+    if not safe:
+        return False
+    try:
+        path = (root / safe).resolve()
+        path.relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return path.is_file()
+
+
+def _test_coverage_contract(root: Path, test_dirs: Sequence[str],
+                            discovered: set[str]) -> dict[str, Any]:
+    """Load optional, explicit complete data-to-test rules from project config.
+
+    Graph adapter links are advisory. This separate contract is accepted only
+    from validated, repository-owned TOML and requires an explicit completeness
+    flag, changed-path globs, existing test files and a rationale.
+    """
+    result: dict[str, Any] = {"status": "not_configured", "rules": [],
+                              "reason": None}
+    project_config = root / ".ozagia.toml"
+    if not project_config.exists() and not project_config.is_symlink():
+        return result
+    if not _is_repo_file(root, ".ozagia.toml"):
+        result.update(status="invalid", reason=(
+            ".ozagia.toml must resolve to a file inside the repository"))
+        return result
+    try:
+        project_values = tomllib.loads(
+            project_config.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        result.update(status="invalid", reason=(
+            f"cannot load {project_config}: {exc}"))
+        return result
+    raw_section = project_values.get("test_coverage")
+    if raw_section is None:
+        return result
+    if not isinstance(raw_section, Mapping) or set(raw_section) != {"rules"}:
+        result.update(status="invalid", reason=(
+            "[test_coverage] must define only rules"))
+        return result
+    raw_rules = raw_section.get("rules")
+    if raw_rules is None:
+        return result
+    if not isinstance(raw_rules, list) or not raw_rules:
+        result.update(status="invalid", reason="rules must be a non-empty array")
+        return result
+    rules: list[dict[str, Any]] = []
+    allowed = {"paths", "tests", "complete", "evidence"}
+    for number, raw in enumerate(raw_rules, 1):
+        where = f"test_coverage.rules[{number}]"
+        if not isinstance(raw, Mapping) or set(raw) != allowed:
+            result.update(status="invalid", reason=(
+                f"{where} must define exactly paths, tests, complete, evidence"))
+            return result
+        patterns = raw.get("paths")
+        tests = raw.get("tests")
+        evidence = raw.get("evidence")
+        if raw.get("complete") is not True:
+            result.update(status="invalid", reason=f"{where}.complete must be true")
+            return result
+        if (not isinstance(patterns, list) or not patterns
+                or any(not isinstance(item, str) or not item.strip()
+                       for item in patterns)):
+            result.update(
+                status="invalid",
+                reason=f"{where}.paths must be a non-empty string array")
+            return result
+        normalized_patterns: list[str] = []
+        for pattern in patterns:
+            pattern = pattern.replace("\\", "/").strip()
+            if (pattern.startswith("/") or re.match(r"^[A-Za-z]:", pattern)
+                    or "\x00" in pattern
+                    or any(part == ".." for part in pattern.split("/"))):
+                result.update(status="invalid", reason=f"{where}.paths contains an unsafe pattern")
+                return result
+            normalized_patterns.append(pattern)
+        if not isinstance(tests, list) or not tests:
+            result.update(
+                status="invalid",
+                reason=f"{where}.tests must be a non-empty string array")
+            return result
+        normalized_tests: list[str] = []
+        for test in tests:
+            safe = _safe_repo_relpath(test)
+            if (not safe or not _is_test_file(safe, test_dirs)
+                    or safe not in discovered or not _is_repo_file(root, safe)):
+                result.update(status="invalid", reason=(
+                    f"{where}.tests contains a missing, unsafe, or undiscovered test"))
+                return result
+            normalized_tests.append(safe)
+        if not isinstance(evidence, str) or not evidence.strip() or len(evidence) > 1000:
+            result.update(
+                status="invalid",
+                reason=(f"{where}.evidence must be a non-empty string up to "
+                        "1000 characters"))
+            return result
+        rules.append({"paths": sorted(set(normalized_patterns)),
+                      "tests": sorted(set(normalized_tests)),
+                      "complete": True, "evidence": evidence.strip()})
+    result.update(status="valid", rules=rules)
+    return result
+
+
+def _declared_coverage_for(path: str, contract: Mapping[str, Any]) -> set[str]:
+    tests: set[str] = set()
+    if contract.get("status") != "valid":
+        return tests
+    for rule in contract.get("rules", ()):
+        if any(_pattern_matches(path, pattern) for pattern in rule["paths"]):
+            tests.update(rule["tests"])
+    return tests
+
+
 def _discover_tests(root: Path, graph: Mapping[str, Any] | None,
                     test_dirs: Sequence[str]) -> set[str]:
     found: set[str] = set()
     if graph is not None:
         for path in (graph.get("tests_by_file") or {}):
-            if (root / path).is_file():
+            if _is_repo_file(root, path):
                 found.add(path)
     files = _repo_files(root)
     if files is None:
@@ -716,7 +846,7 @@ def _discover_tests(root: Path, graph: Mapping[str, Any] | None,
     for rel in files:
         if len(found) >= MAX_TEST_FILES:
             break
-        if rel and _is_test_file(rel, test_dirs) and (root / rel).is_file():
+        if rel and _is_test_file(rel, test_dirs) and _is_repo_file(root, rel):
             found.add(rel)
     return found
 
@@ -758,7 +888,7 @@ def _package_tests(root: Path, graph: Mapping[str, Any],
             if parent == candidate or parent.startswith(candidate + "/"):
                 tests.add(path)
                 break
-    return {path for path in tests if (root / path).is_file()}
+    return {path for path in tests if _is_repo_file(root, path)}
 
 
 # --------------------------------------------------------------------------- #
@@ -793,14 +923,16 @@ def _result_state(root: Path) -> dict[str, Any]:
         if not isinstance(suite, Mapping):
             continue
         for rel in (suite.get("files") or {}):
-            if isinstance(rel, str) and rel:
-                failing.add(rel)
+            safe = _safe_repo_relpath(rel)
+            if safe:
+                failing.add(safe)
     flaky: set[str] = set()
     for nodeid in state.get("flaky") or {}:
         if isinstance(nodeid, str) and "::" in nodeid:
             rel = nodeid.split("::", 1)[0]
-            if rel:
-                flaky.add(rel)
+            safe = _safe_repo_relpath(rel)
+            if safe:
+                flaky.add(safe)
     info["failing"] = sorted(failing)
     info["flaky"] = sorted(flaky)
     return info
@@ -836,7 +968,7 @@ def _best_effort(root: Path, changed: Sequence[str], graph: Mapping[str, Any]
                         f"test_{stem}.py", f"{stem}_test.py",
                         f"{stem}_test.go"}:
                     selected.add(candidate)
-    return {path for path in selected if (root / path).is_file()}
+    return {path for path in selected if _is_repo_file(root, path)}
 
 
 def plan(root: str | Path, *, base: str = "HEAD", head: str | None = None,
@@ -867,21 +999,32 @@ def plan(root: str | Path, *, base: str = "HEAD", head: str | None = None,
     head_commit = (_resolve_commit(root_p, head) if head is not None
                    else _head(root_p))
     graph_info, graph = _load_graph(root_p, graph_path, head_commit)
+    if graph_info["freshness"] != "fresh":
+        graph = None
     discovered = _discover_tests(root_p, graph, test_dirs)
+    coverage_contract = _test_coverage_contract(root_p, test_dirs, discovered)
     state = _result_state(root_p)
     state_tests = {*(state.get("failing") or ()), *(state.get("flaky") or ())}
     missing_state = sorted(
-        rel for rel in state_tests if not (root_p / rel).is_file())
+        rel for rel in state_tests if not _is_repo_file(root_p, rel))
     for rel in state_tests:
-        if (root_p / rel).is_file():
+        if _is_repo_file(root_p, rel):
             discovered.add(rel)
     kinds = {path: _classify(path, test_dirs) for path in changed_paths}
     changed_tests = {path for path, kind in kinds.items() if kind == "test"}
     missing_changed_tests = sorted(
-        path for path in changed_tests if not (root_p / path).is_file())
+        path for path in changed_tests if not _is_repo_file(root_p, path))
     code_changed = [path for path, kind in kinds.items()
                     if kind not in {"docs", "config"}]
+    declared_by_file = {
+        path: _declared_coverage_for(path, coverage_contract)
+        for path in code_changed
+    }
     warnings: list[str] = []
+    if coverage_contract["status"] == "invalid":
+        warnings.append(
+            "complete test-coverage declaration is invalid; configured fallback applies: "
+            + str(coverage_contract.get("reason") or "invalid declaration"))
     omitted: list[dict[str, str]] = []
     selected_sources: dict[str, set[str]] = {}
     fallback_used = False
@@ -912,21 +1055,24 @@ def plan(root: str | Path, *, base: str = "HEAD", head: str | None = None,
 
     fallback_needed = False
     if effective != "none":
-        if policy.mode in {"smoke", "affected", "package"} and (
-                graph_info["freshness"] != "fresh" or graph is None):
-            fallback_needed = True
-            fallback_reason = (
-                f"graph snapshot is {graph_info['freshness']}: "
-                f"{graph_info.get('reason') or 'not usable'}")
-        elif policy.mode in {"smoke", "affected", "package"}:
+        if policy.mode in {"smoke", "affected", "package"}:
             unlinked: list[str] = []
             package = (_package_tests(root_p, graph, code_changed, discovered)
-                       if graph is not None and policy.mode in {
+                       if graph is not None and graph_info["freshness"] == "fresh"
+                       and policy.mode in {
                            "affected", "package"} else set())
             for path in code_changed:
                 if kinds[path] == "test":
+                    if (graph is None or graph_info["freshness"] != "fresh") \
+                            and not declared_by_file.get(path):
+                        unlinked.append(path)
                     continue
                 if PurePosixPath(path).name == "conftest.py":
+                    unlinked.append(path)
+                    continue
+                if declared_by_file.get(path):
+                    continue
+                if graph is None or graph_info["freshness"] != "fresh":
                     unlinked.append(path)
                     continue
                 linked = set((graph.get("file_tests") or {}).get(path) or ())
@@ -936,14 +1082,23 @@ def plan(root: str | Path, *, base: str = "HEAD", head: str | None = None,
                     unlinked.append(path)
             if unlinked:
                 fallback_needed = True
-                fallback_reason = _reason_for_unlinked(
-                    sorted(unlinked)[0], root_p)
+                if graph is None or graph_info["freshness"] != "fresh":
+                    fallback_reason = (
+                        f"graph snapshot is {graph_info['freshness']}: "
+                        f"{graph_info.get('reason') or 'not usable'}; "
+                        f"{_reason_for_unlinked(sorted(unlinked)[0], root_p)}")
+                else:
+                    fallback_reason = _reason_for_unlinked(
+                        sorted(unlinked)[0], root_p)
                 if len(unlinked) > 1:
                     fallback_reason += f" (and {len(unlinked) - 1} more)"
 
     mandatory = choose(changed_tests, "changed_test")
     mandatory |= choose(state.get("failing") or (), "failed_last_run")
     mandatory |= choose(state.get("flaky") or (), "flaky")
+    declared_tests = {test for tests in declared_by_file.values()
+                      for test in tests}
+    mandatory |= choose(declared_tests, "complete_project_declaration")
 
     selected: set[str] = set()
     pool: set[str] = set(discovered)
@@ -990,8 +1145,12 @@ def plan(root: str | Path, *, base: str = "HEAD", head: str | None = None,
             for _name, got in optional[1:]:
                 selected |= got
 
-    # The cap is applied after mandatory tests, so changed/failed/flaky tests
-    # are never dropped. A strict cap that would drop them is reported.
+    if effective not in {"none", "all"} and not refused:
+        selected |= declared_tests
+
+    # The cap is applied after mandatory tests, so changed/failed/flaky and
+    # explicitly declared complete-coverage tests are never dropped. A strict
+    # cap that would drop them is reported.
     if effective != "none" and not refused:
         optional_selected = sorted(selected - mandatory)
         if len(mandatory) >= cap:
@@ -1072,9 +1231,12 @@ def plan(root: str | Path, *, base: str = "HEAD", head: str | None = None,
             f"{omitted_total} test file(s) were not selected; the omitted "
             "list says why")
     if cap_exceeded:
+        mandatory_description = "changed, failed, flaky"
+        if declared_tests:
+            mandatory_description += ", and complete-project coverage"
         not_assessed.append(
             f"the max_tests={cap} cap omits optional tests; mandatory tests "
-            "(changed, failed, flaky) were kept")
+            f"({mandatory_description}) were kept")
     if effective == "all" and not fallback_used:
         not_assessed.append(
             "all discovered test files were selected, but discovery is "
@@ -1111,6 +1273,7 @@ def plan(root: str | Path, *, base: str = "HEAD", head: str | None = None,
         "refused": refused,
         "graph": dict(graph_info),
         "graph_freshness": graph_info["freshness"],
+        "test_coverage_declaration": coverage_contract,
         "test_results": state,
         "policy": policy.to_dict(),
         "range": {

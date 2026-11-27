@@ -1,0 +1,2742 @@
+{
+  "ok": true,
+  "tool": "ocelot_repo_map_eval",
+  "version": 2,
+  "root": "/home/matt/ozmadev/ozagia",
+  "tasks_path": "/tmp/ozagia-ranking-audit-m6-tasks.json",
+  "task_set": {
+    "title": "M6 offline evidence path probe"
+  },
+  "task_set_summary": {
+    "tasks": 20,
+    "by_area": {
+      "unspecified": 20
+    },
+    "by_style": {
+      "unspecified": 20
+    },
+    "expected_files_total": 27
+  },
+  "task_count": 20,
+  "source_files": 826,
+  "budgets": [
+    300,
+    700,
+    1300
+  ],
+  "arms": [
+    "dev_context"
+  ],
+  "arm_descriptions": {
+    "dev_context": "DevMemory.context items/snippets, executed at the budget."
+  },
+  "cache_path": "/tmp/ozagia-ranking-audit-pre-cache.json",
+  "memory_path": "/tmp/ozagia-ranking-audit-graph.json",
+  "memory_staleness": {
+    "snapshot_root": "/home/matt/ozmadev/ozagia",
+    "root": "/home/matt/ozmadev/ozagia",
+    "root_mismatch": false,
+    "snapshot_head": "094fd96e685543793d5531a296f06154bdbe558c",
+    "head": "094fd96e685543793d5531a296f06154bdbe558c",
+    "tree_changed": false,
+    "current_tree_digest": "718b59fce716d7aa0c5aba68c7088715d4a77080c1d52e3dfcad0fb9032616be",
+    "stale": false,
+    "freshness": "fresh",
+    "verification_errors": [],
+    "generated_at": "2026-11-27T10:20:44"
+  },
+  "allow_stale": false,
+  "expected_files_outside_source_universe": [
+    "AGENTS.md",
+    "docs/capabilities.md",
+    "docs/code_search.md",
+    "docs/cst_edit.md",
+    "docs/eval_agent.md",
+    "docs/evidence.md",
+    "docs/graph_surface.md",
+    "docs/memory_mcp.md",
+    "docs/model_api.md",
+    "docs/ocelot.md",
+    "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+    "docs/prefetch.md",
+    "docs/research_projection.md",
+    "docs/secrets.md",
+    "docs/task_preflight.md"
+  ],
+  "total_elapsed_seconds": 28.234,
+  "deterministic_fingerprint": "9a01474c77a9b3286c7d000b077fd343bcfac2c88d47632e35634702312245fe",
+  "tasks": [
+    {
+      "id": "selfgraph-readiness-separation",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Explain how this repository's capability catalogue separates declared capability facts from readiness, and what it says about coverage and missing observations. Give the readiness dimensions and one short coverage statement. Return JSON with keys dimensions (array of strings) and coverage (string).",
+      "expected_files": [
+        "docs/capabilities.md"
+      ]
+    },
+    {
+      "id": "maps-types-and-budgets",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. List the four implemented read-only map types and report the default and hard caps for map bytes, page items and graph neighbourhood depth. Return JSON with keys types (array), defaults (object) and hard_caps (object).",
+      "expected_files": [
+        "docs/model_api.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ]
+    },
+    {
+      "id": "maps-unsupported-and-fallback",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe what a map client receives when it asks for an unsupported capability or schema, and what happens to stale, cross-scope or malformed references. State the fallback rule and one thing that must never happen. Return JSON with keys unsupported (string), stale_or_cross_scope (string) and never (string).",
+      "expected_files": [
+        "docs/model_api.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ]
+    },
+    {
+      "id": "work-map-join-and-redaction",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe what the work/evidence map joins together and what it deliberately omits from its records. Return JSON with keys joins (array) and omits (array).",
+      "expected_files": [
+        "docs/model_api.md"
+      ]
+    },
+    {
+      "id": "evidence-grades-and-limits",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Explain the durable evidence store's evidence grades and what its strongest grade does not mean. Also state one link the recorded test outcome cannot establish. Return JSON with keys grades (array), strongest_grade_limit (string) and unknown_link (string).",
+      "expected_files": [
+        "docs/evidence.md"
+      ]
+    },
+    {
+      "id": "preflight-green-rules",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. State exactly when a task preflight may report green, and name at least three things it refuses to upgrade into evidence. Return JSON with keys green_when (string) and refuses (array). Include one missing-tool example and one stale-data example.",
+      "expected_files": [
+        "docs/task_preflight.md"
+      ]
+    },
+    {
+      "id": "action-readiness-mapping",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Explain how the task preflight maps observed service and tunnel readiness states into its own tri-state, which operation is always blocked in that read-only join, and which mutating calls the join avoids. Return JSON with keys mapping (object), always_blocked (string) and avoids (array).",
+      "expected_files": [
+        "docs/task_preflight.md"
+      ]
+    },
+    {
+      "id": "prefetch-allowed-and-refused",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. For the offline prefetch planner, list at least three allowed read-only work kinds, at least four forbidden work kinds, the main time/IO/concurrency bounds, and the refusal states for unsafe or stale candidates. Return JSON with keys allowed (array), forbidden (array), bounds (object) and refused (array).",
+      "expected_files": [
+        "docs/prefetch.md"
+      ]
+    },
+    {
+      "id": "capability-audit-directions",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. What two mismatch directions does the capability audit report, how exhaustive is its coverage, and what does it explicitly not observe or start? Return JSON with keys directions (array), coverage (string) and limits (array).",
+      "expected_files": [
+        "docs/capabilities.md"
+      ]
+    },
+    {
+      "id": "ocelot-readonly-boundary",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. How is Ocelot represented in the read-only research and preflight path, and what must a future optional adapter record so its result is not confused with a formal proof? Return JSON with keys state (string), not_done (array) and adapter_records (array).",
+      "expected_files": [
+        "docs/ocelot.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+        "docs/research_projection.md",
+        "docs/task_preflight.md"
+      ]
+    },
+    {
+      "id": "edit-transaction-safety",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe the file edit transaction's safety guarantees from preview through replacement. Cover the default mode, base-hash check, backup, atomic replacement and what happens if the file changes during the transaction. Return JSON with keys preview (string), guards (array) and write (string).",
+      "expected_files": [
+        "docs/cst_edit.md",
+        "src/ozagia/edit/txn.py"
+      ]
+    },
+    {
+      "id": "mcp-server-readonly-contract",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe the MCP server's dependency and transport shape, its behaviour toward the graph, and the only persistent state it appends. Return JSON with keys transport (string), graph_access (string) and state (string).",
+      "expected_files": [
+        "src/ozagia/integrations/mcp/server.py"
+      ]
+    },
+    {
+      "id": "daemon-socket-and-scope",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Where does the graph daemon listen by default, what environment variable overrides the socket path, and how many target repositories does one daemon serve? Return JSON with keys default (string), override (string) and scope (string).",
+      "expected_files": [
+        "src/ozagia/daemon/protocol.py"
+      ]
+    },
+    {
+      "id": "live-eval-approval-gate",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. What two gates must be present before a live model driver runs in the existing agent evaluation harness, and what does the harness do when either is missing? Return JSON with keys gates (array) and missing (string).",
+      "expected_files": [
+        "docs/eval_agent.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ]
+    },
+    {
+      "id": "secrets-by-reference",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Describe how secrets cross this system's boundaries and name the places where a resolved value must never appear. Return JSON with keys passing (string), reference_form (string) and never_in (array).",
+      "expected_files": [
+        "docs/secrets.md"
+      ]
+    },
+    {
+      "id": "snapshot-staleness",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. When does a dev-memory snapshot count as stale relative to its checkout, and what freshness is reported when the tree digest cannot be computed? Return JSON with keys stale_when (array) and digest_failure (string).",
+      "expected_files": [
+        "docs/memory_mcp.md"
+      ]
+    },
+    {
+      "id": "code-search-signals",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Which retrieval signals does the code-search surface combine, what does it explicitly not use, and where does its default cache live? Return JSON with keys signals (array), excluded (array) and cache (string).",
+      "expected_files": [
+        "docs/code_search.md"
+      ]
+    },
+    {
+      "id": "mcp-graph-surface",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. Name the MCP server's two tool surfaces, the eight graph-surface verbs, and what a full-surface dev_* call receives on the graph surface. Return JSON with keys surfaces (array), verbs (array) and dev_call (string). Also state how the surface is selected.",
+      "expected_files": [
+        "docs/graph_surface.md"
+      ]
+    },
+    {
+      "id": "linked-checkout-readonly-join",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. How does the task preflight treat a selected linked checkout's authorization and read scope, and which federation or refresh operations does it avoid? Return JSON with keys authorization (string), forbidden_operations (array) and unknown_when (string).",
+      "expected_files": [
+        "docs/task_preflight.md"
+      ]
+    },
+    {
+      "id": "core-boundaries",
+      "task": "Read-only task: use only this checkout; do not edit files, run shell commands or tests, or use the network. State this project's core dependency rule, its rule about target projects, and its write boundary. Return JSON with keys dependencies (string), target_imports (string) and writes (string).",
+      "expected_files": [
+        "AGENTS.md"
+      ]
+    }
+  ],
+  "aggregates": [
+    {
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "tasks": 20,
+      "mean_recall_at_budget": 0.2125,
+      "mean_recall_content_at_budget": 0.2125,
+      "mean_precision": 0.166667,
+      "mean_evidence_coverage": 0.275867,
+      "mean_evidence_density": 100.01829,
+      "mean_evidence_terms": 7.5,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 25.33377,
+      "mean_selected_files": 2.8,
+      "mean_content_files": 2.8,
+      "mean_estimated_tokens": 253.2,
+      "mean_elapsed_seconds": 0.4605,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 20,
+      "recall_1_tasks": 4
+    },
+    {
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "tasks": 20,
+      "mean_recall_at_budget": 0.05,
+      "mean_recall_content_at_budget": 0.05,
+      "mean_precision": 0.016667,
+      "mean_evidence_coverage": 0.403625,
+      "mean_evidence_density": 65.34465,
+      "mean_evidence_terms": 11.05,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 44.102595,
+      "mean_selected_files": 3.35,
+      "mean_content_files": 3.35,
+      "mean_estimated_tokens": 677.4,
+      "mean_elapsed_seconds": 0.47,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 20,
+      "recall_1_tasks": 1
+    },
+    {
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "tasks": 20,
+      "mean_recall_at_budget": 0.2625,
+      "mean_recall_content_at_budget": 0.2625,
+      "mean_precision": 0.074167,
+      "mean_evidence_coverage": 0.448388,
+      "mean_evidence_density": 42.18361,
+      "mean_evidence_terms": 12.25,
+      "mean_evidence_symbols": 0.0,
+      "mean_evidence_weight": 51.71736,
+      "mean_selected_files": 3.7,
+      "mean_content_files": 3.7,
+      "mean_estimated_tokens": 1234.4,
+      "mean_elapsed_seconds": 0.4609,
+      "cache_parsed": 0,
+      "cache_reused": 0,
+      "budget_respected_runs": 20,
+      "recall_1_tasks": 5
+    }
+  ],
+  "runs": [
+    {
+      "task_id": "selfgraph-readiness-separation",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 210,
+      "elapsed_seconds": 0.4811,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 2,
+      "hits": [],
+      "misses": [
+        "docs/capabilities.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 30,
+      "evidence_terms": 3,
+      "evidence_symbols": 0,
+      "evidence_weight": 8.648,
+      "evidence_coverage": 0.1,
+      "evidence_density": 41.181,
+      "items": 3
+    },
+    {
+      "task_id": "selfgraph-readiness-separation",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 672,
+      "elapsed_seconds": 0.4731,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/capabilities.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 30,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 31.6226,
+      "evidence_coverage": 0.266667,
+      "evidence_density": 47.0574,
+      "items": 4
+    },
+    {
+      "task_id": "selfgraph-readiness-separation",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1223,
+      "elapsed_seconds": 0.4793,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/capabilities.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 30,
+      "evidence_terms": 9,
+      "evidence_symbols": 0,
+      "evidence_weight": 39.0933,
+      "evidence_coverage": 0.3,
+      "evidence_density": 31.9651,
+      "items": 5
+    },
+    {
+      "task_id": "maps-types-and-budgets",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 228,
+      "elapsed_seconds": 0.4626,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/model_api.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 29,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 28.5853,
+      "evidence_coverage": 0.275862,
+      "evidence_density": 125.3742,
+      "items": 4
+    },
+    {
+      "task_id": "maps-types-and-budgets",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 658,
+      "elapsed_seconds": 0.4573,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/model_api.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 29,
+      "evidence_terms": 13,
+      "evidence_symbols": 0,
+      "evidence_weight": 53.8406,
+      "evidence_coverage": 0.448276,
+      "evidence_density": 81.8246,
+      "items": 4
+    },
+    {
+      "task_id": "maps-types-and-budgets",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1209,
+      "elapsed_seconds": 0.4891,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/model_api.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 29,
+      "evidence_terms": 13,
+      "evidence_symbols": 0,
+      "evidence_weight": 57.096,
+      "evidence_coverage": 0.448276,
+      "evidence_density": 47.2258,
+      "items": 5
+    },
+    {
+      "task_id": "maps-unsupported-and-fallback",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/research/references.py",
+        "src/ozagia/research/fallback.py",
+        "tests/test_claude_hooks.py",
+        "README.md"
+      ],
+      "estimated_tokens": 240,
+      "elapsed_seconds": 0.4785,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/model_api.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/research/references.py",
+        "src/ozagia/research/fallback.py",
+        "tests/test_claude_hooks.py",
+        "README.md"
+      ],
+      "task_term_count": 32,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 26.8434,
+      "evidence_coverage": 0.25,
+      "evidence_density": 111.8474,
+      "items": 4
+    },
+    {
+      "task_id": "maps-unsupported-and-fallback",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/research/references.py",
+        "tests/test_claude_hooks.py"
+      ],
+      "estimated_tokens": 696,
+      "elapsed_seconds": 0.4825,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 2,
+      "hits": [],
+      "misses": [
+        "docs/model_api.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/research/references.py",
+        "tests/test_claude_hooks.py"
+      ],
+      "task_term_count": 32,
+      "evidence_terms": 9,
+      "evidence_symbols": 0,
+      "evidence_weight": 35.6986,
+      "evidence_coverage": 0.28125,
+      "evidence_density": 51.2911,
+      "items": 4
+    },
+    {
+      "task_id": "maps-unsupported-and-fallback",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/research/references.py",
+        "src/ozagia/research/fallback.py",
+        "tests/test_claude_hooks.py"
+      ],
+      "estimated_tokens": 1291,
+      "elapsed_seconds": 0.4858,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/model_api.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/research/references.py",
+        "src/ozagia/research/fallback.py",
+        "tests/test_claude_hooks.py"
+      ],
+      "task_term_count": 32,
+      "evidence_terms": 13,
+      "evidence_symbols": 0,
+      "evidence_weight": 58.2778,
+      "evidence_coverage": 0.40625,
+      "evidence_density": 45.1416,
+      "items": 5
+    },
+    {
+      "task_id": "work-map-join-and-redaction",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 228,
+      "elapsed_seconds": 0.4224,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 20,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 21.1552,
+      "evidence_coverage": 0.3,
+      "evidence_density": 92.7862,
+      "items": 4
+    },
+    {
+      "task_id": "work-map-join-and-redaction",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 658,
+      "elapsed_seconds": 0.5126,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 20,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 31.4121,
+      "evidence_coverage": 0.4,
+      "evidence_density": 47.7387,
+      "items": 4
+    },
+    {
+      "task_id": "work-map-join-and-redaction",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1209,
+      "elapsed_seconds": 0.4186,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 20,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 33.7574,
+      "evidence_coverage": 0.4,
+      "evidence_density": 27.9218,
+      "items": 5
+    },
+    {
+      "task_id": "evidence-grades-and-limits",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/evidence_store.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 294,
+      "elapsed_seconds": 0.4719,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/evidence.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/core/evidence_store.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 30,
+      "evidence_terms": 10,
+      "evidence_symbols": 0,
+      "evidence_weight": 35.0014,
+      "evidence_coverage": 0.333333,
+      "evidence_density": 119.0524,
+      "items": 4
+    },
+    {
+      "task_id": "evidence-grades-and-limits",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "docs/research/ozma_protocol/upstream/ozmalib/protocol/store.py",
+        "src/ozagia/core/evidence_store.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 685,
+      "elapsed_seconds": 0.4732,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/evidence.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "docs/research/ozma_protocol/upstream/ozmalib/protocol/store.py",
+        "src/ozagia/core/evidence_store.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 30,
+      "evidence_terms": 11,
+      "evidence_symbols": 0,
+      "evidence_weight": 44.448,
+      "evidence_coverage": 0.366667,
+      "evidence_density": 64.8876,
+      "items": 5
+    },
+    {
+      "task_id": "evidence-grades-and-limits",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/evidence_store.py",
+        "docs/research/ozma_protocol/upstream/ozmalib/protocol/store.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 1285,
+      "elapsed_seconds": 0.477,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/evidence.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/core/evidence_store.py",
+        "docs/research/ozma_protocol/upstream/ozmalib/protocol/store.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 30,
+      "evidence_terms": 14,
+      "evidence_symbols": 0,
+      "evidence_weight": 57.3883,
+      "evidence_coverage": 0.466667,
+      "evidence_density": 44.6601,
+      "items": 5
+    },
+    {
+      "task_id": "preflight-green-rules",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "docs/task_preflight.md",
+        "src/ozagia/intent/shell.py",
+        "src/ozagia/intent/read.py"
+      ],
+      "estimated_tokens": 295,
+      "elapsed_seconds": 0.4708,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [
+        "docs/task_preflight.md"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.333333,
+      "recall_content": 1.0,
+      "content_files": [
+        "docs/task_preflight.md",
+        "src/ozagia/intent/shell.py",
+        "src/ozagia/intent/read.py"
+      ],
+      "task_term_count": 32,
+      "evidence_terms": 9,
+      "evidence_symbols": 0,
+      "evidence_weight": 28.2468,
+      "evidence_coverage": 0.28125,
+      "evidence_density": 95.7519,
+      "items": 3
+    },
+    {
+      "task_id": "preflight-green-rules",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/task_preflight.py",
+        "src/ozagia/intent/shell.py",
+        "src/ozagia/intent/read.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 678,
+      "elapsed_seconds": 0.4715,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/task_preflight.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/core/task_preflight.py",
+        "src/ozagia/intent/shell.py",
+        "src/ozagia/intent/read.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 32,
+      "evidence_terms": 15,
+      "evidence_symbols": 0,
+      "evidence_weight": 59.201,
+      "evidence_coverage": 0.46875,
+      "evidence_density": 87.3171,
+      "items": 4
+    },
+    {
+      "task_id": "preflight-green-rules",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/task_preflight.py",
+        "docs/task_preflight.md",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 1293,
+      "elapsed_seconds": 0.4745,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [
+        "docs/task_preflight.md"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.25,
+      "recall_content": 1.0,
+      "content_files": [
+        "src/ozagia/core/task_preflight.py",
+        "docs/task_preflight.md",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 32,
+      "evidence_terms": 15,
+      "evidence_symbols": 0,
+      "evidence_weight": 62.5165,
+      "evidence_coverage": 0.46875,
+      "evidence_density": 48.35,
+      "items": 6
+    },
+    {
+      "task_id": "action-readiness-mapping",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "docs/task_preflight.md",
+        "src/ozagia/intent/shell.py"
+      ],
+      "estimated_tokens": 290,
+      "elapsed_seconds": 0.4807,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 2,
+      "hits": [
+        "docs/task_preflight.md"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.5,
+      "recall_content": 1.0,
+      "content_files": [
+        "docs/task_preflight.md",
+        "src/ozagia/intent/shell.py"
+      ],
+      "task_term_count": 32,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 24.6214,
+      "evidence_coverage": 0.25,
+      "evidence_density": 84.9015,
+      "items": 3
+    },
+    {
+      "task_id": "action-readiness-mapping",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/task_preflight.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 661,
+      "elapsed_seconds": 0.4908,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/task_preflight.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/core/task_preflight.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 32,
+      "evidence_terms": 14,
+      "evidence_symbols": 0,
+      "evidence_weight": 54.1548,
+      "evidence_coverage": 0.4375,
+      "evidence_density": 81.9286,
+      "items": 4
+    },
+    {
+      "task_id": "action-readiness-mapping",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/task_preflight.py",
+        "docs/task_preflight.md",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 1293,
+      "elapsed_seconds": 0.481,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [
+        "docs/task_preflight.md"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.25,
+      "recall_content": 1.0,
+      "content_files": [
+        "src/ozagia/core/task_preflight.py",
+        "docs/task_preflight.md",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 32,
+      "evidence_terms": 15,
+      "evidence_symbols": 0,
+      "evidence_weight": 63.7737,
+      "evidence_coverage": 0.46875,
+      "evidence_density": 49.3223,
+      "items": 6
+    },
+    {
+      "task_id": "prefetch-allowed-and-refused",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 228,
+      "elapsed_seconds": 0.5898,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/prefetch.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 34,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 28.5853,
+      "evidence_coverage": 0.235294,
+      "evidence_density": 125.3742,
+      "items": 4
+    },
+    {
+      "task_id": "prefetch-allowed-and-refused",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 690,
+      "elapsed_seconds": 0.4929,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/prefetch.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 34,
+      "evidence_terms": 11,
+      "evidence_symbols": 0,
+      "evidence_weight": 46.1404,
+      "evidence_coverage": 0.323529,
+      "evidence_density": 66.8702,
+      "items": 5
+    },
+    {
+      "task_id": "prefetch-allowed-and-refused",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1137,
+      "elapsed_seconds": 0.4857,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/prefetch.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 34,
+      "evidence_terms": 10,
+      "evidence_symbols": 0,
+      "evidence_weight": 41.2129,
+      "evidence_coverage": 0.294118,
+      "evidence_density": 36.2471,
+      "items": 5
+    },
+    {
+      "task_id": "capability-audit-directions",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 228,
+      "elapsed_seconds": 0.4351,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/capabilities.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 24,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 24.3799,
+      "evidence_coverage": 0.291667,
+      "evidence_density": 106.9293,
+      "items": 4
+    },
+    {
+      "task_id": "capability-audit-directions",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "docs/research/ozma_protocol/upstream/ozmalib/protocol/audit.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 693,
+      "elapsed_seconds": 0.4311,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/capabilities.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "docs/research/ozma_protocol/upstream/ozmalib/protocol/audit.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 24,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 28.8244,
+      "evidence_coverage": 0.291667,
+      "evidence_density": 41.5937,
+      "items": 4
+    },
+    {
+      "task_id": "capability-audit-directions",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1209,
+      "elapsed_seconds": 0.4324,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/capabilities.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 24,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 33.7574,
+      "evidence_coverage": 0.333333,
+      "evidence_density": 27.9218,
+      "items": 5
+    },
+    {
+      "task_id": "ocelot-readonly-boundary",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "docs/ocelot.md"
+      ],
+      "estimated_tokens": 291,
+      "elapsed_seconds": 0.4605,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 4,
+      "selected_count": 1,
+      "hits": [
+        "docs/ocelot.md"
+      ],
+      "misses": [
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+        "docs/research_projection.md",
+        "docs/task_preflight.md"
+      ],
+      "recall": 0.25,
+      "precision": 1.0,
+      "recall_content": 0.25,
+      "content_files": [
+        "docs/ocelot.md"
+      ],
+      "task_term_count": 29,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 17.0115,
+      "evidence_coverage": 0.206897,
+      "evidence_density": 58.4587,
+      "items": 1
+    },
+    {
+      "task_id": "ocelot-readonly-boundary",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/integrations/iac/adapter.py",
+        "tests/fixtures/deep_review_corpus_dry_run/record.json",
+        "tests/test_ops_graph.py",
+        "README.md"
+      ],
+      "estimated_tokens": 699,
+      "elapsed_seconds": 0.4548,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 4,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/ocelot.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+        "docs/research_projection.md",
+        "docs/task_preflight.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/integrations/iac/adapter.py",
+        "tests/fixtures/deep_review_corpus_dry_run/record.json",
+        "tests/test_ops_graph.py",
+        "README.md"
+      ],
+      "task_term_count": 29,
+      "evidence_terms": 12,
+      "evidence_symbols": 0,
+      "evidence_weight": 51.9154,
+      "evidence_coverage": 0.413793,
+      "evidence_density": 74.2709,
+      "items": 6
+    },
+    {
+      "task_id": "ocelot-readonly-boundary",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/integrations/iac/adapter.py",
+        "docs/ocelot.md",
+        "tests/fixtures/deep_review_corpus_dry_run/record.json",
+        "tests/test_ops_graph.py",
+        "README.md"
+      ],
+      "estimated_tokens": 882,
+      "elapsed_seconds": 0.4651,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 4,
+      "selected_count": 5,
+      "hits": [
+        "docs/ocelot.md"
+      ],
+      "misses": [
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md",
+        "docs/research_projection.md",
+        "docs/task_preflight.md"
+      ],
+      "recall": 0.25,
+      "precision": 0.2,
+      "recall_content": 0.25,
+      "content_files": [
+        "src/ozagia/integrations/iac/adapter.py",
+        "docs/ocelot.md",
+        "tests/fixtures/deep_review_corpus_dry_run/record.json",
+        "tests/test_ops_graph.py",
+        "README.md"
+      ],
+      "task_term_count": 29,
+      "evidence_terms": 15,
+      "evidence_symbols": 0,
+      "evidence_weight": 62.9522,
+      "evidence_coverage": 0.517241,
+      "evidence_density": 71.3744,
+      "items": 7
+    },
+    {
+      "task_id": "edit-transaction-safety",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "tests/fixtures/ops_repo/scripts/backup.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 228,
+      "elapsed_seconds": 0.4761,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/cst_edit.md",
+        "src/ozagia/edit/txn.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/fixtures/ops_repo/scripts/backup.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 31,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 28.3779,
+      "evidence_coverage": 0.258065,
+      "evidence_density": 124.4643,
+      "items": 5
+    },
+    {
+      "task_id": "edit-transaction-safety",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "tests/fixtures/ops_repo/scripts/backup.py",
+        "src/ozagia/intent/read.py",
+        "src/ozagia/core/keys.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_check.py"
+      ],
+      "estimated_tokens": 699,
+      "elapsed_seconds": 0.4851,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 5,
+      "hits": [],
+      "misses": [
+        "docs/cst_edit.md",
+        "src/ozagia/edit/txn.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/fixtures/ops_repo/scripts/backup.py",
+        "src/ozagia/intent/read.py",
+        "src/ozagia/core/keys.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_check.py"
+      ],
+      "task_term_count": 31,
+      "evidence_terms": 11,
+      "evidence_symbols": 0,
+      "evidence_weight": 44.563,
+      "evidence_coverage": 0.354839,
+      "evidence_density": 63.7525,
+      "items": 6
+    },
+    {
+      "task_id": "edit-transaction-safety",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "tests/fixtures/ops_repo/scripts/backup.py",
+        "src/ozagia/intent/shell.py",
+        "docs/research/ozma_protocol/upstream/ozmalib/protocol/task.py",
+        "src/ozagia/core/keys.py"
+      ],
+      "estimated_tokens": 1300,
+      "elapsed_seconds": 0.586,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/cst_edit.md",
+        "src/ozagia/edit/txn.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/fixtures/ops_repo/scripts/backup.py",
+        "src/ozagia/intent/shell.py",
+        "docs/research/ozma_protocol/upstream/ozmalib/protocol/task.py",
+        "src/ozagia/core/keys.py"
+      ],
+      "task_term_count": 31,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 33.4233,
+      "evidence_coverage": 0.258065,
+      "evidence_density": 25.7102,
+      "items": 5
+    },
+    {
+      "task_id": "mcp-server-readonly-contract",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 228,
+      "elapsed_seconds": 0.4363,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "src/ozagia/integrations/mcp/server.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 24,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 25.073,
+      "evidence_coverage": 0.291667,
+      "evidence_density": 109.9694,
+      "items": 4
+    },
+    {
+      "task_id": "mcp-server-readonly-contract",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 658,
+      "elapsed_seconds": 0.4438,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "src/ozagia/integrations/mcp/server.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 24,
+      "evidence_terms": 9,
+      "evidence_symbols": 0,
+      "evidence_weight": 35.3432,
+      "evidence_coverage": 0.375,
+      "evidence_density": 53.7131,
+      "items": 4
+    },
+    {
+      "task_id": "mcp-server-readonly-contract",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1209,
+      "elapsed_seconds": 0.4328,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "src/ozagia/integrations/mcp/server.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 24,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 34.4506,
+      "evidence_coverage": 0.333333,
+      "evidence_density": 28.4951,
+      "items": 5
+    },
+    {
+      "task_id": "daemon-socket-and-scope",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "tests/fixtures/config_migration/target.toml",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 211,
+      "elapsed_seconds": 0.4475,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "src/ozagia/daemon/protocol.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/fixtures/config_migration/target.toml",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 27,
+      "evidence_terms": 5,
+      "evidence_symbols": 0,
+      "evidence_weight": 16.6654,
+      "evidence_coverage": 0.185185,
+      "evidence_density": 78.9831,
+      "items": 4
+    },
+    {
+      "task_id": "daemon-socket-and-scope",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "tests/fixtures/config_migration/target.toml",
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 679,
+      "elapsed_seconds": 0.4443,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "src/ozagia/daemon/protocol.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/fixtures/config_migration/target.toml",
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 27,
+      "evidence_terms": 9,
+      "evidence_symbols": 0,
+      "evidence_weight": 34.2203,
+      "evidence_coverage": 0.333333,
+      "evidence_density": 50.3981,
+      "items": 5
+    },
+    {
+      "task_id": "daemon-socket-and-scope",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "tests/fixtures/config_migration/target.toml",
+        "src/ozagia/intent/shell.py",
+        "src/ozagia/core/keys.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 1220,
+      "elapsed_seconds": 0.4422,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "src/ozagia/daemon/protocol.py"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/fixtures/config_migration/target.toml",
+        "src/ozagia/intent/shell.py",
+        "src/ozagia/core/keys.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 27,
+      "evidence_terms": 12,
+      "evidence_symbols": 0,
+      "evidence_weight": 49.987,
+      "evidence_coverage": 0.444444,
+      "evidence_density": 40.973,
+      "items": 6
+    },
+    {
+      "task_id": "live-eval-approval-gate",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 228,
+      "elapsed_seconds": 0.4454,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/eval_agent.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 25,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 28.0745,
+      "evidence_coverage": 0.32,
+      "evidence_density": 123.1338,
+      "items": 4
+    },
+    {
+      "task_id": "live-eval-approval-gate",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "docs/harness.md",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 616,
+      "elapsed_seconds": 0.4341,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/eval_agent.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "docs/harness.md",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 25,
+      "evidence_terms": 14,
+      "evidence_symbols": 0,
+      "evidence_weight": 56.0091,
+      "evidence_coverage": 0.56,
+      "evidence_density": 90.9239,
+      "items": 5
+    },
+    {
+      "task_id": "live-eval-approval-gate",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "docs/harness.md",
+        "src/ozagia/eval/agent.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 1229,
+      "elapsed_seconds": 0.4412,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 2,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/eval_agent.md",
+        "docs/plans/2026-11-17_self_graph_service_unification_model_api.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "docs/harness.md",
+        "src/ozagia/eval/agent.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 25,
+      "evidence_terms": 16,
+      "evidence_symbols": 0,
+      "evidence_weight": 64.2641,
+      "evidence_coverage": 0.64,
+      "evidence_density": 52.2898,
+      "items": 5
+    },
+    {
+      "task_id": "secrets-by-reference",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 228,
+      "elapsed_seconds": 0.4389,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/secrets.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 27,
+      "evidence_terms": 6,
+      "evidence_symbols": 0,
+      "evidence_weight": 21.1552,
+      "evidence_coverage": 0.222222,
+      "evidence_density": 92.7862,
+      "items": 4
+    },
+    {
+      "task_id": "secrets-by-reference",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 677,
+      "elapsed_seconds": 0.5414,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/secrets.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/read.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 27,
+      "evidence_terms": 10,
+      "evidence_symbols": 0,
+      "evidence_weight": 39.6946,
+      "evidence_coverage": 0.37037,
+      "evidence_density": 58.6331,
+      "items": 4
+    },
+    {
+      "task_id": "secrets-by-reference",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1228,
+      "elapsed_seconds": 0.4311,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/secrets.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py",
+        "README.md"
+      ],
+      "task_term_count": 27,
+      "evidence_terms": 9,
+      "evidence_symbols": 0,
+      "evidence_weight": 37.6138,
+      "evidence_coverage": 0.333333,
+      "evidence_density": 30.6301,
+      "items": 5
+    },
+    {
+      "task_id": "snapshot-staleness",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/memory.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_adapters.py",
+        "tests/fixtures/deep_review_corpus_dry_run/checkout/fixture-service/src/error.py"
+      ],
+      "estimated_tokens": 293,
+      "elapsed_seconds": 0.4326,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/memory_mcp.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/core/memory.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_adapters.py",
+        "tests/fixtures/deep_review_corpus_dry_run/checkout/fixture-service/src/error.py"
+      ],
+      "task_term_count": 26,
+      "evidence_terms": 11,
+      "evidence_symbols": 0,
+      "evidence_weight": 39.5628,
+      "evidence_coverage": 0.423077,
+      "evidence_density": 135.0266,
+      "items": 4
+    },
+    {
+      "task_id": "snapshot-staleness",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/memory.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_adapters.py",
+        "tests/fixtures/deep_review_corpus_dry_run/checkout/fixture-service/src/error.py"
+      ],
+      "estimated_tokens": 699,
+      "elapsed_seconds": 0.431,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "docs/memory_mcp.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/core/memory.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_adapters.py",
+        "tests/fixtures/deep_review_corpus_dry_run/checkout/fixture-service/src/error.py"
+      ],
+      "task_term_count": 26,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 29.032,
+      "evidence_coverage": 0.307692,
+      "evidence_density": 41.5337,
+      "items": 5
+    },
+    {
+      "task_id": "snapshot-staleness",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/memory.py",
+        "src/ozagia/intent/read.py",
+        "src/ozagia/core/keys.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 1298,
+      "elapsed_seconds": 0.4309,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 5,
+      "hits": [],
+      "misses": [
+        "docs/memory_mcp.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/core/memory.py",
+        "src/ozagia/intent/read.py",
+        "src/ozagia/core/keys.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 26,
+      "evidence_terms": 11,
+      "evidence_symbols": 0,
+      "evidence_weight": 46.5408,
+      "evidence_coverage": 0.423077,
+      "evidence_density": 35.8558,
+      "items": 6
+    },
+    {
+      "task_id": "code-search-signals",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "docs/code_search.md",
+        "src/ozagia/intent/shell.py"
+      ],
+      "estimated_tokens": 298,
+      "elapsed_seconds": 0.4271,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 2,
+      "hits": [
+        "docs/code_search.md"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.5,
+      "recall_content": 1.0,
+      "content_files": [
+        "docs/code_search.md",
+        "src/ozagia/intent/shell.py"
+      ],
+      "task_term_count": 23,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 27.8271,
+      "evidence_coverage": 0.347826,
+      "evidence_density": 93.3797,
+      "items": 2
+    },
+    {
+      "task_id": "code-search-signals",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "docs/code_search.md",
+        "docs/research/ozma_protocol/upstream/ozmalib/protocol/task.py",
+        "src/ozagia/eval/retrieval.py"
+      ],
+      "estimated_tokens": 699,
+      "elapsed_seconds": 0.4321,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [
+        "docs/code_search.md"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.333333,
+      "recall_content": 1.0,
+      "content_files": [
+        "docs/code_search.md",
+        "docs/research/ozma_protocol/upstream/ozmalib/protocol/task.py",
+        "src/ozagia/eval/retrieval.py"
+      ],
+      "task_term_count": 23,
+      "evidence_terms": 12,
+      "evidence_symbols": 0,
+      "evidence_weight": 49.2093,
+      "evidence_coverage": 0.521739,
+      "evidence_density": 70.3996,
+      "items": 3
+    },
+    {
+      "task_id": "code-search-signals",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "docs/code_search.md",
+        "src/ozagia/eval/retrieval.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_eval_hf_benchmarks.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1280,
+      "elapsed_seconds": 0.4309,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 5,
+      "hits": [
+        "docs/code_search.md"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.2,
+      "recall_content": 1.0,
+      "content_files": [
+        "docs/code_search.md",
+        "src/ozagia/eval/retrieval.py",
+        "src/ozagia/intent/shell.py",
+        "tests/test_eval_hf_benchmarks.py",
+        "README.md"
+      ],
+      "task_term_count": 23,
+      "evidence_terms": 13,
+      "evidence_symbols": 0,
+      "evidence_weight": 55.7356,
+      "evidence_coverage": 0.565217,
+      "evidence_density": 43.5434,
+      "items": 7
+    },
+    {
+      "task_id": "mcp-graph-surface",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/integrations/mcp/graph_surface.py",
+        "tests/test_graph_surface.py"
+      ],
+      "estimated_tokens": 265,
+      "elapsed_seconds": 0.4586,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 2,
+      "hits": [],
+      "misses": [
+        "docs/graph_surface.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/integrations/mcp/graph_surface.py",
+        "tests/test_graph_surface.py"
+      ],
+      "task_term_count": 28,
+      "evidence_terms": 7,
+      "evidence_symbols": 0,
+      "evidence_weight": 20.8688,
+      "evidence_coverage": 0.25,
+      "evidence_density": 78.75,
+      "items": 3
+    },
+    {
+      "task_id": "mcp-graph-surface",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/integrations/mcp/graph_surface.py",
+        "tests/test_graph_surface.py"
+      ],
+      "estimated_tokens": 645,
+      "elapsed_seconds": 0.4616,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 2,
+      "hits": [],
+      "misses": [
+        "docs/graph_surface.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/integrations/mcp/graph_surface.py",
+        "tests/test_graph_surface.py"
+      ],
+      "task_term_count": 28,
+      "evidence_terms": 16,
+      "evidence_symbols": 0,
+      "evidence_weight": 60.8808,
+      "evidence_coverage": 0.571429,
+      "evidence_density": 94.3889,
+      "items": 4
+    },
+    {
+      "task_id": "mcp-graph-surface",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/integrations/mcp/graph_surface.py",
+        "docs/graph_surface.md",
+        "src/ozagia/intent/shell.py",
+        "tests/test_graph_surface.py"
+      ],
+      "estimated_tokens": 1299,
+      "elapsed_seconds": 0.4628,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [
+        "docs/graph_surface.md"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.25,
+      "recall_content": 1.0,
+      "content_files": [
+        "src/ozagia/integrations/mcp/graph_surface.py",
+        "docs/graph_surface.md",
+        "src/ozagia/intent/shell.py",
+        "tests/test_graph_surface.py"
+      ],
+      "task_term_count": 28,
+      "evidence_terms": 19,
+      "evidence_symbols": 0,
+      "evidence_weight": 75.59,
+      "evidence_coverage": 0.678571,
+      "evidence_density": 58.1909,
+      "items": 6
+    },
+    {
+      "task_id": "linked-checkout-readonly-join",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "docs/task_preflight.md"
+      ],
+      "estimated_tokens": 274,
+      "elapsed_seconds": 0.4404,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 1,
+      "hits": [
+        "docs/task_preflight.md"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 1.0,
+      "recall_content": 1.0,
+      "content_files": [
+        "docs/task_preflight.md"
+      ],
+      "task_term_count": 25,
+      "evidence_terms": 8,
+      "evidence_symbols": 0,
+      "evidence_weight": 23.3277,
+      "evidence_coverage": 0.32,
+      "evidence_density": 85.1376,
+      "items": 1
+    },
+    {
+      "task_id": "linked-checkout-readonly-join",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/task_preflight.py",
+        "src/ozagia/core/deep_review/analyzers/operations.py",
+        "tests/test_cargo_test.py"
+      ],
+      "estimated_tokens": 700,
+      "elapsed_seconds": 0.5393,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "docs/task_preflight.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/core/task_preflight.py",
+        "src/ozagia/core/deep_review/analyzers/operations.py",
+        "tests/test_cargo_test.py"
+      ],
+      "task_term_count": 25,
+      "evidence_terms": 12,
+      "evidence_symbols": 0,
+      "evidence_weight": 45.9845,
+      "evidence_coverage": 0.48,
+      "evidence_density": 65.6921,
+      "items": 4
+    },
+    {
+      "task_id": "linked-checkout-readonly-join",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/task_preflight.py",
+        "docs/task_preflight.md",
+        "src/ozagia/core/deep_review/analyzers/operations.py"
+      ],
+      "estimated_tokens": 1297,
+      "elapsed_seconds": 0.4299,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [
+        "docs/task_preflight.md"
+      ],
+      "misses": [],
+      "recall": 1.0,
+      "precision": 0.333333,
+      "recall_content": 1.0,
+      "content_files": [
+        "src/ozagia/core/task_preflight.py",
+        "docs/task_preflight.md",
+        "src/ozagia/core/deep_review/analyzers/operations.py"
+      ],
+      "task_term_count": 25,
+      "evidence_terms": 12,
+      "evidence_symbols": 0,
+      "evidence_weight": 48.8968,
+      "evidence_coverage": 0.48,
+      "evidence_density": 37.6999,
+      "items": 4
+    },
+    {
+      "task_id": "core-boundaries",
+      "budget_tokens": 300,
+      "arm": "dev_context",
+      "files": [
+        "tests/fixtures/config_migration/target.toml",
+        "src/ozagia/core/deep_review/analyzers/dependencies.py",
+        "tests/test_deep_review.py",
+        "README.md"
+      ],
+      "estimated_tokens": 279,
+      "elapsed_seconds": 0.4534,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 4,
+      "hits": [],
+      "misses": [
+        "AGENTS.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "tests/fixtures/config_migration/target.toml",
+        "src/ozagia/core/deep_review/analyzers/dependencies.py",
+        "tests/test_deep_review.py",
+        "README.md"
+      ],
+      "task_term_count": 24,
+      "evidence_terms": 9,
+      "evidence_symbols": 0,
+      "evidence_weight": 32.6648,
+      "evidence_coverage": 0.375,
+      "evidence_density": 117.0783,
+      "items": 5
+    },
+    {
+      "task_id": "core-boundaries",
+      "budget_tokens": 700,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/deep_review/analyzers/dependencies.py",
+        "tests/fixtures/config_migration/target.toml",
+        "tests/test_deep_review.py"
+      ],
+      "estimated_tokens": 686,
+      "elapsed_seconds": 0.4481,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 3,
+      "hits": [],
+      "misses": [
+        "AGENTS.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/core/deep_review/analyzers/dependencies.py",
+        "tests/fixtures/config_migration/target.toml",
+        "tests/test_deep_review.py"
+      ],
+      "task_term_count": 24,
+      "evidence_terms": 12,
+      "evidence_symbols": 0,
+      "evidence_weight": 49.8572,
+      "evidence_coverage": 0.5,
+      "evidence_density": 72.6781,
+      "items": 5
+    },
+    {
+      "task_id": "core-boundaries",
+      "budget_tokens": 1300,
+      "arm": "dev_context",
+      "files": [
+        "src/ozagia/core/deep_review/analyzers/dependencies.py",
+        "src/ozagia/model_api/project.py",
+        "tests/fixtures/config_migration/target.toml",
+        "tests/test_deep_review.py",
+        "README.md"
+      ],
+      "estimated_tokens": 1297,
+      "elapsed_seconds": 0.4411,
+      "budget_respected": true,
+      "cache": {
+        "applicable": false,
+        "parsed": null,
+        "reused": null,
+        "cached_files": null
+      },
+      "expected_count": 1,
+      "selected_count": 5,
+      "hits": [],
+      "misses": [
+        "AGENTS.md"
+      ],
+      "recall": 0.0,
+      "precision": 0.0,
+      "recall_content": 0.0,
+      "content_files": [
+        "src/ozagia/core/deep_review/analyzers/dependencies.py",
+        "src/ozagia/model_api/project.py",
+        "tests/fixtures/config_migration/target.toml",
+        "tests/test_deep_review.py",
+        "README.md"
+      ],
+      "task_term_count": 24,
+      "evidence_terms": 17,
+      "evidence_symbols": 0,
+      "evidence_weight": 78.0197,
+      "evidence_coverage": 0.708333,
+      "evidence_density": 60.154,
+      "items": 7
+    }
+  ],
+  "markdown": "# Repo-map retrieval evaluation\n\n- Root: `/home/matt/ozmadev/ozagia`\n- Tasks: 20 (`/tmp/ozagia-ranking-audit-m6-tasks.json`)\n- Source-file universe: 826\n- Budgets: 300, 700, 1300 tokens\n- Arms: dev_context\n- Dev-memory snapshot: stale=False (snapshot head `094fd96e685543793d5531a296f06154bdbe558c`, HEAD `094fd96e685543793d5531a296f06154bdbe558c`, root mismatch False, allow_stale=False)\n- Deterministic fingerprint: `9a01474c77a9b3286c7d000b077fd343bcfac2c88d47632e35634702312245fe`\n- Wall time: 28.234 s\n- Warning: expected files outside the indexed source universe: `AGENTS.md`, `docs/capabilities.md`, `docs/code_search.md`, `docs/cst_edit.md`, `docs/eval_agent.md`, `docs/evidence.md`, `docs/graph_surface.md`, `docs/memory_mcp.md`, `docs/model_api.md`, `docs/ocelot.md`, `docs/plans/2026-11-17_self_graph_service_unification_model_api.md`, `docs/prefetch.md`, `docs/research_projection.md`, `docs/secrets.md`, `docs/task_preflight.md`\n\n## Aggregate metrics\n\n| Budget | Arm | Tasks | Mean recall@budget | Mean recall (content tier) | Mean precision | Mean evidence coverage | Mean evidence symbols | Mean evidence/1k tokens | Mean files | Mean content files | Mean tokens | Mean s | Cache parsed | Cache reused |\n|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n| 300 | dev_context | 20 | 0.212 | 0.212 | 0.167 | 0.276 | 0.0 | 100.02 | 2.8 | 2.8 | 253 | 0.46 | 0 | 0 |\n| 700 | dev_context | 20 | 0.050 | 0.050 | 0.017 | 0.404 | 0.0 | 65.34 | 3.4 | 3.4 | 677 | 0.47 | 0 | 0 |\n| 1300 | dev_context | 20 | 0.263 | 0.263 | 0.074 | 0.448 | 0.0 | 42.18 | 3.7 | 3.7 | 1234 | 0.46 | 0 | 0 |\n\n## Recall by task\n\nEach cell is `recall (recall_content)`.\n\n### 300 tokens\n\n| Task | dev_context |\n|---|---:|\n| selfgraph-readiness-separation | 0.00 (0.00) |\n| maps-types-and-budgets | 0.00 (0.00) |\n| maps-unsupported-and-fallback | 0.00 (0.00) |\n| work-map-join-and-redaction | 0.00 (0.00) |\n| evidence-grades-and-limits | 0.00 (0.00) |\n| preflight-green-rules | 1.00 (1.00) |\n| action-readiness-mapping | 1.00 (1.00) |\n| prefetch-allowed-and-refused | 0.00 (0.00) |\n| capability-audit-directions | 0.00 (0.00) |\n| ocelot-readonly-boundary | 0.25 (0.25) |\n| edit-transaction-safety | 0.00 (0.00) |\n| mcp-server-readonly-contract | 0.00 (0.00) |\n| daemon-socket-and-scope | 0.00 (0.00) |\n| live-eval-approval-gate | 0.00 (0.00) |\n| secrets-by-reference | 0.00 (0.00) |\n| snapshot-staleness | 0.00 (0.00) |\n| code-search-signals | 1.00 (1.00) |\n| mcp-graph-surface | 0.00 (0.00) |\n| linked-checkout-readonly-join | 1.00 (1.00) |\n| core-boundaries | 0.00 (0.00) |\n\n### 700 tokens\n\n| Task | dev_context |\n|---|---:|\n| selfgraph-readiness-separation | 0.00 (0.00) |\n| maps-types-and-budgets | 0.00 (0.00) |\n| maps-unsupported-and-fallback | 0.00 (0.00) |\n| work-map-join-and-redaction | 0.00 (0.00) |\n| evidence-grades-and-limits | 0.00 (0.00) |\n| preflight-green-rules | 0.00 (0.00) |\n| action-readiness-mapping | 0.00 (0.00) |\n| prefetch-allowed-and-refused | 0.00 (0.00) |\n| capability-audit-directions | 0.00 (0.00) |\n| ocelot-readonly-boundary | 0.00 (0.00) |\n| edit-transaction-safety | 0.00 (0.00) |\n| mcp-server-readonly-contract | 0.00 (0.00) |\n| daemon-socket-and-scope | 0.00 (0.00) |\n| live-eval-approval-gate | 0.00 (0.00) |\n| secrets-by-reference | 0.00 (0.00) |\n| snapshot-staleness | 0.00 (0.00) |\n| code-search-signals | 1.00 (1.00) |\n| mcp-graph-surface | 0.00 (0.00) |\n| linked-checkout-readonly-join | 0.00 (0.00) |\n| core-boundaries | 0.00 (0.00) |\n\n### 1300 tokens\n\n| Task | dev_context |\n|---|---:|\n| selfgraph-readiness-separation | 0.00 (0.00) |\n| maps-types-and-budgets | 0.00 (0.00) |\n| maps-unsupported-and-fallback | 0.00 (0.00) |\n| work-map-join-and-redaction | 0.00 (0.00) |\n| evidence-grades-and-limits | 0.00 (0.00) |\n| preflight-green-rules | 1.00 (1.00) |\n| action-readiness-mapping | 1.00 (1.00) |\n| prefetch-allowed-and-refused | 0.00 (0.00) |\n| capability-audit-directions | 0.00 (0.00) |\n| ocelot-readonly-boundary | 0.25 (0.25) |\n| edit-transaction-safety | 0.00 (0.00) |\n| mcp-server-readonly-contract | 0.00 (0.00) |\n| daemon-socket-and-scope | 0.00 (0.00) |\n| live-eval-approval-gate | 0.00 (0.00) |\n| secrets-by-reference | 0.00 (0.00) |\n| snapshot-staleness | 0.00 (0.00) |\n| code-search-signals | 1.00 (1.00) |\n| mcp-graph-surface | 1.00 (1.00) |\n| linked-checkout-readonly-join | 1.00 (1.00) |\n| core-boundaries | 0.00 (0.00) |\n\n## Task set\n\n| Task | Style | Area | Expected files | Notes |\n|---|---|---|---|---|\n| selfgraph-readiness-separation |  |  | `docs/capabilities.md` |  |\n| maps-types-and-budgets |  |  | `docs/model_api.md`<br>`docs/plans/2026-11-17_self_graph_service_unification_model_api.md` |  |\n| maps-unsupported-and-fallback |  |  | `docs/model_api.md`<br>`docs/plans/2026-11-17_self_graph_service_unification_model_api.md` |  |\n| work-map-join-and-redaction |  |  | `docs/model_api.md` |  |\n| evidence-grades-and-limits |  |  | `docs/evidence.md` |  |\n| preflight-green-rules |  |  | `docs/task_preflight.md` |  |\n| action-readiness-mapping |  |  | `docs/task_preflight.md` |  |\n| prefetch-allowed-and-refused |  |  | `docs/prefetch.md` |  |\n| capability-audit-directions |  |  | `docs/capabilities.md` |  |\n| ocelot-readonly-boundary |  |  | `docs/ocelot.md`<br>`docs/plans/2026-11-17_self_graph_service_unification_model_api.md`<br>`docs/research_projection.md`<br>`docs/task_preflight.md` |  |\n| edit-transaction-safety |  |  | `docs/cst_edit.md`<br>`src/ozagia/edit/txn.py` |  |\n| mcp-server-readonly-contract |  |  | `src/ozagia/integrations/mcp/server.py` |  |\n| daemon-socket-and-scope |  |  | `src/ozagia/daemon/protocol.py` |  |\n| live-eval-approval-gate |  |  | `docs/eval_agent.md`<br>`docs/plans/2026-11-17_self_graph_service_unification_model_api.md` |  |\n| secrets-by-reference |  |  | `docs/secrets.md` |  |\n| snapshot-staleness |  |  | `docs/memory_mcp.md` |  |\n| code-search-signals |  |  | `docs/code_search.md` |  |\n| mcp-graph-surface |  |  | `docs/graph_surface.md` |  |\n| linked-checkout-readonly-join |  |  | `docs/task_preflight.md` |  |\n| core-boundaries |  |  | `AGENTS.md` |  |\n\n## Reading these numbers\n\n- This is a **retrieval instrument**, not an end-to-end coding benchmark: it measures whether known-relevant files are selected, not whether an agent completes a change.\n- `baseline` is a sorted-path file-listing control, not a semantic retriever. `grep` is a lexical control: it counts distinct task words found in each file's text.\n- `recall` counts a hit at any tier. `recall_content` counts only hits whose file the arm showed as code (code_search snippet, dev_context item with snippet text, or repo-map `full`/`outline` tier). A listing-tier hit tells the reader the path exists, not what it contains.\n- Token estimates are each module's own ~4-chars/token heuristic. Cache counts apply only to repo-map arms.\n- `both` is the literal union of the two retrievers run at the same budget; its token cost and latency are the sum of the components, so its budget is per component (up to 2x the nominal budget). Compare it as a cost/recall trade-off, not as an equal-token arm.\n- `code_search` runs once per task; its elapsed time is the same call's time at every budget.\n- Ground truth is frozen in the task JSON. Re-run the scoped tests after moving or renaming an expected file.\n"
+}
