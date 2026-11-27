@@ -89,7 +89,7 @@ breadth third, live operations last**. New surface area is not a release theme.
 | `2026-11-18_bounded_graph_prefetch.md` | Offline primitives implemented; MCP integration not adopted for 0.3 | Offline planner, safety checks and ledger implemented (`core/prefetch.py`); the 2026-11-25 decision keeps them unwired because the measured benefit is small and the lifecycle risk is high | Revisit only with larger-repository measurements and the acceptance tests | 0.3 decision |
 | `2026-11-17_opencode_intent_graph_retrieval.md` | Stages A–C done; D partial; E initial offline check | Matches | Broader shell/task intent linking, richer paired and end-to-end evaluation | 0.4 |
 | `2026-11-17_federated_graphs.md` | Base delivery plus declared-dependency, stable-identity, relation/API, bridge and supergraph slices | Discovery, explicit members, qualified identities, status/search/node inspection, cross-repo checks, declared dependency links, stable declared ids, repository families/relationships, contract-first API references, explicit API consumer/test edges, adapter-declared dynamic bridges, an optional persisted relationship supergraph, and opt-in family ranking landed | Representative real-query family-ranking evaluation, full node-union supergraph, incremental member cache/freshness certification, SCIP identities, org manifests/access control | 0.4 |
-| `2026-11-27_repo_relationships.md` | Implemented 2026-11-27 | Matches; W5 bridges, W6 supergraph and opt-in W7 family ranking landed in the same batch; fixture and real-snapshot mechanism checks recorded | Representative real-query family evaluation; docs-derived API references; full node-union supergraph; organization manifests | 0.4 |
+| `2026-11-27_repo_relationships.md` | Implemented 2026-11-27 | Matches; W5 bridges, W6 supergraph and opt-in W7 family ranking landed in the same batch; fixture, real-snapshot near-tie and curated-task robustness checks recorded | Representative real-query family evaluation with adequate retrieval; docs-derived API references; full node-union supergraph; organization manifests | 0.4 |
 | `2026-11-27_batch_completion.md` | Complete 2026-11-27 | Matches; Ocelot second slice, Bigville integration, relations/API, bridges, supergraph and family arm are landed; 7,318 tests pass, generated docs and `REPO_SHAPE.md` current | Live Ocelot model-task eval (approval-gated); UI panel; representative real-query family evaluation | — |
 | `2026-11-16_sre_iac_extensions.md` | Offline workstreams implemented; live remains | Matches | Live cloud/cluster providers, semantic IaC validation, broader config families, real-host relay matrix, remote background services | 0.5 |
 | `2026-11-16_iac_cloud_context.md`, `2026-11-16_runtime_services_tunnels.md` | Implemented offline | Opt-in source-only IaC context and the offline runtime/service/tunnel layer are implemented; live remote operations are not | Live cloud/cluster state, remote service ownership, measured savings | 0.5 |
@@ -495,9 +495,11 @@ real fixtures, provenance-preserving and still opt-in.
   - a persisted relationship supergraph with source-hash freshness and atomic
     writes (implemented 2026-11-27; full node-union and per-member incremental
     refresh remain);
-  - opt-in family-aware federation ranking with fixture and real-snapshot
-    mechanism checks (implemented 2026-11-27; a representative real-query
-    paired evaluation is still required before any default change);
+  - opt-in family-aware federation ranking with fixture, real-snapshot near-tie
+    and curated-task robustness checks (implemented 2026-11-27; the curated-task
+    replay showed much of that task set falls outside federated lexical recall,
+    and a representative real-query paired evaluation is still required before
+    any default change);
   - persistent identities across membership changes through declared member
     ids;
   - incremental member caching and freshness certification;

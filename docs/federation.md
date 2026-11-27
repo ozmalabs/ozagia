@@ -455,11 +455,15 @@ constructed family answers from rank 2 to rank 1 while a control query is
 unchanged (`docs/results/family_retrieval_2026-11-27.md`). A follow-up check
 uses real Bigville, Ocelot and Ozagia snapshots but still constructs near-tie
 queries; it also moves all four family answers to rank 1 with an unchanged
-control (`docs/results/family_retrieval_real_2026-11-27.md`). Both are
-mechanism checks, not evidence of general retrieval benefit or the rate at
-which real queries are near-ties. The default therefore stays off. Changing it
-is gated by a representative paired evaluation on real queries with no
-regression and a meaningful gain; that evaluation has not been run.
+control (`docs/results/family_retrieval_real_2026-11-27.md`). A replay of the
+curated Bigville retrieval tasks found most expected files outside the
+federated lexical top 20 and no meaningful family gain
+(`docs/results/family_retrieval_tasks_2026-11-27.md`); that task set is not a
+suitable family benchmark. These are mechanism and robustness checks, not
+evidence of general retrieval benefit or the rate at which real queries are
+near-ties. The default therefore stays off. Changing it is gated by a
+representative paired evaluation on real queries with no regression and a
+meaningful gain; that evaluation has not been run.
 
 ### API relationships and references
 

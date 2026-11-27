@@ -62,3 +62,14 @@ config is written under the work directory and passed through `OZAGIA_CONFIG`.
 - The default remains `family_boost=False`. This run is evidence about the
   ranking mechanism, not authorization to change the default; that still
   requires a representative paired evaluation on real queries.
+
+### Curated Bigville-task replay
+
+[`real_tasks.py`](real_tasks.py) replays the existing
+`evaluation/bigville_retrieval/tasks.json` queries over the same temporary
+federation. It is a negative/robustness check: most expected files fall outside
+the federated lexical top 20, the two visible ranks barely move, and the
+controls are unchanged. The curated task set was designed for richer
+single-repository retrieval, so it is not a suitable family-ranking benchmark.
+See `docs/results/family_retrieval_tasks_2026-11-27.md`; the default remains
+off.

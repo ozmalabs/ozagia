@@ -1,0 +1,1234 @@
+{
+  "boost": 0.15,
+  "changed_ranks": [
+    {
+      "baseline": 10,
+      "boosted": 9,
+      "delta": -1,
+      "id": "scenario-input-validation"
+    }
+  ],
+  "controls": [
+    {
+      "baseline_hit": "ozagia::doc:docs/federation.md",
+      "baseline_rank": 1,
+      "boosted_hit": "ozagia::doc:docs/federation.md",
+      "boosted_rank": 1,
+      "delta": 0,
+      "expected": [
+        "docs/federation.md"
+      ],
+      "id": "ozagia-federation-control",
+      "kind": "control",
+      "query": "federated repository graphs discovery membership",
+      "top_baseline": [
+        {
+          "expected": true,
+          "family_match": false,
+          "file": "docs/federation.md",
+          "key": "ozagia::doc:docs/federation.md",
+          "kind": "Doc",
+          "rank": 1,
+          "rank_score": 0.6,
+          "score": 0.6
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "docs/plans/2026-11-17_federated_graphs.md",
+          "key": "ozagia::doc:docs/plans/2026-11-17_federated_graphs.md",
+          "kind": "Doc",
+          "rank": 2,
+          "rank_score": 0.6,
+          "score": 0.6
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "tests/test_autonomous_discovery_migrated.py",
+          "key": "ocelot::test:tests/test_autonomous_discovery_migrated.py::test_complete_opaque_bijection_has_structurally_invariant_graphs",
+          "kind": "Test",
+          "rank": 3,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "docs/plans/2026-11-17_federated_graphs.md",
+          "key": "ozagia::file:docs/plans/2026-11-17_federated_graphs.md",
+          "kind": "File",
+          "rank": 4,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "src/ozagia/federation_cli.py",
+          "key": "ozagia::file:src/ozagia/federation_cli.py",
+          "kind": "File",
+          "rank": 5,
+          "rank_score": 0.4,
+          "score": 0.4
+        }
+      ],
+      "top_boosted": [
+        {
+          "expected": true,
+          "family_match": false,
+          "file": "docs/federation.md",
+          "key": "ozagia::doc:docs/federation.md",
+          "kind": "Doc",
+          "rank": 1,
+          "rank_score": 0.6,
+          "score": 0.6
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "docs/plans/2026-11-17_federated_graphs.md",
+          "key": "ozagia::doc:docs/plans/2026-11-17_federated_graphs.md",
+          "kind": "Doc",
+          "rank": 2,
+          "rank_score": 0.6,
+          "score": 0.6
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "tests/test_autonomous_discovery_migrated.py",
+          "key": "ocelot::test:tests/test_autonomous_discovery_migrated.py::test_complete_opaque_bijection_has_structurally_invariant_graphs",
+          "kind": "Test",
+          "rank": 3,
+          "rank_score": 0.55,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "docs/plans/2026-11-17_federated_graphs.md",
+          "key": "ozagia::file:docs/plans/2026-11-17_federated_graphs.md",
+          "kind": "File",
+          "rank": 4,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "src/ozagia/federation_cli.py",
+          "key": "ozagia::file:src/ozagia/federation_cli.py",
+          "kind": "File",
+          "rank": 5,
+          "rank_score": 0.4,
+          "score": 0.4
+        }
+      ]
+    },
+    {
+      "baseline_hit": "ozagia::file:src/ozagia/core/supergraph.py",
+      "baseline_rank": 3,
+      "boosted_hit": "ozagia::file:src/ozagia/core/supergraph.py",
+      "boosted_rank": 3,
+      "delta": 0,
+      "expected": [
+        "src/ozagia/core/supergraph.py"
+      ],
+      "id": "ozagia-supergraph-control",
+      "kind": "control",
+      "query": "persisted relationship supergraph source hash freshness",
+      "top_baseline": [
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "tests/test_supergraph.py",
+          "key": "ozagia::file:tests/test_supergraph.py",
+          "kind": "File",
+          "rank": 1,
+          "rank_score": 0.6666666666666666,
+          "score": 0.6666666666666666
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "docs/results/supergraph_2026-11-27.md",
+          "key": "ozagia::doc:docs/results/supergraph_2026-11-27.md",
+          "kind": "Doc",
+          "rank": 2,
+          "rank_score": 0.5,
+          "score": 0.5
+        },
+        {
+          "expected": true,
+          "family_match": false,
+          "file": "src/ozagia/core/supergraph.py",
+          "key": "ozagia::file:src/ozagia/core/supergraph.py",
+          "kind": "File",
+          "rank": 3,
+          "rank_score": 0.5,
+          "score": 0.5
+        },
+        {
+          "expected": true,
+          "family_match": false,
+          "file": "src/ozagia/core/supergraph.py",
+          "key": "ozagia::sym:src/ozagia/core/supergraph.py::_source_hashes",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.5,
+          "score": 0.5
+        },
+        {
+          "expected": true,
+          "family_match": false,
+          "file": "src/ozagia/core/supergraph.py",
+          "key": "ozagia::sym:src/ozagia/core/supergraph.py::content_hash",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.5,
+          "score": 0.5
+        }
+      ],
+      "top_boosted": [
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "tests/test_supergraph.py",
+          "key": "ozagia::file:tests/test_supergraph.py",
+          "kind": "File",
+          "rank": 1,
+          "rank_score": 0.6666666666666666,
+          "score": 0.6666666666666666
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "docs/results/supergraph_2026-11-27.md",
+          "key": "ozagia::doc:docs/results/supergraph_2026-11-27.md",
+          "kind": "Doc",
+          "rank": 2,
+          "rank_score": 0.5,
+          "score": 0.5
+        },
+        {
+          "expected": true,
+          "family_match": false,
+          "file": "src/ozagia/core/supergraph.py",
+          "key": "ozagia::file:src/ozagia/core/supergraph.py",
+          "kind": "File",
+          "rank": 3,
+          "rank_score": 0.5,
+          "score": 0.5
+        },
+        {
+          "expected": true,
+          "family_match": false,
+          "file": "src/ozagia/core/supergraph.py",
+          "key": "ozagia::sym:src/ozagia/core/supergraph.py::_source_hashes",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.5,
+          "score": 0.5
+        },
+        {
+          "expected": true,
+          "family_match": false,
+          "file": "src/ozagia/core/supergraph.py",
+          "key": "ozagia::sym:src/ozagia/core/supergraph.py::content_hash",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.5,
+          "score": 0.5
+        }
+      ]
+    }
+  ],
+  "date": "2026-11-27",
+  "default_behavior": "family_boost=False; lexical ranking unchanged",
+  "evaluation": "family-aware federation search on curated Bigville tasks",
+  "kind": "real snapshots + existing curated retrieval tasks",
+  "metrics": {
+    "controls": {
+      "baseline": {
+        "hit@1": 0.5,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 0.6666666666666666,
+        "n": 2
+      },
+      "family_boost": {
+        "hit@1": 0.5,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 0.6666666666666666,
+        "n": 2
+      }
+    },
+    "family": {
+      "baseline": {
+        "hit@1": 0.0,
+        "hit@3": 0.0,
+        "hit@5": 0.0,
+        "mrr": 0.019078947368421053,
+        "n": 8
+      },
+      "family_boost": {
+        "hit@1": 0.0,
+        "hit@3": 0.0,
+        "hit@5": 0.0,
+        "mrr": 0.02046783625730994,
+        "n": 8
+      }
+    }
+  },
+  "note": "Existing curated Bigville tasks, not a family benchmark. Most expected files fall outside the federated lexical top 20; the check therefore measures the limitation of lexical federation search more than family ranking. The default remains off; a representative real-query evaluation with adequate retrieval is still required.",
+  "rank_limit": 20,
+  "tasks": [
+    {
+      "baseline_hit": null,
+      "baseline_rank": null,
+      "boosted_hit": null,
+      "boosted_rank": null,
+      "delta": null,
+      "expected": [
+        "bigville/game_persistence.py",
+        "tests/test_bigville_game_persistence.py"
+      ],
+      "id": "game-checkpoint-roundtrip",
+      "kind": "family-task",
+      "query": "Saving and restoring a running session should preserve enough state to continue the same simulation after restart.",
+      "top_baseline": [
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_gap_abduce",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.47058823529411764,
+          "score": 0.47058823529411764
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 2,
+          "rank_score": 0.47058823529411764,
+          "score": 0.47058823529411764
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/motor_compose.rs",
+          "key": "ocelot::sym:runners/dsl/src/motor_compose.rs::Composer.attribution_price",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.4117647058823529,
+          "score": 0.4117647058823529
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/persist.rs",
+          "key": "ocelot::sym:runners/dsl/src/persist.rs::graph_diff",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.4117647058823529,
+          "score": 0.4117647058823529
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_shape_decode",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.4117647058823529,
+          "score": 0.4117647058823529
+        }
+      ],
+      "top_boosted": [
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_gap_abduce",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.6205882352941177,
+          "score": 0.47058823529411764
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 2,
+          "rank_score": 0.6205882352941177,
+          "score": 0.47058823529411764
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/motor_compose.rs",
+          "key": "ocelot::sym:runners/dsl/src/motor_compose.rs::Composer.attribution_price",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.5617647058823529,
+          "score": 0.4117647058823529
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/persist.rs",
+          "key": "ocelot::sym:runners/dsl/src/persist.rs::graph_diff",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.5617647058823529,
+          "score": 0.4117647058823529
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_shape_decode",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.5617647058823529,
+          "score": 0.4117647058823529
+        }
+      ]
+    },
+    {
+      "baseline_hit": null,
+      "baseline_rank": null,
+      "boosted_hit": null,
+      "boosted_rank": null,
+      "delta": null,
+      "expected": [
+        "bigville/reporting.py",
+        "tests/test_phase091_food_reporting.py"
+      ],
+      "id": "deterministic-population-report",
+      "kind": "family-task",
+      "query": "Repeated population summaries with the same sampling seed should report stable estimates and uncertainty while retaining exact counts.",
+      "top_baseline": [
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_ratio_infer",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.4444444444444444,
+          "score": 0.4444444444444444
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/audio_primitives.rs",
+          "key": "ocelot::sym:runners/dsl/src/audio_primitives.rs::lpc_formant_warp_track",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.3888888888888889,
+          "score": 0.3888888888888889
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::sym:runners/dsl/src/framebuffer.rs::seqlock_read",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.3888888888888889,
+          "score": 0.3888888888888889
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_log_quantum",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.3888888888888889,
+          "score": 0.3888888888888889
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_motion_energy",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.3888888888888889,
+          "score": 0.3888888888888889
+        }
+      ],
+      "top_boosted": [
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_ratio_infer",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.5944444444444444,
+          "score": 0.4444444444444444
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/audio_primitives.rs",
+          "key": "ocelot::sym:runners/dsl/src/audio_primitives.rs::lpc_formant_warp_track",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.5388888888888889,
+          "score": 0.3888888888888889
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::sym:runners/dsl/src/framebuffer.rs::seqlock_read",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.5388888888888889,
+          "score": 0.3888888888888889
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_log_quantum",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.5388888888888889,
+          "score": 0.3888888888888889
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_motion_energy",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.5388888888888889,
+          "score": 0.3888888888888889
+        }
+      ]
+    },
+    {
+      "baseline_hit": null,
+      "baseline_rank": null,
+      "boosted_hit": null,
+      "boosted_rank": null,
+      "delta": null,
+      "expected": [
+        "bigville/game.py",
+        "tests/test_lazy_evaluation.py"
+      ],
+      "id": "lazy-affordance-mode",
+      "kind": "family-task",
+      "query": "Large action menus should be generated on demand when the configured automatic mode detects that eager enumeration is too costly.",
+      "top_baseline": [
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/motor_compose.rs",
+          "key": "ocelot::sym:runners/dsl/src/motor_compose.rs::Composer.urgency",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.45,
+          "score": 0.45
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::sym:runners/dsl/src/framebuffer.rs::read_seq",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/substrate.rs",
+          "key": "ocelot::sym:runners/dsl/src/substrate.rs::Substrate.try_predicate_retraction",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 4,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "tests/test_phase047_joint_actions.py",
+          "key": "bigville::test:tests/test_phase047_joint_actions.py::test_members_needed_counts_one_when_one_is_enough_and_none_when_the_largest_group_falls_short",
+          "kind": "Test",
+          "rank": 5,
+          "rank_score": 0.35,
+          "score": 0.35
+        }
+      ],
+      "top_boosted": [
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/motor_compose.rs",
+          "key": "ocelot::sym:runners/dsl/src/motor_compose.rs::Composer.urgency",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.6,
+          "score": 0.45
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::sym:runners/dsl/src/framebuffer.rs::read_seq",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.55,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/substrate.rs",
+          "key": "ocelot::sym:runners/dsl/src/substrate.rs::Substrate.try_predicate_retraction",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.55,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 4,
+          "rank_score": 0.55,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "tests/test_phase047_joint_actions.py",
+          "key": "bigville::test:tests/test_phase047_joint_actions.py::test_members_needed_counts_one_when_one_is_enough_and_none_when_the_largest_group_falls_short",
+          "kind": "Test",
+          "rank": 5,
+          "rank_score": 0.5,
+          "score": 0.35
+        }
+      ]
+    },
+    {
+      "baseline_hit": null,
+      "baseline_rank": null,
+      "boosted_hit": null,
+      "boosted_rank": null,
+      "delta": null,
+      "expected": [
+        "worlds/tick_graph.py",
+        "tests/test_tick_graph_executor.py"
+      ],
+      "id": "tick-graph-resource-conflicts",
+      "kind": "family-task",
+      "query": "When concurrent actions claim the same scarce item, resolution should choose a deterministic winner and leave conflicting claims rejected.",
+      "top_baseline": [
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/cognitive_tasks.rs",
+          "key": "ocelot::sym:runners/dsl/src/cognitive_tasks.rs::retina_onset_batch",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.3684210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_ratio_infer",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.3684210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/synth_enumerate.rs",
+          "key": "ocelot::sym:runners/dsl/src/synth_enumerate.rs::literal_witness_cost",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.3684210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/term.rs",
+          "key": "ocelot::sym:runners/dsl/src/term.rs::covers_open_value",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.3684210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 5,
+          "rank_score": 0.3684210526315789,
+          "score": 0.3684210526315789
+        }
+      ],
+      "top_boosted": [
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/cognitive_tasks.rs",
+          "key": "ocelot::sym:runners/dsl/src/cognitive_tasks.rs::retina_onset_batch",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.5184210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_ratio_infer",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.5184210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/synth_enumerate.rs",
+          "key": "ocelot::sym:runners/dsl/src/synth_enumerate.rs::literal_witness_cost",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.5184210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/term.rs",
+          "key": "ocelot::sym:runners/dsl/src/term.rs::covers_open_value",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.5184210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 5,
+          "rank_score": 0.5184210526315789,
+          "score": 0.3684210526315789
+        }
+      ]
+    },
+    {
+      "baseline_hit": "bigville::sym:bigville/runtime.py::BigvilleGraph.load_seed_manifest",
+      "baseline_rank": 19,
+      "boosted_hit": "bigville::sym:bigville/runtime.py::BigvilleGraph.load_seed_manifest",
+      "boosted_rank": 19,
+      "delta": 0,
+      "expected": [
+        "bigville/runtime.py",
+        "tests/test_node_origins.py"
+      ],
+      "id": "seed-manifest-recovery",
+      "kind": "family-task",
+      "query": "Restoring a saved knowledge graph should preserve loaded seed manifests and reject malformed manifest data instead of silently losing it.",
+      "top_baseline": [
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 1,
+          "rank_score": 0.45,
+          "score": 0.45
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/py.rs",
+          "key": "ocelot::sym:runners/dsl/src/py.rs::PySubstrate.export_rules",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::collect_part_names",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_ratio_infer",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/substrate.rs",
+          "key": "ocelot::sym:runners/dsl/src/substrate.rs::Substrate.record_gamma_residual",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.4,
+          "score": 0.4
+        }
+      ],
+      "top_boosted": [
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 1,
+          "rank_score": 0.6,
+          "score": 0.45
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/py.rs",
+          "key": "ocelot::sym:runners/dsl/src/py.rs::PySubstrate.export_rules",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.55,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::collect_part_names",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.55,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_ratio_infer",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.55,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/substrate.rs",
+          "key": "ocelot::sym:runners/dsl/src/substrate.rs::Substrate.record_gamma_residual",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.55,
+          "score": 0.4
+        }
+      ]
+    },
+    {
+      "baseline_hit": null,
+      "baseline_rank": null,
+      "boosted_hit": null,
+      "boosted_rank": null,
+      "delta": null,
+      "expected": [
+        "bigville/backends/protocol.py",
+        "bigville/game.py",
+        "tests/test_bigville_backends.py"
+      ],
+      "id": "backend-action-boundary",
+      "kind": "family-task",
+      "query": "All cognition providers should submit decisions through one shared contract so a provider cannot bypass the world's action checks.",
+      "top_baseline": [
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/py.rs",
+          "key": "ocelot::sym:runners/dsl/src/py.rs::PySubstrate.tick",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.5,
+          "score": 0.5
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/graph.rs",
+          "key": "ocelot::sym:runners/dsl/src/graph.rs::TypedGraph.state_fingerprint",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.45,
+          "score": 0.45
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::MsRel",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.45,
+          "score": 0.45
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/substrate.rs",
+          "key": "ocelot::sym:runners/dsl/src/substrate.rs::Substrate.run_rules_scoped",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.45,
+          "score": 0.45
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 5,
+          "rank_score": 0.45,
+          "score": 0.45
+        }
+      ],
+      "top_boosted": [
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/py.rs",
+          "key": "ocelot::sym:runners/dsl/src/py.rs::PySubstrate.tick",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.65,
+          "score": 0.5
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/graph.rs",
+          "key": "ocelot::sym:runners/dsl/src/graph.rs::TypedGraph.state_fingerprint",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.6,
+          "score": 0.45
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::MsRel",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.6,
+          "score": 0.45
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/substrate.rs",
+          "key": "ocelot::sym:runners/dsl/src/substrate.rs::Substrate.run_rules_scoped",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.6,
+          "score": 0.45
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 5,
+          "rank_score": 0.6,
+          "score": 0.45
+        }
+      ]
+    },
+    {
+      "baseline_hit": "bigville::file:bigville/scenarios.py",
+      "baseline_rank": 10,
+      "boosted_hit": "bigville::file:bigville/scenarios.py",
+      "boosted_rank": 9,
+      "delta": -1,
+      "expected": [
+        "bigville/scenarios.py",
+        "tests/test_bigville_scenarios.py"
+      ],
+      "id": "scenario-input-validation",
+      "kind": "family-task",
+      "query": "Scenario loading should accept structured in memory definitions and file paths while producing a clear validation failure for malformed input.",
+      "top_baseline": [
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/substrate.rs",
+          "key": "ocelot::sym:runners/dsl/src/substrate.rs::Substrate.run_rules_scoped",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 2,
+          "rank_score": 0.4,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "scripts/substrate_memory_restore_integrity_probe.py",
+          "key": "ocelot::file:scripts/substrate_memory_restore_integrity_probe.py",
+          "kind": "File",
+          "rank": 3,
+          "rank_score": 0.35,
+          "score": 0.35
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::collect_part_names",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.35,
+          "score": 0.35
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_support_infer",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.35,
+          "score": 0.35
+        }
+      ],
+      "top_boosted": [
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/substrate.rs",
+          "key": "ocelot::sym:runners/dsl/src/substrate.rs::Substrate.run_rules_scoped",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.55,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::test:runners/dsl/src/framebuffer.rs::tests.seqlock_read_races_writer_and_stays_honest",
+          "kind": "Test",
+          "rank": 2,
+          "rank_score": 0.55,
+          "score": 0.4
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "scripts/substrate_memory_restore_integrity_probe.py",
+          "key": "ocelot::file:scripts/substrate_memory_restore_integrity_probe.py",
+          "kind": "File",
+          "rank": 3,
+          "rank_score": 0.5,
+          "score": 0.35
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::collect_part_names",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.5,
+          "score": 0.35
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/shape_decode.rs",
+          "key": "ocelot::sym:runners/dsl/src/shape_decode.rs::eval_support_infer",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.5,
+          "score": 0.35
+        }
+      ]
+    },
+    {
+      "baseline_hit": null,
+      "baseline_rank": null,
+      "boosted_hit": null,
+      "boosted_rank": null,
+      "delta": null,
+      "expected": [
+        "bigville/api.py",
+        "tests/test_engine_defaults.py"
+      ],
+      "id": "public-game-construction",
+      "kind": "family-task",
+      "query": "The public entry point should build a game from a selected scenario and seed while keeping provider and runtime choices configurable.",
+      "top_baseline": [
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/p4_readiness.rs",
+          "key": "ocelot::sym:runners/dsl/src/p4_readiness.rs::advance_signed_evaluator_outcome",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.42105263157894735,
+          "score": 0.42105263157894735
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/substrate.rs",
+          "key": "ocelot::sym:runners/dsl/src/substrate.rs::Substrate.run_rules_scoped",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.42105263157894735,
+          "score": 0.42105263157894735
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "bigville/game.py",
+          "key": "bigville::sym:bigville/game.py::_default_run_id",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.3684210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::sym:runners/dsl/src/framebuffer.rs::seqlock_read",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.3684210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": false,
+          "file": "runners/dsl/src/future_manifold.rs",
+          "key": "ocelot::sym:runners/dsl/src/future_manifold.rs::reachable_deformation_set",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.3684210526315789,
+          "score": 0.3684210526315789
+        }
+      ],
+      "top_boosted": [
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/p4_readiness.rs",
+          "key": "ocelot::sym:runners/dsl/src/p4_readiness.rs::advance_signed_evaluator_outcome",
+          "kind": "Symbol",
+          "rank": 1,
+          "rank_score": 0.5710526315789474,
+          "score": 0.42105263157894735
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/substrate.rs",
+          "key": "ocelot::sym:runners/dsl/src/substrate.rs::Substrate.run_rules_scoped",
+          "kind": "Symbol",
+          "rank": 2,
+          "rank_score": 0.5710526315789474,
+          "score": 0.42105263157894735
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "bigville/game.py",
+          "key": "bigville::sym:bigville/game.py::_default_run_id",
+          "kind": "Symbol",
+          "rank": 3,
+          "rank_score": 0.5184210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/framebuffer.rs",
+          "key": "ocelot::sym:runners/dsl/src/framebuffer.rs::seqlock_read",
+          "kind": "Symbol",
+          "rank": 4,
+          "rank_score": 0.5184210526315789,
+          "score": 0.3684210526315789
+        },
+        {
+          "expected": false,
+          "family_match": true,
+          "file": "runners/dsl/src/future_manifold.rs",
+          "key": "ocelot::sym:runners/dsl/src/future_manifold.rs::reachable_deformation_set",
+          "kind": "Symbol",
+          "rank": 5,
+          "rank_score": 0.5184210526315789,
+          "score": 0.3684210526315789
+        }
+      ]
+    }
+  ]
+}

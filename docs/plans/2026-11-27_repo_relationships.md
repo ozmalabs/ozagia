@@ -226,10 +226,14 @@ constructed family answers from rank 2 to rank 1 while its control query was
 unchanged (`docs/results/family_retrieval_2026-11-27.md`). A follow-up on real
 Bigville, Ocelot and Ozagia snapshots moved four constructed near-tie family
 answers from ranks 2, 2, 3 and 12 to rank 1, with the Ozagia control unchanged
-(`docs/results/family_retrieval_real_2026-11-27.md`). Both are mechanism checks,
-not evidence of general retrieval benefit. The default stays off; changing it
-is gated by a representative paired evaluation on real queries with no
-regression and a meaningful gain.
+(`docs/results/family_retrieval_real_2026-11-27.md`). A replay of the existing
+curated Bigville retrieval tasks found most expected files outside the
+federated lexical top 20 and no meaningful family gain
+(`docs/results/family_retrieval_tasks_2026-11-27.md`), so that task set is not
+a suitable family benchmark. These are mechanism and robustness checks, not
+evidence of general retrieval benefit. The default stays off; changing it is
+gated by a representative paired evaluation on real queries with no regression
+and a meaningful gain.
 
 ## Limits
 
@@ -251,9 +255,11 @@ regression and a meaningful gain.
   supergraph, incremental member cache or organization access-control model.
 - Supergraph freshness is byte-based, and a stale artifact rebuilds the whole
   relationship report rather than applying per-member increments.
-- Family ranking is opt-in and has fixture-level and real-snapshot
-  constructed-query mechanism checks. The default remains off pending a
-  representative paired evaluation on real queries.
+- Family ranking is opt-in and has fixture-level, real-snapshot near-tie and
+  curated-task robustness checks. The curated-task replay did not show a family
+  gain and exposed the limits of federated lexical retrieval on that task set.
+  The default remains off pending a representative paired evaluation on real
+  family-relevant queries.
 
 ## Verification
 
@@ -339,9 +345,9 @@ None of the following is implemented by this batch.
   artifact caches relationship metadata and edges only; member nodes remain in
   each `graph.json`.
 - A representative paired evaluation of family-aware ranking on real queries.
-  The fixture and real-snapshot constructed-query checks verify the mechanism
-  only; the default stays off until a representative evaluation shows no
-  regression and a meaningful gain.
+  The fixture, real-snapshot near-tie and curated-task checks verify the
+  mechanism and its limits only; the default stays off until a representative
+  evaluation with adequate retrieval shows no regression and a meaningful gain.
 - Organization-wide manifests and an access-control model for federation
   membership. Current manifests are per anchor and do not carry organization
   policy.
