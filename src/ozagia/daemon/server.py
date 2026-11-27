@@ -211,6 +211,13 @@ REPO_MAP_MIN_TOKENS = 200
 REPO_MAP_MAX_TOKENS = 8000
 REPO_MAP_FILES_SHOWN = 10
 REPO_MAP_REASON_CHARS = 120
+# OpenCode sessions whose `hint` already carried the Ocelot session block.
+OCELOT_HINT_SESSIONS = 256
+# In-flight Ocelot hint marks and the anonymous (no-session) slot states.
+# A pending mark is claimed under the hint lock before `augment_hint` runs,
+# so two concurrent first hints for one session cannot both deliver a block.
+OCELOT_HINT_PENDING = "pending"
+OCELOT_HINT_DELIVERED = "delivered"
 # `$OZAGIA_FILE_LEDGER=0` turns the daemon's ledger scans off.
 ENV_FILE_LEDGER = "OZAGIA_FILE_LEDGER"
 # `meta` counters the daemon sums into its stats.
@@ -746,6 +753,14 @@ class DaemonState:
         self.mesh_rates: dict[tuple[str, str], list[float]] = {}
         self.mesh_actions = 0
         self.mesh_refusals = 0
+        # Ocelot session-start hint (`integrations.ocelot.workspace_hook`):
+        # OpenCode sessions already served the block, a bounded FIFO, plus
+        # in-flight claims taken before the adapter query runs. A hint with
+        # no usable session shares one anonymous daemon-lifetime slot.
+        self.ocelot_hint_sessions: OrderedDict[str, None] = OrderedDict()
+        self._ocelot_hint_pending: set[str] = set()
+        self._ocelot_hint_anonymous: str | None = None
+        self._ocelot_hint_lock = threading.Lock()
 
     # -- requests ------------------------------------------------------------ #
     def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
@@ -911,6 +926,9 @@ class DaemonState:
                 except Exception as exc:  # a hint must never block the agent
                     return {"ok": True, "context": "", "meta": {
                         "intent": "hint_error", "keys": [], "error": type(exc).__name__}}
+                result = self._ocelot_hint(
+                    result, str(msg.get("harness") or "opencode"),
+                    msg.get("session"))
             return {"ok": True, **result}
         if op in ("tool", "after"):
             tool = msg.get("tool")
@@ -1121,6 +1139,72 @@ class DaemonState:
             "context": context,
             "meta": {"intent": "hint_repo_map", "keys": [], "repo_map": meta},
         }
+
+    # -- Ocelot session-start hint ------------------------------------------ #
+    def _ocelot_hint(self, hint: dict[str, Any], harness: str,
+                     session: Any) -> dict[str, Any]:
+        """Append the Ocelot block to an OpenCode hint once per session.
+
+        A memory without the adapter returns the hint unchanged, so the
+        ordinary hint path is byte-identical. The session is claimed as
+        pending under ``_ocelot_hint_lock`` before ``augment_hint`` runs, so
+        two concurrent first hints for the same session cannot both deliver
+        the block; the claim becomes delivered only when ``augment_hint``
+        reports ``meta.ocelot.delivered is True``. A failed or skipped
+        augmentation clears the claim, so a later request may retry.
+
+        A missing, empty or non-string ``session`` uses one anonymous
+        daemon-lifetime slot: the block is delivered for such hints at most
+        once per daemon lifetime, never once per request. Named delivered
+        sessions remain a bounded FIFO (``OCELOT_HINT_SESSIONS``); pending
+        claims are bounded by the same cap.
+        """
+        if harness != "opencode":
+            return hint
+        key = session if isinstance(session, str) and session else None
+        with self._ocelot_hint_lock:
+            if key is None:
+                if self._ocelot_hint_anonymous is not None:
+                    return hint
+                self._ocelot_hint_anonymous = OCELOT_HINT_PENDING
+            else:
+                if (key in self.ocelot_hint_sessions
+                        or key in self._ocelot_hint_pending):
+                    return hint
+                if len(self._ocelot_hint_pending) >= OCELOT_HINT_SESSIONS:
+                    return hint
+                self._ocelot_hint_pending.add(key)
+        try:
+            from ozagia.integrations.ocelot.workspace_hook import augment_hint
+            out = augment_hint(self.memory, hint, harness=harness,
+                               session=session)
+        except Exception:  # noqa: BLE001 - a hint must never block the agent
+            self._ocelot_hint_settle(key, delivered=False)
+            return hint
+        meta = out.get("meta") if isinstance(out, dict) else None
+        ocelot = meta.get("ocelot") if isinstance(meta, dict) else None
+        self._ocelot_hint_settle(
+            key, delivered=isinstance(ocelot, dict)
+            and ocelot.get("delivered") is True)
+        return out
+
+    def _ocelot_hint_settle(self, key: str | None, *,
+                            delivered: bool) -> None:
+        """Clear an in-flight Ocelot hint claim and record a delivery."""
+        with self._ocelot_hint_lock:
+            if key is None:
+                if delivered:
+                    self._ocelot_hint_anonymous = OCELOT_HINT_DELIVERED
+                elif self._ocelot_hint_anonymous == OCELOT_HINT_PENDING:
+                    self._ocelot_hint_anonymous = None
+                return
+            self._ocelot_hint_pending.discard(key)
+            if not delivered:
+                return
+            self.ocelot_hint_sessions[key] = None
+            self.ocelot_hint_sessions.move_to_end(key)
+            while len(self.ocelot_hint_sessions) > OCELOT_HINT_SESSIONS:
+                self.ocelot_hint_sessions.popitem(last=False)
 
     # -- secrets ------------------------------------------------------------- #
     def _secret_stat(self, name: str, n: int = 1) -> None:

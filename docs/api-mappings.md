@@ -31,6 +31,7 @@ from pathlib import Path
 from ozagia.core.api_mappings import index_api_mappings
 
 index_api_mappings(builder, registry_text, "integration/api-links.json", {
+    "contracts": Path("/work/contracts"),
     "service": Path("/work/service"),
     "client": Path("/work/client"),
 })
@@ -41,3 +42,34 @@ malformed references, missing or unsafe spec paths, unindexed operations, and
 ambiguous operation IDs. The result's `valid` field describes only the
 registry envelope; matching an operation verifies identity, not the truth of
 the maintainer's producer, consumer, or test assertion.
+
+## Repository-level rollup
+
+`ozagia federation relations` and the `repository_relations` section of
+`ozagia federation check` read the `ApiOperation`, `ApiCodeReference` and
+`ApiMapping` nodes already in each member snapshot. They build one canonical
+API reference per operation from the best available source:
+
+1. an OpenAPI `operationId` with its file and `source_pointer`;
+2. an OpenAPI method/path with its file;
+3. an explicit `ApiCodeReference` when the member has no OpenAPI operation;
+4. a bare method/path operation identity as a display fallback.
+
+Explicit mappings are then rolled up into repository edges: consumers and
+tests point at a producer for the same reference, and a producer points at a
+separate contract repository with `implements_api`. A consumer or test without
+a producer is reported as `unpaired`, never paired by name or path. Matching
+operations across snapshots without a mapping do not create an edge.
+
+Repeated evidence is merged by canonical reference. A partially populated
+operation in one snapshot fills any missing `method`, `path` or
+`source_pointer` values from another copy instead of creating a second
+reference or a false ambiguity; two populated values that disagree are
+reported as ambiguity. Duplicate mappings with the same relation, reference,
+code location and provenance pointer are deduplicated, and several mappings
+for the same reference and code pair become one repository edge that keeps all
+provenance entries. API edges remain integration evidence: they are never
+added to `dependencies`, `cycles`, `order`, `levels` or
+`reverse_dependencies`. See
+[repository relationships](federation.md#api-relationships-and-references)
+for the report shape, bounds and limits.

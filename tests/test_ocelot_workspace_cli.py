@@ -55,7 +55,8 @@ def test_help_lists_every_command(capsys: pytest.CaptureFixture[str]) -> None:
     assert exit_info.value.code == 0
     out = capsys.readouterr().out
     for command in ("status", "doctor", "seed", "seeds", "research", "engine",
-                    "validate", "plan"):
+                    "validate", "claim", "plan", "context", "edit",
+                    "boot-edit"):
         assert command in out
 
 
@@ -145,6 +146,137 @@ def test_unknown_seed_says_ok_false_and_exits_1(
     result = json.loads(captured.out)
     assert result["ok"] is False
     assert "no Ocelot seed" in result["error"]
+
+
+def _write_seed(root: Path) -> Path:
+    path = root / "seeds" / "alpha.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        '{\n  "id": "alpha",\n  "version": "1",\n  "nodes": [],\n'
+        '  "edges": [],\n  "rules": [],\n  "reflexes": [],\n'
+        '  "productions": []\n}\n', encoding="utf-8")
+    return path
+
+
+def test_edit_previews_a_metadata_change_without_writing(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_graph(tmp_path)
+    seed = _write_seed(tmp_path)
+    before = seed.read_bytes()
+    ops = tmp_path / "ops.json"
+    ops.write_text(json.dumps([
+        {"op": "set_metadata", "fields": {"version": "2"}},
+    ]), encoding="utf-8")
+
+    code = main(["edit", "alpha", "--ops", str(ops),
+                 "--root", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    assert code == 0
+    result = json.loads(captured.out)
+    assert result["applied"] is False
+    assert result["base_sha256"] != result["new_sha256"]
+    assert result["validation_after"]["ok"] is True
+    assert seed.read_bytes() == before
+
+
+def test_edit_requires_a_valid_operation_file(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_graph(tmp_path)
+    _write_seed(tmp_path)
+    ops = tmp_path / "ops.json"
+    ops.write_text('{"operations": []}', encoding="utf-8")
+    assert main(["edit", "alpha", "--ops", str(ops),
+                 "--root", str(tmp_path)]) == 2
+    assert "non-empty list of operations" in capsys.readouterr().err
+
+
+def test_boot_edit_previews_without_writing(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_graph(tmp_path)
+    _write_seed(tmp_path)
+    boot = tmp_path / "substrate" / "boot_core.py"
+    boot.parent.mkdir()
+    boot.write_text('CORE_SEEDS = ("decision_core",)\n'
+                    "OPTIONAL_CORE_SEEDS = ()\n", encoding="utf-8")
+    before = boot.read_bytes()
+    ops = tmp_path / "boot-ops.json"
+    ops.write_text(json.dumps([{
+        "op": "add_boot", "file": "substrate/boot_core.py",
+        "name": "CORE_SEEDS", "seed": "alpha",
+    }]), encoding="utf-8")
+
+    code = main(["boot-edit", "--ops", str(ops),
+                 "--root", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    assert code == 0
+    result = json.loads(captured.out)
+    assert result["applied"] is False
+    assert result["validation_after"]["ok"] is True
+    assert "alpha" in result["diff_view"]
+    assert boot.read_bytes() == before
+
+
+def test_boot_edit_previews_a_registry_entry(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_graph(tmp_path)
+    _write_seed(tmp_path)
+    registry = tmp_path / "domains" / "seed_registry.py"
+    registry.parent.mkdir()
+    registry.write_text(
+        "from substrate.seeds import REGISTRY, Seed\n"
+        "from substrate.seed_loader import manifest_for\n\n\n"
+        "def _installer_from_manifest(seed_id):\n"
+        "    return lambda agent: manifest_for(seed_id)\n\n\n"
+        'REGISTRY.register(Seed(\n'
+        '    id="decision_core", version="1.0.0", depends_on=(),\n'
+        '    installer=_installer_from_manifest("decision_core"),\n'
+        '    description="core",\n'
+        '))\n', encoding="utf-8")
+    before = registry.read_bytes()
+    ops = tmp_path / "registry-ops.json"
+    ops.write_text(json.dumps([{
+        "op": "add_registry", "seed": "alpha", "version": "1",
+        "depends_on": [], "description": "preview registry entry",
+    }]), encoding="utf-8")
+
+    code = main(["boot-edit", "--ops", str(ops),
+                 "--root", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    assert code == 0
+    result = json.loads(captured.out)
+    assert result["validation_after"]["ok"] is True
+    assert "alpha" in result["diff_view"]
+    assert registry.read_bytes() == before
+
+
+def test_context_reports_blocked_doctor_and_exits_1(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_graph(tmp_path)
+    code = main(["context", "--root", str(tmp_path),
+                 "--changed", "docs/CODE_MAP.md", "--json"])
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert result["schema"] == "ozagia.ocelot.context.v1"
+    assert result["plan"]["mode"] == "none"
+    assert "doctor" in result and "agent_note" in result
+    # The synthetic checkout has no engine, so the doctor is blocked and the
+    # documented context exit code is 1 even though the plan is empty.
+    assert result["state"] == "blocked"
+    assert code == 1
+
+
+def test_claim_reports_a_declared_ledger_conflict(
+        tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_graph(tmp_path)
+    (tmp_path / "VISION_PROTOCOL.md").write_text(
+        "## Burned-seed ledger\n\n| range | used for |\n|---|---|\n"
+        "| 100-199 | demo block |\n", encoding="utf-8")
+    code = main(["claim", "150", "250", "--root", str(tmp_path), "--json"])
+    captured = capsys.readouterr()
+    assert code == 1
+    result = json.loads(captured.out)
+    assert result["state"] == "conflict"
+    assert result["conflicts"][0]["range"] == [100, 199]
 
 
 def test_plan_json_accepts_multiple_changed_paths_and_full_mode_exits_0(

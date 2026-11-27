@@ -19,8 +19,7 @@ usage: ozagia-profile ingest [-h] [--root ROOT]
                              [--format {auto,cprofile,speedscope,chrome_cpuprofile,collapsed,otlp_json,otlp_metrics,prometheus_text}]
                              [--weight-unit {auto,samples,microseconds,milliseconds,seconds}]
                              [--interval-us INTERVAL_US] [--baseline BASELINE]
-                             [--top TOP]
-                             [--sort {self,inclusive,calls,impact}]
+                             [--top TOP] [--sort {self,inclusive,calls,impact}]
                              [--no-graph] [--refresh] [--include-profile]
                              [--out OUT] [--json]
                              path
@@ -54,8 +53,7 @@ usage: ozagia-profile run [-h] [--root ROOT] --tool {cprofile,pyspy,node}
                           [--cwd CWD] [--tool-path TOOL_PATH] [--rate RATE]
                           [--format {auto,cprofile,speedscope,chrome_cpuprofile,collapsed,otlp_json,otlp_metrics,prometheus_text}]
                           [--top TOP] [--sort {self,inclusive,calls,impact}]
-                          [--no-graph] [--refresh] [--include-profile]
-                          [--json]
+                          [--no-graph] [--refresh] [--include-profile] [--json]
                           ...
 ```
 

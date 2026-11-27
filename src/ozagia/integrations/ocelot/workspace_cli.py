@@ -9,9 +9,18 @@ Commands:
     seeds   [--root PATH] [--json]     seed census
     plan    [--root PATH] [--changed PATH ...] [--base REF --head REF]
             [--seed ID ...] [--json]    an affected-test or full-gate plan
+    context [--root PATH] [--changed PATH ...] [--seed ID ...] [--max-tests N]
+            [--json]                    compact session-start agent context
+    edit ID --ops FILE [--write] [--json]
+                                        preview-first semantic seed editing
+    boot-edit --ops FILE [--write] [--json]
+                                        explicit boot-list/registry editing
+    claim LO HI [--root PATH]           burned-seed ledger overlap check
 
-``status`` reads the checkout directly and needs no graph.  ``seed``, ``seeds``
-and ``plan`` load ``<root>/.ozagia/graph.json`` and
+``status`` reads the checkout directly and needs no graph.  ``edit`` and
+``boot-edit`` read and write only the files they are asked to change.
+``seed``, ``seeds``, ``plan``, ``context``, ``engine``, ``research``,
+``validate`` and ``claim`` load ``<root>/.ozagia/graph.json`` and
 ``<root>/.ozagia/journal.jsonl`` through ``DevMemory``.  When the graph is
 missing the CLI prints the exact ``ozagia index --root <root>`` command and
 exits 2; it never builds the graph implicitly.
@@ -92,6 +101,38 @@ def seed_validate(memory: Any, seed_id: str) -> dict[str, Any]:
     """Read-only structural validation of one Ocelot seed manifest."""
     from .workspace_validate import seed_validate as query
     return query(memory, seed_id)
+
+
+def claim_check(memory: Any, lo: int, hi: int) -> dict[str, Any]:
+    """Advisory overlap check against the declared burned-seed ledger."""
+    from .workspace_research import claim_check as query
+    return query(memory, lo, hi)
+
+
+def context_summary(memory: Any, changed: Iterable[str] | None = None, *,
+                    base: str | None = None, head: str | None = None,
+                    seeds: Iterable[str] | None = None,
+                    max_tests: int = 20) -> dict[str, Any]:
+    """A compact session-start context for an Ocelot checkout."""
+    from .workspace_context import context_summary as query
+    return query(memory, changed, base=base, head=head, seeds=seeds,
+                 max_tests=max_tests)
+
+
+def seed_edit(root: Path, seed_id: str, operations: Any, *,
+              write: bool = False,
+              base_sha256: str | None = None) -> dict[str, Any]:
+    """Preview or apply semantic edits to one seed manifest."""
+    from .workspace_seed_edit import seed_edit as query
+    return query(root, seed_id, operations, write=write,
+                 base_sha256=base_sha256)
+
+
+def boot_edit(root: Path, operations: Any, *, write: bool = False,
+              base_sha256: Any = None) -> dict[str, Any]:
+    """Preview or apply explicit boot-list and seed-registry edits."""
+    from .workspace_boot import boot_edit as query
+    return query(root, operations, write=write, base_sha256=base_sha256)
 
 
 def _print_json(value: Any) -> None:
@@ -262,10 +303,147 @@ def _format_validate(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _format_claim(result: dict[str, Any]) -> str:
+    if result.get("error") and not result.get("requested"):
+        return f"error: {result['error']}"
+    requested = result.get("requested") or {}
+    lo, hi = requested.get("lo"), requested.get("hi")
+    span = f"{lo}-{hi}" if lo is not None and hi is not None else "?"
+    state = result.get("state") or ("conflict" if result.get("ok") is False
+                                    else "clean")
+    lines = [f"burned-seed claim {span}: {state}"]
+    if result.get("available") is False:
+        lines.append("ledger: unavailable (declared-ledger check only; "
+                     "absence of a conflict is not proof the range is free)")
+        if result.get("error"):
+            lines.append(f"  {result['error']}")
+        return "\n".join(lines)
+    conflicts = result.get("conflicts") or []
+    lines.append(f"rows scanned: {result.get('rows_scanned', 0)}; "
+                 f"conflicts: {len(conflicts)}")
+    for conflict in _capped(conflicts):
+        ranges = conflict.get("range") or []
+        where = (f"{ranges[0]}-{ranges[1]}" if len(ranges) == 2 else "?")
+        lines.append(f"  {where}: {conflict.get('used_for') or '?'}")
+    if result.get("note"):
+        lines.append(f"note: {result['note']}")
+    return "\n".join(lines)
+
+
+def _format_context(result: dict[str, Any]) -> str:
+    from .workspace_context import format_text as render
+    return render(result)
+
+
+def _format_edit(result: dict[str, Any]) -> str:
+    seed_id = result.get("seed") or result.get("id") or "?"
+    if result.get("applied"):
+        state = "applied"
+    elif result.get("rolled_back"):
+        state = "rolled back"
+    else:
+        state = "preview (nothing written)"
+    lines = [f"seed edit: {seed_id} ({state})"]
+    if result.get("path"):
+        lines.append(f"path: {result['path']}")
+    for key in ("base_sha256", "new_sha256", "restored_sha256"):
+        if result.get(key):
+            lines.append(f"{key}: {result[key]}")
+    if result.get("backup"):
+        lines.append(f"backup: {result['backup']}")
+    for label, values in (("error", result.get("errors") or []),
+                          ("warning", result.get("warnings") or [])):
+        for value in _capped(values):
+            lines.append(f"  {label}: {value}")
+    before = result.get("validation_before") or {}
+    after = result.get("validation_after") or {}
+    if before:
+        lines.append(
+            f"validation before: {'ok' if before.get('ok') else 'failed'} "
+            f"({len(before.get('errors') or [])} error(s))")
+    if after:
+        label = "prospective" if after.get("prospective") else "written"
+        lines.append(
+            f"validation after ({label}): "
+            f"{'ok' if after.get('ok') else 'failed'} "
+            f"({len(after.get('errors') or [])} error(s))")
+    skeleton = result.get("test_skeleton") or {}
+    if skeleton.get("ok"):
+        lines.append(
+            f"test skeleton: {skeleton.get('path')} "
+            f"({'exists; not overwritten' if skeleton.get('exists') else 'not created'})")
+    changes = result.get("changes") or []
+    if changes:
+        lines.append(f"changes ({len(changes)}):")
+        lines.extend(f"  {change}" for change in _capped(changes, 40))
+    diff = result.get("diff_view") or ""
+    if diff:
+        diff_lines = diff.splitlines()
+        lines.append("diff:")
+        lines.extend(diff_lines[:200])
+        if len(diff_lines) > 200:
+            lines.append(f"... {len(diff_lines) - 200} diff line(s) not shown")
+    return "\n".join(lines)
+
+
+def _format_boot_edit(result: dict[str, Any]) -> str:
+    if result.get("applied"):
+        state = "applied"
+    elif result.get("rolled_back"):
+        state = "rolled back"
+    else:
+        state = "preview (nothing written)"
+    lines = [f"boot/registry edit: {state}"]
+    for label, values in (("error", result.get("errors") or []),
+                          ("warning", result.get("warnings") or [])):
+        for value in _capped(values):
+            lines.append(f"  {label}: {value}")
+    changes = result.get("changes") or []
+    if changes:
+        lines.append(f"changes ({len(changes)}):")
+        lines.extend(f"  {change.get('summary') or change}" for change in changes)
+    files = result.get("files") or []
+    lines.append(f"files ({len(files)}):")
+    for item in files:
+        lines.append(
+            f"  {item.get('path')}: base {item.get('base_sha256') or '-'} -> "
+            f"new {item.get('new_sha256') or '-'}")
+        if item.get("backup"):
+            lines.append(f"    backup: {item['backup']}")
+        if item.get("restored_sha256"):
+            lines.append(f"    restored: {item['restored_sha256']}")
+        if item.get("parse_error"):
+            lines.append(f"    parse error: {item['parse_error']}")
+    for validation_key in ("validation_before", "validation_after"):
+        validation = result.get(validation_key) or {}
+        if validation:
+            lines.append(
+                f"{validation_key.replace('_', ' ')}: "
+                f"{'ok' if validation.get('ok') else 'failed'} "
+                f"({len(validation.get('errors') or [])} error(s))")
+    diff = result.get("diff_view") or ""
+    if diff:
+        diff_lines = diff.splitlines()
+        lines.append("diff:")
+        lines.extend(diff_lines[:300])
+        if len(diff_lines) > 300:
+            lines.append(f"... {len(diff_lines) - 300} diff line(s) not shown")
+    return "\n".join(lines)
+
+
 def _format_engine(result: dict[str, Any]) -> str:
     if result.get("ok") is False:
         return f"error: {result.get('error') or 'engine query failed'}"
     lines: list[str] = []
+    if "pairs" in result:
+        lines.append(
+            f"rs parity: {result.get('paired_count', 0)} paired, "
+            f"{len(result.get('missing_python') or [])} missing Python")
+        for item in result.get("pairs") or []:
+            lines.append(
+                f"  {item.get('module', '?')}: {item.get('status', '?')} "
+                f"({len(item.get('tests') or [])} test file(s))")
+        return "\n".join(lines)
     if "defined_terms" in result:
         lines.append(
             f"term census: {result.get('defined_count', 0)} defined, "
@@ -407,8 +585,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ozagia-ocelot-workspace",
         description="query an indexed Ocelot checkout: seed impact, a scoped "
-                    "test plan, the Rust/Python/seed bridge, research links, "
-                    "seed validation, and a read-only engine/worktree doctor")
+                    "test plan, agent context, the Rust/Python/seed bridge, "
+                    "research links, validation, preview-first seed/boot "
+                    "editing, and a read-only engine/worktree doctor")
     sub = parser.add_subparsers(dest="command", required=True)
 
     def common(name: str, help_text: str) -> argparse.ArgumentParser:
@@ -438,13 +617,49 @@ def build_parser() -> argparse.ArgumentParser:
 
     engine = common("engine", "Rust/Python/seed bridge query")
     engine.add_argument("--op", default="primitive",
-                        choices=("primitive", "rust_impact", "term_census"),
+                        choices=("primitive", "rust_impact", "term_census",
+                                 "rs_parity"),
                         help="query kind (default: primitive)")
     engine.add_argument("--target", default=None,
                         help="primitive name or Rust path for primitive/impact")
 
     validate = common("validate", "structural seed-manifest validation")
     validate.add_argument("id", metavar="ID", help="seed id")
+
+    claim = common("claim", "advisory burned-seed ledger overlap check")
+    claim.add_argument("lo", type=int, metavar="LO", help="first seed number")
+    claim.add_argument("hi", type=int, metavar="HI", help="last seed number")
+
+    edit = common("edit", "preview-first semantic seed editing")
+    edit.add_argument("id", metavar="ID", help="seed id")
+    edit.add_argument("--ops", required=True, metavar="FILE",
+                      help="JSON list of semantic operations")
+    edit.add_argument("--write", action="store_true",
+                      help="apply the edit atomically (default: preview only)")
+    edit.add_argument("--base-sha256", default=None, metavar="HASH",
+                      help="refuse if the seed no longer has this hash")
+
+    boot = common("boot-edit",
+                  "explicit boot-list / seed-registry editing")
+    boot.add_argument("--ops", required=True, metavar="FILE",
+                      help="JSON list of boot/registry operations")
+    boot.add_argument("--write", action="store_true",
+                      help="apply atomically (default: preview only)")
+    boot.add_argument("--base-sha256", default=None, metavar="HASH",
+                      help="single-file base hash guard")
+
+    context = common("context", "compact agent context for this checkout")
+    context.add_argument("--changed", action="append", nargs="+", default=[],
+                         metavar="PATH",
+                         help="changed path, relative to the checkout")
+    context.add_argument("--base", default=None, metavar="REF",
+                         help="git base revision")
+    context.add_argument("--head", default=None, metavar="REF",
+                         help="git head revision")
+    context.add_argument("--seed", action="append", nargs="+", default=[],
+                         metavar="ID", help="changed seed id (repeatable)")
+    context.add_argument("--max-tests", type=int, default=20, metavar="N",
+                         help="show at most N test paths (default: 20)")
 
     plan = common("plan", "affected-test plan or conservative full-gate fallback")
     plan.add_argument("--changed", action="append", nargs="+", default=[],
@@ -463,6 +678,24 @@ def _flatten(groups: list[list[str]]) -> list[str]:
     return [value for group in groups for value in group if value]
 
 
+def _read_operations(path: str) -> list[Any]:
+    """Read a semantic-operation list from JSON (a bare list or an object)."""
+    source = Path(path).expanduser()
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ValueError(f"{source}: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{source}: invalid JSON: {exc}") from exc
+    if isinstance(data, dict):
+        data = data.get("operations")
+    if not isinstance(data, list) or not data:
+        raise ValueError(
+            f"{source}: expected a non-empty list of operations or an object "
+            "with an 'operations' list")
+    return data
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     root = _root(args.root)
@@ -475,9 +708,49 @@ def main(argv: list[str] | None = None) -> int:
             print(format_text(result))
         return _status_exit(result)
 
+    if args.command == "edit":
+        try:
+            operations = _read_operations(args.ops)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        result = seed_edit(root, args.id, operations, write=args.write,
+                           base_sha256=args.base_sha256)
+        if args.json:
+            _print_json(result)
+        else:
+            print(_format_edit(result))
+        return 0 if _result_ok(result) else 1
+
+    if args.command == "boot-edit":
+        try:
+            operations = _read_operations(args.ops)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        result = boot_edit(root, operations, write=args.write,
+                           base_sha256=args.base_sha256)
+        if args.json:
+            _print_json(result)
+        else:
+            print(_format_boot_edit(result))
+        return 0 if _result_ok(result) else 1
+
     memory = _load_memory(root)
     if memory is None:
         return 2
+
+    if args.command == "context":
+        result = context_summary(
+            memory, changed=_flatten(args.changed) or None,
+            base=args.base, head=args.head,
+            seeds=_flatten(args.seed) or None,
+            max_tests=args.max_tests)
+        if args.json:
+            _print_json(result)
+        else:
+            print(_format_context(result))
+        return 0 if _result_ok(result) else 1
 
     if args.command == "seed":
         result = seed_summary(memory, args.id, include=args.include)
@@ -517,6 +790,14 @@ def main(argv: list[str] | None = None) -> int:
             _print_json(result)
         else:
             print(_format_validate(result))
+        return 0 if _result_ok(result) else 1
+
+    if args.command == "claim":
+        result = claim_check(memory, args.lo, args.hi)
+        if args.json:
+            _print_json(result)
+        else:
+            print(_format_claim(result))
         return 0 if _result_ok(result) else 1
 
     if args.command == "plan":

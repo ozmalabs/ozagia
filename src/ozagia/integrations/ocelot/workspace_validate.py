@@ -317,8 +317,14 @@ def _dependency_names(root: Path, seed_id: str, report: _Report) -> list[str]:
 
 def _dependency_cycles(
     root: Path, seed_id: str, *, rel: str, report: _Report,
+    overrides: Mapping[str, Iterable[str]] | None = None,
 ) -> list[list[str]]:
-    """Dependency cycles reachable from *seed_id*'s manifests."""
+    """Dependency cycles reachable from *seed_id*'s manifests.
+
+    ``overrides`` maps a seed id to the dependency names that should be used
+    instead of its on-disk manifest.  Prospective validation uses it for the
+    seed being edited; the default is to read every manifest from disk.
+    """
     cache: dict[str, list[str]] = {}
     state: dict[str, int] = {}
     stack: list[str] = []
@@ -329,6 +335,10 @@ def _dependency_cycles(
         nonlocal reads
         if current in cache:
             return cache[current]
+        if overrides is not None and current in overrides:
+            values = [str(dep) for dep in overrides[current]]
+            cache[current] = values
+            return values
         if reads >= MAX_DEPENDENCY_FILES:
             report.warning(
                 f"{rel}: dependency cycle check stopped after "
@@ -892,6 +902,130 @@ def validate_seed(root: str | Path, seed_id: str, *,
     return result
 
 
+def validate_seed_data(
+    root: str | Path, seed_id: str, data: Mapping[str, Any], *,
+    rel: str | None = None,
+) -> dict[str, Any]:
+    """Structurally validate prospective manifest data without writing it.
+
+    This is the same structural check as :func:`validate_seed`, applied to an
+    in-memory manifest: the seed file is not read or written, and the
+    prospective ``depends_on`` values are used for the cycle walk.  Ocelot's
+    loader remains the authority on whether a seed actually loads.
+    """
+    seed_id = str(seed_id or "").strip()
+    root_path = Path(root).expanduser().resolve()
+    report = _Report()
+    checks: list[dict[str, Any]] = []
+    counts = {"nodes": 0, "edges": 0, "productions": 0, "rules": 0,
+              "reflexes": 0}
+    display = (rel or (f"{SEED_DIR}/{seed_id}.json"
+                       if _is_safe_seed_id(seed_id) else str(seed_id)))
+    result: dict[str, Any] = {
+        "ok": False,
+        "seed": seed_id,
+        "path": display,
+        "errors": report.errors,
+        "warnings": report.warnings,
+        "checks": checks,
+        "counts": counts,
+        "partial": False,
+        "prospective": True,
+        "file_written": False,
+    }
+
+    if not _is_safe_seed_id(seed_id):
+        report.error(
+            f"invalid seed id {seed_id!r}; expected a filename stem such as "
+            "'my_seed'")
+        _check(checks, "path", False, "invalid seed id")
+        report.finish()
+        return result
+    if not isinstance(data, Mapping):
+        report.error(f"{display}: manifest is not a JSON object")
+        _check(checks, "json", False, "manifest is not a JSON object")
+        report.finish()
+        return result
+
+    rel = display
+    _check(checks, "path", True, rel)
+    _check(checks, "size", True, "prospective data")
+    _check(checks, "json", True, "prospective data parsed")
+
+    path = root_path / SEED_DIR / f"{seed_id}.json"
+    deps = _validate_metadata(
+        data, root=root_path, path=path, seed_id=seed_id, rel=rel,
+        report=report, checks=checks, partial=False)
+    if deps:
+        cycles = _dependency_cycles(
+            root_path, seed_id, rel=rel, report=report,
+            overrides={seed_id: deps})
+        for cycle in cycles:
+            report.error(f"{rel}: dependency cycle: " + " -> ".join(cycle))
+        _check(checks, "dependency_cycle", not cycles,
+               "no dependency cycle" if not cycles
+               else " -> ".join(cycles[0]))
+    else:
+        _check(checks, "dependency_cycle", True, "no dependencies to walk")
+
+    nodes = data.get("nodes", [])
+    local_ids: dict[int, int] = {}
+    nodes_ok = True
+    if not isinstance(nodes, list):
+        report.error(f"{rel}: nodes must be a list")
+        nodes_ok = False
+        nodes = []
+    else:
+        for index, node in enumerate(nodes):
+            if not _validate_node(
+                    node, index, rel=rel, report=report,
+                    local_ids=local_ids):
+                nodes_ok = False
+    counts["nodes"] = len(nodes)
+    _check(checks, "nodes", nodes_ok,
+           f"{len(nodes)} node(s), {len(local_ids)} unique local_id(s)")
+
+    edges = data.get("edges", [])
+    edges_ok, edge_types = _validate_edges(
+        edges, rel=rel, report=report, local_ids=local_ids)
+    counts["edges"] = len(edges) if isinstance(edges, list) else 0
+    _check(checks, "edges", edges_ok, f"{counts['edges']} edge(s)")
+
+    productions = data.get("productions", [])
+    productions_ok, production_types = _validate_productions(
+        productions, rel=rel, report=report)
+    counts["productions"] = (
+        len(productions) if isinstance(productions, list) else 0)
+    _check(checks, "productions", productions_ok,
+           f"{counts['productions']} production(s)")
+
+    rules = data.get("rules", [])
+    rules_ok, rule_types = _validate_rules(rules, rel=rel, report=report)
+    counts["rules"] = len(rules) if isinstance(rules, list) else 0
+    _check(checks, "rules", rules_ok, f"{counts['rules']} rule(s)")
+
+    reflexes = data.get("reflexes", [])
+    reflexes_ok, reflex_count = _validate_reflexes(
+        reflexes, rel=rel, report=report)
+    counts["reflexes"] = reflex_count
+    _check(checks, "reflexes", reflexes_ok,
+           f"{reflex_count} reflex/reflexes")
+
+    missing = _missing_production_warnings(
+        rel=rel, report=report, edge_types=edge_types,
+        rule_types=rule_types, production_types=production_types)
+    if missing:
+        _check(checks, "production_coverage", False,
+               f"{missing} edge type(s) lack a production (warning)")
+    else:
+        _check(checks, "production_coverage", True,
+               "every referenced edge type has a production")
+
+    report.finish()
+    result["ok"] = not report.errors
+    return result
+
+
 def seed_validate(memory: Any, seed_id: str) -> dict[str, Any]:
     """Adapter helper: validate a seed in the memory's repository."""
     root = getattr(memory, "raw_repo_root", "")
@@ -949,4 +1083,5 @@ __all__ = [
     "register_validate",
     "seed_validate",
     "validate_seed",
+    "validate_seed_data",
 ]

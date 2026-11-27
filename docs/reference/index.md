@@ -35,7 +35,7 @@ Generated from the code by `scripts/docs/generate_docs.py`: the command inventor
 | `ozagia-supply-chain` | offline supply-chain attack detection (never fetches, installs or executes project code) | [cli/ozagia-supply-chain.md](cli/ozagia-supply-chain.md) |
 | `ozagia-review` | deterministic, graph-aware review of a BASE..HEAD diff | [cli/ozagia-review.md](cli/ozagia-review.md) |
 | `ozagia-ocelot` | resolve, install and verify a separate Ocelot checkout; Ocelot is not bundled and is never downloaded implicitly | [cli/ozagia-ocelot.md](cli/ozagia-ocelot.md) |
-| `ozagia-ocelot-workspace` | query an indexed Ocelot checkout: seed impact, a scoped test plan, the Rust/Python/seed bridge, research links, seed validation, and a read-only engine/worktree doctor | [cli/ozagia-ocelot-workspace.md](cli/ozagia-ocelot-workspace.md) |
+| `ozagia-ocelot-workspace` | query an indexed Ocelot checkout: seed impact, a scoped test plan, agent context, the Rust/Python/seed bridge, research links, validation, preview-first seed/boot editing, and a read-only engine/worktree doctor | [cli/ozagia-ocelot-workspace.md](cli/ozagia-ocelot-workspace.md) |
 | `ozagia-worktree` | read-only worktree, branch, drift and policy checks | [cli/ozagia-worktree.md](cli/ozagia-worktree.md) |
 | `ozagia-resources` | read-only host resources, history and admission checks | [cli/ozagia-resources.md](cli/ozagia-resources.md) |
 | `ozagia-files` | track created files and route Markdown without deleting | [cli/ozagia-files.md](cli/ozagia-files.md) |

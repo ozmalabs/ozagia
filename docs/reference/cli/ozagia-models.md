@@ -149,8 +149,8 @@ usage: ozagia-models similar [-h] [--limit LIMIT] [--root ROOT] [--json]
 usage: ozagia-models match [-h] [--task CLASS] [--capability X]
                            [--tool-format F] [--local] [--min-context N]
                            [--max-cost N] [--size CLASS] [--type TYPE]
-                           [--modality M] [--limit LIMIT] [--root ROOT]
-                           [--json] [--source SOURCE | --no-sources]
+                           [--modality M] [--limit LIMIT] [--root ROOT] [--json]
+                           [--source SOURCE | --no-sources]
 ```
 
 | option | type | values | default | help |

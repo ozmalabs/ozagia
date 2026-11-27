@@ -11,7 +11,7 @@ executor supplied by the caller.
 
 ## Catalogue
 
-Fourteen classes at library version 1:
+Fifteen classes at library version 1:
 
 | Domain | Task class | Inputs | Output | Writes | Purpose |
 | --- | --- | --- | --- | --- | --- |
@@ -26,6 +26,7 @@ Fourteen classes at library version 1:
 | Coding | `impact_analysis` | `diff` | `impact_report.v1` | none | Changed graph keys, dependents, covering tests and a risk rating. |
 | Coding | `repo_scan` | none | `repo_scan.v1` | none | Advisory opportunities with expected effect, effort, risk and evidence. |
 | Coding | `review_my_change` | `diff` | `change_review.v1` | none | Evidence-backed review of a supplied change with impact tracing and explicit unknowns. |
+| Coding | `ocelot_workspace` | `diff` | `ocelot_workspace_report.v1` | none | Conservative Ocelot affected-test plan with engine-rebuild and full-gate evidence. |
 | Ops | `log_inspect` | `log_path` | `failure_clusters.v1` | none | Failure clusters, evidence lines and proposed fixes. |
 | Ops | `model_classify` | `task_class`, `privacy`, `input_size` | `model_choice.v1` | none | A model recommendation with confidence and reason, from local config. |
 | Ops | `config_validate` | `config_path` | `config_check.v1` | none | Invalid keys, conflicts and suggested values. |
@@ -33,9 +34,9 @@ Fourteen classes at library version 1:
 All classes declare `model_calls = 0` and `network = "deny"`. The only writer
 is `evidence_table`, which has `write_scope = ["history"]` and
 `approval.mutate = "ask"`; it stops for approval unless the run is explicitly
-approved. `diff_review`, `impact_analysis` and `repo_scan` need a fresh graph
-snapshot because they use graph tools; the other classes work with ordinary
-file reads.
+approved. `diff_review`, `impact_analysis`, `repo_scan` and
+`ocelot_workspace` need a fresh graph snapshot because they use graph tools;
+the other classes work with ordinary file reads.
 
 `review_my_change` is the reusable agent task for a current change. It accepts
 the caller's diff, allows a dirty worktree, requires a fresh graph snapshot,
@@ -43,6 +44,18 @@ and uses only read/grep/graph tools. It declares zero model calls, denies
 network and mutation, and asks the agent to report evidence and unknowns rather
 than claim tests ran. Browse it with `ozagia tasks show review_my_change` or
 `ozagia tasks list --json`; callers still supply the executor and diff.
+
+`ocelot_workspace` is the Ocelot-specific coding class. It also takes the
+caller's `diff`, requires a fresh graph snapshot, and writes nothing. Its
+steps query `ocelot_context`/`ocelot_plan`, rebuild the engine when
+`runners/dsl` Rust source, `Cargo.toml` or the engine build changed, and then
+run either the selected affected tests or the full migrated gate. The
+engine-rebuild step names
+`scripts/engine_cargo_test.sh --lib -- --test-threads=1`; neither step may use
+`pytest -n auto`. The `ocelot_workspace_report.v1` output schema requires
+`mode`, `selected_tests`, `commands`, `full_gate`, `engine_rebuild`,
+`warnings`, `evidence` and `not_assessed`. The evidence step must name the
+engine artifact/hash and must not claim full coverage for an affected slice.
 
 ## Locations
 
@@ -156,9 +169,9 @@ Examples:
 
 ```console
 $ python -m ozagia.task_library_cli list --domain coding
-Task classes: 5 (5 built-in, 0 repo overrides)
+Task classes: 6 (6 built-in, 0 repo overrides)
 
-coding (5)
+coding (6)
   diff_review  v1  Diff review
       Review a diff for correctness, test coverage and contract risk, ...
   review_my_change  v1  Review my change
@@ -167,7 +180,7 @@ coding (5)
 $ python -m ozagia.task_library_cli validate --json
 {
   "ok": true,
-  "counts": {"builtin": 14, "repo": 0, "total": 14},
+  "counts": {"builtin": 15, "repo": 0, "total": 15},
   ...
 }
 ```

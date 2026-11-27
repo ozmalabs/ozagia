@@ -30,6 +30,20 @@ evaluation, with integration and verification coordinated in this checkout.
 - Implemented the read-only adapter, including path-distinct seed manifests,
   declared dependencies, scenarios, packs and bounded client/server route
   evidence. Setup and federation limitations are in `docs/bigville_adapter.md`.
+- Item 4's cross-repository link is now served by declared federation
+  `relationships`/`families` in the anchor's `.ozagia/federation.json`
+  ([federation](../federation.md#repository-relationships),
+  [plan](2026-11-27_repo_relationships.md)), inspected with
+  `ozagia federation relations` and included in `ozagia federation check` as
+  `repository_relations`. The
+  [Bigville adapter](../bigville_adapter.md#ocelot-federation) records a worked
+  Bigville ↔ Ocelot manifest. This is declared, provenance-bearing evidence,
+  not inferred: federation does not
+  derive edges from Bigville's dynamic `import_module` call, module or
+  repository names, search hits, Git remotes or runtime calls, so inferred
+  cross-repository edges remain unasserted. Browser/API navigation remains the
+  adapter's bounded route evidence; federation's API section stays `absent`
+  until an OpenAPI operation or explicit `ApiMapping` is indexed.
 - Implemented project-declared invariants and task-matched key-document
   priority, with bounded context and explicit evidence status. Configuration
   examples are in `docs/project_invariants.md`.

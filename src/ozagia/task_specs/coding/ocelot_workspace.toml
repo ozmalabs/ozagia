@@ -1,0 +1,122 @@
+id = "ocelot_workspace"
+version = 1
+title = "Ocelot workspace change"
+objective = "Plan and validate a conservative Ocelot affected-test slice. Rebuild the Rust engine before measuring when runners/dsl changed; if the plan requires the full migrated gate, say so and never use pytest -n auto. Record the plan, commands and warnings as evidence."
+inputs = ["diff"]
+tools = ["read", "graph_search", "test"]
+write_scope = []
+requires_graph = true
+stop = ["gate_failed", "budget_exhausted", "resource_limit", "no_progress", "repeated_state"]
+output = "ocelot_workspace_report.v1"
+
+[worktree]
+base = "main"
+require_clean = false
+require_up_to_date = false
+
+[resources]
+memory_mb = 2048
+disk_mb = 4096
+pids = 256
+wall_s = 7200
+
+[budget]
+tokens = 30000
+model_calls = 0
+cost_usd = 0.0
+wall_s = 7200
+
+[gates]
+before = ["resources_fit", "snapshot_fresh"]
+after = ["schema_valid", "evidence_present"]
+
+[approval]
+mutate = "deny"
+network = "deny"
+
+[test_policy]
+mode = "affected"
+fallback = "all"
+max_tests = 20
+timeout_s = 7200
+
+[output_schema]
+type = "object"
+required = ["mode", "selected_tests", "commands", "full_gate", "engine_rebuild", "warnings", "evidence", "not_assessed"]
+additionalProperties = false
+
+[output_schema.properties.mode]
+type = "string"
+enum = ["affected", "full", "none"]
+
+[output_schema.properties.selected_tests]
+type = "array"
+
+[output_schema.properties.selected_tests.items]
+type = "string"
+
+[output_schema.properties.commands]
+type = "array"
+
+[output_schema.properties.commands.items]
+type = "string"
+
+[output_schema.properties.full_gate]
+type = "boolean"
+
+[output_schema.properties.engine_rebuild]
+type = "boolean"
+
+[output_schema.properties.warnings]
+type = "array"
+
+[output_schema.properties.warnings.items]
+type = "string"
+
+[output_schema.properties.evidence]
+type = "array"
+
+[output_schema.properties.evidence.items]
+type = "string"
+
+[output_schema.properties.not_assessed]
+type = "array"
+
+[output_schema.properties.not_assessed.items]
+type = "string"
+
+[[steps]]
+id = "plan"
+tool = "graph_search"
+goal = "Query ocelot_context and ocelot_plan for the changed paths or seed ids. Keep the affected test list, mode, full-gate reasons and warnings."
+paths = ["."]
+
+[steps.budget]
+tokens = 8000
+
+[[steps]]
+id = "engine-rebuild"
+tool = "test"
+goal = "If runners/dsl Rust source, Cargo.toml or the engine build changed, rebuild the engine and run scripts/engine_cargo_test.sh --lib -- --test-threads=1 before measuring. Never use pytest -n auto."
+paths = ["."]
+
+[steps.budget]
+tokens = 6000
+
+[[steps]]
+id = "run-selected"
+tool = "test"
+goal = "Run only the selected affected test files. If the plan says full, run the full migrated gate instead and record why. Never use pytest -n auto."
+paths = ["."]
+
+[steps.budget]
+tokens = 6000
+
+[[steps]]
+id = "evidence"
+tool = "read"
+goal = "Record the plan mode, selected tests, commands, engine artifact/hash, full-gate warning and omissions as evidence. Do not claim full coverage for an affected slice."
+paths = ["."]
+
+[steps.budget]
+tokens = 10000

@@ -23,8 +23,8 @@ usage: generate_docs.py validate [-h] [--tasks TASKS] [--repo REPO]
 
 | option | type | values | default | help |
 |---|---|---|---|---|
-| `--tasks` |  |  | `/home/matt/ozma/ozagia/evaluation/agent_e2e/tasks.json` | — |
-| `--repo` |  |  | `/home/matt/ozma/ozagia` | git repo to create worktrees from |
+| `--tasks` |  |  | `<repo>/evaluation/agent_e2e/tasks.json` | — |
+| `--repo` |  |  | `<repo>` | git repo to create worktrees from |
 | `--base` |  |  |  | base commit (default: tasks file) |
 | `--task-ids` |  |  |  | comma-separated subset |
 | `--python` |  |  |  | python for the checks and the agent's `python` (default: the interpreter `ozagia env --for` picks for the checks' test files in --repo) |
@@ -37,8 +37,7 @@ usage: generate_docs.py validate [-h] [--tasks TASKS] [--repo REPO]
 ```
 usage: generate_docs.py run [-h] [--tasks TASKS] [--repo REPO] [--base BASE]
                             [--task-ids TASK_IDS] [--python PYTHON]
-                            [--run-root RUN_ROOT] [--keep]
-                            [--out-json OUT_JSON]
+                            [--run-root RUN_ROOT] [--keep] [--out-json OUT_JSON]
                             [--driver {claude,fake,native,noop,opencode}]
                             [--model MODEL] [--arms ARMS] [--repeats REPEATS]
                             [--timeout-s TIMEOUT_S] [--live]
@@ -53,8 +52,8 @@ usage: generate_docs.py run [-h] [--tasks TASKS] [--repo REPO] [--base BASE]
 
 | option | type | values | default | help |
 |---|---|---|---|---|
-| `--tasks` |  |  | `/home/matt/ozma/ozagia/evaluation/agent_e2e/tasks.json` | — |
-| `--repo` |  |  | `/home/matt/ozma/ozagia` | git repo to create worktrees from |
+| `--tasks` |  |  | `<repo>/evaluation/agent_e2e/tasks.json` | — |
+| `--repo` |  |  | `<repo>` | git repo to create worktrees from |
 | `--base` |  |  |  | base commit (default: tasks file) |
 | `--task-ids` |  |  |  | comma-separated subset |
 | `--python` |  |  |  | python for the checks and the agent's `python` (default: the interpreter `ozagia env --for` picks for the checks' test files in --repo) |

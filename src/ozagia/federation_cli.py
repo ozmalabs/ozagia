@@ -3,9 +3,12 @@
 Usage::
 
     ozagia federation status [--root R] [--repo R ...]
-    ozagia federation search QUERY [--root R] [--repo R ...] [--limit N]
+    ozagia federation search QUERY [--root R] [--repo R ...] [--limit N] [--family-boost]
     ozagia federation node QUALIFIED_KEY [--root R] [--repo R ...]
     ozagia federation check [--root R] [--repo R ...]
+    ozagia federation relations [--root R] [--repo R ...]
+    ozagia federation build [--root R] [--repo R ...] [--out PATH]
+    ozagia federation graph [--root R] [--repo R ...] [--out PATH] [--refresh]
     ozagia federation sync [--root R] [--repo R ...]
 
 Queries automatically fast-forward only checkouts explicitly declared in
@@ -30,14 +33,29 @@ def _parser(prog: str) -> argparse.ArgumentParser:
         ("search", "search indexed snapshots without refreshing them"),
         ("node", "inspect a qualified node and its edges"),
         ("check", "check declared cross-repository relationships"),
+        ("relations", "show declared, package-derived and API repository "
+                      "relationships"),
+        ("build", "write the persisted cross-repository relationship supergraph"),
+        ("graph", "read the persisted relationship supergraph without rebuilding "
+                  "unless --refresh is given"),
         ("sync", "fast-forward explicitly designated reference repositories"),
     ):
         item = sub.add_parser(name, help=help_text)
         if name == "search":
             item.add_argument("query")
             item.add_argument("--limit", type=int, default=20)
+            item.add_argument(
+                "--family-boost", action="store_true",
+                help="prefer hits from members sharing a declared family with "
+                     "the anchor (opt-in; default off)")
         elif name == "node":
             item.add_argument("qualified_key")
+        if name in {"build", "graph"}:
+            item.add_argument("--out", default=None,
+                              help="artifact path (default: state dir supergraph.json)")
+        if name == "graph":
+            item.add_argument("--refresh", action="store_true",
+                              help="rebuild the artifact when it is absent, stale or invalid")
         item.add_argument("--root", default=None,
                           help="discovery anchor (default: current repository)")
         item.add_argument("--repo", action="append", default=None, dest="roots",
@@ -73,9 +91,21 @@ def run(argv: list[str] | None = None, *, prog: str = "ozagia federation") -> in
             if args.command == "status":
                 result = F.status(root, roots=roots)
             elif args.command == "search":
-                result = F.search(root, args.query, roots=roots, limit=args.limit)
+                result = F.search(root, args.query, roots=roots,
+                                  limit=args.limit,
+                                  family_boost=args.family_boost)
             elif args.command == "node":
                 result = F.node(root, args.qualified_key, roots=roots)
+            elif args.command == "build":
+                from ozagia.core import supergraph
+                result = supergraph.write(root, roots=roots, out=args.out)
+            elif args.command == "graph":
+                from ozagia.core import supergraph
+                result = (supergraph.refresh(root, roots=roots, out=args.out)
+                          if args.refresh else supergraph.read(root, out=args.out))
+            elif args.command == "relations":
+                from ozagia.core import cross_repo
+                result = cross_repo.relations(root, roots=roots)
             else:
                 from ozagia.core import cross_repo
                 result = cross_repo.check(root, roots=roots)

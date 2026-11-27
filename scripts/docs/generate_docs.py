@@ -36,9 +36,22 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_OUT = REPO / "docs" / "reference"
 SUPPRESS = argparse.SUPPRESS
+# Committed pages must not depend on the terminal that generated them.
+USAGE_WIDTH = 80
+# Stable stand-in for this checkout's root in rendered defaults.
+REPO_PLACEHOLDER = "<repo>"
 # Commands whose page opens with the module docstring (the canonical
 # synopsis) in full, not just its first line.
 FULL_DOC_INTROS = frozenset({"ozagia"})
+
+
+class _FixedWidthHelpFormatter(argparse.HelpFormatter):
+    """Usage formatter pinned to ``USAGE_WIDTH``, ignoring ``COLUMNS``."""
+
+    def __init__(self, prog: str, indent_increment: int = 2,
+                 max_help_position: int = 24,
+                 width: int | None = USAGE_WIDTH):
+        super().__init__(prog, indent_increment, max_help_position, width)
 
 
 # -- provenance ------------------------------------------------------------- #
@@ -107,6 +120,20 @@ def _nargs_text(nargs: object) -> str:
     return str(nargs)  # "append", "extend", a count, ...
 
 
+def _normalize_repo_path(text: str) -> str:
+    """Replace this checkout's root with ``REPO_PLACEHOLDER``.
+
+    The pages are committed and read on other machines, so a default that
+    names the checkout must not embed the generating machine's path. Only
+    this checkout's root (and paths under it) is replaced; unrelated
+    absolute defaults such as ``/tmp`` stay as they are.
+    """
+    root = str(REPO)
+    if root in ("", "/"):
+        return text
+    return re.sub(re.escape(root) + r"(?=$|[\\/])", REPO_PLACEHOLDER, text)
+
+
 def _default_text(action: argparse.Action) -> str:
     d = action.default
     if d is SUPPRESS or d is None:
@@ -115,8 +142,8 @@ def _default_text(action: argparse.Action) -> str:
                                  "_CountAction"):
         return ""
     if isinstance(d, str):
-        return f"`{d}`"
-    return json.dumps(d, ensure_ascii=False)
+        return f"`{_normalize_repo_path(d)}`"
+    return _normalize_repo_path(json.dumps(d, ensure_ascii=False))
 
 
 def _choices_text(action: argparse.Action) -> str:
@@ -160,10 +187,16 @@ def describe_positional(action: argparse.Action) -> dict:
 
 
 def walk_parser(parser: argparse.ArgumentParser) -> dict:
+    original_formatter = parser.formatter_class
+    parser.formatter_class = _FixedWidthHelpFormatter
+    try:
+        usage = parser.format_usage().strip()
+    finally:
+        parser.formatter_class = original_formatter
     node = {
         "prog": parser.prog,
         "description": parser.description,
-        "usage": parser.format_usage().strip(),
+        "usage": usage,
         "positionals": [],
         "options": [],
         "subcommands": [],

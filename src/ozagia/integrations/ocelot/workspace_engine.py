@@ -1170,6 +1170,51 @@ def _impact(memory: Any, target: str) -> dict[str, Any]:
     return base
 
 
+def _rs_parity(memory: Any) -> dict[str, Any]:
+    """Pair ``domains_rs`` mirrors with their ``domains`` counterparts."""
+    root = Path(memory.raw_repo_root).resolve()
+    rs_dir = root / "domains_rs"
+    pairs: list[dict[str, Any]] = []
+    if rs_dir.is_dir():
+        for path in sorted(rs_dir.glob("*.py")):
+            if path.name == "__init__.py":
+                continue
+            stem = path.stem
+            rs_rel = path.relative_to(root).as_posix()
+            py_rel = f"domains/{stem}.py"
+            py = root / py_rel
+            tests: set[str] = set()
+            for rel in (rs_rel, py_rel if py.is_file() else ""):
+                if not rel:
+                    continue
+                try:
+                    result = memory.tests_for(rel)
+                except Exception:  # noqa: BLE001 - absent graph context
+                    continue
+                for item in result.get("tests") or []:
+                    if isinstance(item, dict) and item.get("file"):
+                        tests.add(str(item["file"]))
+            for candidate in (f"tests/test_{stem}_parity.py",
+                              f"tests/test_{stem}.py"):
+                if (root / candidate).is_file():
+                    tests.add(candidate)
+            status = ("paired" if py.is_file() else "missing_python")
+            pairs.append({
+                "module": stem,
+                "rust_python_path": rs_rel,
+                "domains_path": py_rel if py.is_file() else None,
+                "status": status,
+                "tests": sorted(tests),
+            })
+    missing = [item["module"] for item in pairs
+               if item["status"] != "paired"]
+    return {"ok": True, "op": "rs_parity", "count": len(pairs),
+            "pairs": pairs, "missing_python": missing,
+            "paired_count": len(pairs) - len(missing),
+            "note": "syntactic path pairing only; parity assertions and test "
+                    "verdicts remain the repository's own gates"}
+
+
 def engine_summary(memory: Any, target: str | None = None,
                    op: str = "primitive") -> dict[str, Any]:
     """Ocelot engine bridge query: primitive, rust impact or term census."""
@@ -1178,10 +1223,12 @@ def engine_summary(memory: Any, target: str | None = None,
         return _term_census(memory)
     if mode == "rust_impact":
         return _impact(memory, str(target or ""))
+    if mode == "rs_parity":
+        return _rs_parity(memory)
     if mode != "primitive":
         return {"ok": False,
                 "error": f"unknown op {op!r}; expected primitive, "
-                         "rust_impact or term_census"}
+                         "rust_impact, term_census or rs_parity"}
     if target:
         return _primitive_payload(memory, str(target))
     primitives = _primitive_list(memory)
@@ -1215,7 +1262,8 @@ ENGINE_TOOL = {
         "type": "object",
         "properties": {
             "op": {"type": "string",
-                   "enum": ["primitive", "rust_impact", "term_census"],
+                   "enum": ["primitive", "rust_impact", "term_census",
+                            "rs_parity"],
                    "default": "primitive"},
             "target": {"type": "string"},
         },

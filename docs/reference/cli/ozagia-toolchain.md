@@ -40,10 +40,10 @@ usage: python -m ozagia.toolchain_cli list [-h] [--json | --text]
 ## `ozagia-toolchain plan`
 
 ```
-usage: python -m ozagia.toolchain_cli plan [-h] [--root ROOT]
-                                           [--capability ID] [--path P]
-                                           [--json | --text] [--no-versions]
-                                           [--no-sudo] [--require-ready]
+usage: python -m ozagia.toolchain_cli plan [-h] [--root ROOT] [--capability ID]
+                                           [--path P] [--json | --text]
+                                           [--no-versions] [--no-sudo]
+                                           [--require-ready]
 ```
 
 | option | type | values | default | help |

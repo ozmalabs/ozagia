@@ -51,8 +51,8 @@ usage: ozagia-settings values [-h] [--root ROOT] [--json]
 ## `ozagia-settings set`
 
 ```
-usage: ozagia-settings set [-h] [--scope {repo,user}] [--root ROOT]
-                           [--dry-run] [--json]
+usage: ozagia-settings set [-h] [--scope {repo,user}] [--root ROOT] [--dry-run]
+                           [--json]
                            key value
 ```
 

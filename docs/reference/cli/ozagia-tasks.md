@@ -87,9 +87,8 @@ usage: ozagia-tasks show [-h] [--root ROOT] [--json] [run]
 ## `ozagia-tasks report`
 
 ```
-usage: ozagia-tasks report [-h] [--root ROOT] [--goal GOAL]
-                           [--session SESSION] [--evaluation EVALUATION]
-                           [--snapshot SNAPSHOT]
+usage: ozagia-tasks report [-h] [--root ROOT] [--goal GOAL] [--session SESSION]
+                           [--evaluation EVALUATION] [--snapshot SNAPSHOT]
                            [--criterion-freshness ID=STATE]
                            [--max-bytes MAX_BYTES] [--json]
                            [run]

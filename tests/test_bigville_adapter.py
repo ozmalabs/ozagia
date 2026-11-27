@@ -332,3 +332,84 @@ def test_scenario_mentions_resolve_by_path_and_refresh_created_deleted_manifests
                    and edge["type"] == "mentions_scenario"
                    and edge["tgt"] == first_node["id"]
                    for edge in memory.edges)
+
+
+def test_bigville_adapter_emits_declared_ocelot_dynamic_bridge(
+        tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "bigville"
+    _write(
+        root / "bigville" / "backends" / "ocelot.py",
+        "from importlib import import_module\n"
+        "\n"
+        "\n"
+        "def load_adapter():\n"
+        "    return import_module(\"worlds.bigville_ocelot_adapter\")\n")
+    _write(
+        root / "tests" / "test_bigville_ocelot_fresh_process.py",
+        "def test_adapter():\n"
+        "    assert \"worlds.bigville_ocelot_adapter\"\n")
+
+    adapter_dir = Path(__file__).resolve().parents[1] / "addins"
+    monkeypatch.syspath_prepend(str(adapter_dir))
+    monkeypatch.setenv("OZAGIA_ADAPTERS", "bigville_adapter:register")
+    monkeypatch.delenv("OZAGIA_CONFIG", raising=False)
+    monkeypatch.setattr(memory_module, "SOURCE_DIRS", (".",))
+    monkeypatch.setattr(memory_module, "TEST_DIRS", ("tests",))
+    monkeypatch.setattr(memory_module, "DOC_GLOBS", ())
+    dump = tmp_path / "snapshot.json"
+    build_index(root, dump, include_docs="none", include_git=False)
+    memory = DevMemory(dump, tmp_path / "journal.jsonl", root=root)
+
+    node_id = memory.node_by_key(
+        "repo_bridge:bigville::ocelot::dynamic_import::"
+        "worlds.bigville_ocelot_adapter")
+    assert node_id is not None
+    node = memory.nodes[node_id]
+    assert node["type"] == "RepoBridge"
+    assert node["attrs"] == {
+        "source_repo": "bigville",
+        "target_repo": "ocelot",
+        "relation": "dynamic_import",
+        "provenance": ("Bigville's ocelot backend dynamically imports "
+                       "Ocelot's Bigville resident adapter"),
+        "evidence": [
+            {"path": "bigville/backends/ocelot.py", "line": 5},
+            {"path": "tests/test_bigville_ocelot_fresh_process.py", "line": 2},
+        ],
+        "explicit": True,
+        "symbol": "worlds.bigville_ocelot_adapter",
+    }
+    repo = memory.node_by_key("repo:")
+    assert any(edge["src"] == repo
+               and edge["type"] == "declares_repo_bridge"
+               and edge["tgt"] == node_id
+               for edge in memory.edges)
+    assert memory.stats()["repo"]["repo_bridges"] == 1
+    assert not (tmp_path / "ocelot").exists()
+
+
+def test_bigville_adapter_does_not_guess_a_bridge_from_other_imports(
+        tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "bigville"
+    _write(
+        root / "bigville" / "backends" / "ocelot.py",
+        "from importlib import import_module\n"
+        "\n"
+        "\n"
+        "def load_adapter():\n"
+        "    return import_module(\"somewhere.else\")\n")
+
+    adapter_dir = Path(__file__).resolve().parents[1] / "addins"
+    monkeypatch.syspath_prepend(str(adapter_dir))
+    monkeypatch.setenv("OZAGIA_ADAPTERS", "bigville_adapter:register")
+    monkeypatch.delenv("OZAGIA_CONFIG", raising=False)
+    monkeypatch.setattr(memory_module, "SOURCE_DIRS", (".",))
+    monkeypatch.setattr(memory_module, "TEST_DIRS", ("tests",))
+    monkeypatch.setattr(memory_module, "DOC_GLOBS", ())
+    dump = tmp_path / "snapshot.json"
+    build_index(root, dump, include_docs="none", include_git=False)
+    memory = DevMemory(dump, tmp_path / "journal.jsonl", root=root)
+
+    assert not [node for node in memory.nodes.values()
+                if node["type"] == "RepoBridge"]
+    assert "repo_bridges" not in memory.stats()["repo"]

@@ -1,0 +1,308 @@
+{
+  "evaluation": "family-aware federation search",
+  "date": "2026-11-27",
+  "kind": "fixture-level mechanism check",
+  "default_behavior": "family_boost=False; lexical ranking unchanged",
+  "boost": 0.15,
+  "rank_limit": 20,
+  "sample_size": {
+    "queries": 5,
+    "family_queries": 4,
+    "control_queries": 1
+  },
+  "arms": {
+    "baseline": {
+      "family_boost": false
+    },
+    "family_boost": {
+      "family_boost": true
+    }
+  },
+  "aggregate": {
+    "all": {
+      "baseline": {
+        "queries": 5,
+        "hit@1": 0.2,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 0.6
+      },
+      "family_boost": {
+        "queries": 5,
+        "hit@1": 1.0,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 1.0
+      },
+      "delta": {
+        "hit@1": 0.8,
+        "hit@3": 0.0,
+        "hit@5": 0.0,
+        "mrr": 0.4
+      }
+    },
+    "family": {
+      "baseline": {
+        "queries": 4,
+        "hit@1": 0.0,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 0.5
+      },
+      "family_boost": {
+        "queries": 4,
+        "hit@1": 1.0,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 1.0
+      },
+      "delta": {
+        "hit@1": 1.0,
+        "hit@3": 0.0,
+        "hit@5": 0.0,
+        "mrr": 0.5
+      }
+    },
+    "control": {
+      "baseline": {
+        "queries": 1,
+        "hit@1": 1.0,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 1.0
+      },
+      "family_boost": {
+        "queries": 1,
+        "hit@1": 1.0,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 1.0
+      },
+      "delta": {
+        "hit@1": 0.0,
+        "hit@3": 0.0,
+        "hit@5": 0.0,
+        "mrr": 0.0
+      }
+    }
+  },
+  "queries": [
+    {
+      "id": "cache-eviction",
+      "kind": "family",
+      "query": "cache eviction policy warm tier ceiling clock",
+      "answer": "family-member::doc:family-cache",
+      "lexical_competitor": "distractor::doc:distractor-cache",
+      "baseline": {
+        "rank": 2,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 0.5
+      },
+      "family_boost": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "delta_rank": -1,
+      "delta_reciprocal_rank": 0.5
+    },
+    {
+      "id": "ledger-close",
+      "kind": "family",
+      "query": "ledger reconcile journal audit close period window",
+      "answer": "family-member::doc:family-ledger",
+      "lexical_competitor": "distractor::doc:distractor-ledger",
+      "baseline": {
+        "rank": 2,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 0.5
+      },
+      "family_boost": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "delta_rank": -1,
+      "delta_reciprocal_rank": 0.5
+    },
+    {
+      "id": "deploy-rollout",
+      "kind": "family",
+      "query": "deploy rollout canary region weight health probe",
+      "answer": "family-member::doc:family-deploy",
+      "lexical_competitor": "distractor::doc:distractor-deploy",
+      "baseline": {
+        "rank": 2,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 0.5
+      },
+      "family_boost": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "delta_rank": -1,
+      "delta_reciprocal_rank": 0.5
+    },
+    {
+      "id": "search-shards",
+      "kind": "family",
+      "query": "search index shard merge segment latency vector",
+      "answer": "family-member::doc:family-search",
+      "lexical_competitor": "distractor::doc:distractor-search",
+      "baseline": {
+        "rank": 2,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 0.5
+      },
+      "family_boost": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "delta_rank": -1,
+      "delta_reciprocal_rank": 0.5
+    },
+    {
+      "id": "telemetry-control",
+      "kind": "control",
+      "query": "telemetry span sampler tail export budget quota",
+      "answer": "distractor::doc:distractor-telemetry",
+      "lexical_competitor": null,
+      "baseline": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "family_boost": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "delta_rank": 0,
+      "delta_reciprocal_rank": 0.0
+    }
+  ],
+  "fixture_checks": {
+    "passed": true,
+    "checks": [
+      {
+        "id": "cache-eviction",
+        "check": "baseline ranks the family answer below the distractor",
+        "passed": true,
+        "observed_rank": 2
+      },
+      {
+        "id": "cache-eviction",
+        "check": "family boost ranks the family answer first",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "cache-eviction",
+        "check": "both hits remain visible after the re-rank",
+        "passed": true,
+        "observed_hits": 2
+      },
+      {
+        "id": "ledger-close",
+        "check": "baseline ranks the family answer below the distractor",
+        "passed": true,
+        "observed_rank": 2
+      },
+      {
+        "id": "ledger-close",
+        "check": "family boost ranks the family answer first",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "ledger-close",
+        "check": "both hits remain visible after the re-rank",
+        "passed": true,
+        "observed_hits": 2
+      },
+      {
+        "id": "deploy-rollout",
+        "check": "baseline ranks the family answer below the distractor",
+        "passed": true,
+        "observed_rank": 2
+      },
+      {
+        "id": "deploy-rollout",
+        "check": "family boost ranks the family answer first",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "deploy-rollout",
+        "check": "both hits remain visible after the re-rank",
+        "passed": true,
+        "observed_hits": 2
+      },
+      {
+        "id": "search-shards",
+        "check": "baseline ranks the family answer below the distractor",
+        "passed": true,
+        "observed_rank": 2
+      },
+      {
+        "id": "search-shards",
+        "check": "family boost ranks the family answer first",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "search-shards",
+        "check": "both hits remain visible after the re-rank",
+        "passed": true,
+        "observed_hits": 2
+      },
+      {
+        "id": "telemetry-control",
+        "check": "control answer is first in both arms",
+        "passed": true,
+        "observed_rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "id": "telemetry-control",
+        "check": "control metrics are unchanged by the family arm",
+        "passed": true
+      }
+    ]
+  },
+  "decision": {
+    "default": "off",
+    "reason": "Fixture-level gain only; the default stays off until a paired evaluation on real repositories and queries shows no regression and a meaningful gain."
+  },
+  "limits": [
+    "Three temporary synthetic snapshots and five frozen queries; this is a fixture-level mechanism check, not evidence of general retrieval benefit.",
+    "The four family queries were constructed with a 1/7 lexical gap that the bounded +0.15 boost can close. They verify the mechanism, not that families improve real queries.",
+    "The control query is already lexically decisive; it checks that the family arm does not disturb it.",
+    "Lexical search only: no embeddings, parsers, adapters, target repositories, network access or model calls.",
+    "The default remains family_boost=False. Enabling it requires a separate paired evaluation on real repositories and queries."
+  ]
+}

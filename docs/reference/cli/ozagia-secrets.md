@@ -27,8 +27,7 @@ usage: python -m ozagia.secrets_cli providers [-h] [--root ROOT] [--json]
 ## `ozagia-secrets list`
 
 ```
-usage: python -m ozagia.secrets_cli list [-h] [--root ROOT]
-                                         [--session SESSION]
+usage: python -m ozagia.secrets_cli list [-h] [--root ROOT] [--session SESSION]
                                          [--harness HARNESS] [--json]
 ```
 
@@ -42,8 +41,7 @@ usage: python -m ozagia.secrets_cli list [-h] [--root ROOT]
 ## `ozagia-secrets check`
 
 ```
-usage: python -m ozagia.secrets_cli check [-h] [--root ROOT]
-                                          [--session SESSION]
+usage: python -m ozagia.secrets_cli check [-h] [--root ROOT] [--session SESSION]
                                           [--harness HARNESS] [--json]
                                           REF [REF ...]
 ```
@@ -162,8 +160,8 @@ usage: python -m ozagia.secrets_cli decline [-h] [--root ROOT]
 ```
 usage: python -m ozagia.secrets_cli capture [-h] [--root ROOT]
                                             [--session SESSION]
-                                            [--harness HARNESS]
-                                            [--label LABEL] [--ttl S] [--json]
+                                            [--harness HARNESS] [--label LABEL]
+                                            [--ttl S] [--json]
 ```
 
 | option | type | values | default | help |

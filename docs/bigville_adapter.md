@@ -74,7 +74,10 @@ this invocation. The graph includes `Repo -has_scenario-> Scenario`,
 `Scenario -references_seed_manifest-> BigvilleSeedManifest`,
 `BigvilleSeedManifest -declares_dependency_candidate-> BigvilleSeedManifest`,
 `Pack -contains_table-> PackTable`, and route evidence edges from client and
-server files. `bigville_scenarios` lists scenario summaries,
+server files. When the Ocelot runtime import is present it also includes
+`Repo -declares_repo_bridge-> RepoBridge`; see
+[Adapter-declared dynamic bridge](#adapter-declared-dynamic-bridge).
+`bigville_scenarios` lists scenario summaries,
 `bigville_seed_manifests` lists path-distinct seed records (filter with
 `seed_id="..."` or `path_prefix="bigville/seeds/"`), and `bigville_routes`
 lists method, path, evidence grade and source files.
@@ -107,13 +110,145 @@ ozagia federation search "bigville scenario" \
 
 The first command intentionally writes an Ozagia graph in Bigville's state
 directory and is an opt-in setup; the command in the previous section remains
-the read-only recipe. If repeated membership is useful, declare Bigville under
-`members` in the Ocelot anchor's `.ozagia/federation.json`. Keep it out of
-`reference_repos`, which authorizes network fetch and fast-forward attempts.
+the read-only recipe. Keep Bigville out of `reference_repos`, which authorizes
+network fetch and fast-forward attempts. The concrete Ocelot checkout currently
+has no graph snapshot, so it too must be indexed before it can contribute
+source nodes to federation.
+
 Federation joins indexed snapshots; it does not infer cross-repository code
-relationships. The Bigville ↔ Ocelot integration can still be recorded
-explicitly with `relationships` and `families` entries in the anchor's
-`.ozagia/federation.json` and inspected with `ozagia federation relations`.
-Those entries are provenance-bearing declarations, not inferred imports or
-runtime calls. The concrete Ocelot checkout currently has no graph snapshot,
-so it too must be indexed before it can contribute source nodes to federation.
+relationships. The dynamic Bigville ↔ Ocelot bridge is recorded explicitly in
+the anchor's `.ozagia/federation.json` with `relationships` and `families`,
+then inspected with `ozagia federation relations` (the same report appears as
+`repository_relations` in `ozagia federation check`):
+
+```json
+{
+  "version": 1,
+  "members": [
+    {"path": "../bigville", "id": "bigville"}
+  ],
+  "relationships": [
+    {
+      "source": "bigville",
+      "target": "ocelot",
+      "relation": "uses",
+      "provenance": "Bigville's ocelot backend loads Ocelot's Bigville resident provider",
+      "evidence": ["bigville/backends/ocelot.py",
+                   "tests/test_bigville_ocelot_fresh_process.py"]
+    },
+    {
+      "source": "ocelot",
+      "target": "bigville",
+      "relation": "plugin_for",
+      "provenance": "Ocelot supplies the Bigville world adapter that backend loads",
+      "evidence": ["worlds/bigville_ocelot_adapter.py",
+                   "docs/features/bigville.md"]
+    }
+  ],
+  "families": [
+    {
+      "id": "simulation-stack",
+      "label": "Bigville/Ocelot simulation stack",
+      "members": ["bigville", "ocelot"],
+      "provenance": "reviewed integration map; declared bridge, not a build dependency"
+    }
+  ],
+  "links": []
+}
+```
+
+Here Ocelot is the anchor, so it is selected automatically and is not repeated
+in `members`; its alias `ocelot` is derived from the checkout name. Only
+Bigville is declared, with a stable id; both relationships use the derived
+`ocelot` alias as the Ocelot endpoint. With the checkouts at
+`/applications/data/projects/bigville` and `/applications/data/projects/ocelot`,
+`../bigville` resolves from the Ocelot anchor to the Bigville checkout. The
+anchor still needs its own `.ozagia/graph.json`. Inspect the declarations with:
+
+```sh
+ozagia federation relations --root /applications/data/projects/ocelot --no-sync
+```
+
+Do not add `--repo` when relying on the declared `bigville` id: explicit roots
+ignore manifest ids and fall back to derived checkout aliases, which may differ
+from the declared ids. A separate workspace anchor can instead declare both
+members, but it must be indexed too. Each edge's evidence strings are
+repository-relative to its source member and are recorded, not fetched. Both
+directions above are maintainer assertions: `bigville uses ocelot` records the
+backend/provider bridge, and `ocelot plugin_for bigville` records that Ocelot
+supplies the adapter Bigville loads. These declared edges do not create a static
+code import edge, package dependency, runtime call or deployment claim; the
+adapter's separate `RepoBridge` record documents the dynamic import explicitly
+below. The reverse edge is an integration relation, so it does not form a
+dependency cycle or change `order`, `levels` or `reverse_dependencies`; the
+family groups the repositories without adding an edge.
+
+### Adapter-declared dynamic bridge
+
+The adapter also records the runtime import as an explicit snapshot node. When
+Bigville is indexed, `index_repo_bridges` looks for the exact
+`import_module("worlds.bigville_ocelot_adapter")` call in
+`bigville/backends/ocelot.py` and a matching module reference in
+`tests/test_bigville_ocelot_fresh_process.py`. If the backend declaration is
+present, the adapter calls `add_repo_bridge` and emits:
+
+```json
+{
+  "type": "RepoBridge",
+  "key": "repo_bridge:bigville::ocelot::dynamic_import::worlds.bigville_ocelot_adapter",
+  "attrs": {
+    "source_repo": "bigville",
+    "target_repo": "ocelot",
+    "relation": "dynamic_import",
+    "provenance": "Bigville's ocelot backend dynamically imports Ocelot's Bigville resident adapter",
+    "evidence": [
+      {"path": "bigville/backends/ocelot.py", "line": 15},
+      {"path": "tests/test_bigville_ocelot_fresh_process.py", "line": 62}
+    ],
+    "symbol": "worlds.bigville_ocelot_adapter",
+    "explicit": true
+  }
+}
+```
+
+Line numbers are recorded from the files the adapter actually read; they are
+illustrative here and can move. The helper reads nothing itself, and the adapter
+never reads or imports the Ocelot checkout: `worlds.bigville_ocelot_adapter` is
+recorded as a symbol string. If the import declaration is absent, no bridge
+node is emitted. The adapter recognizes this one known integration; it does
+not turn arbitrary dynamic imports into repository relations.
+
+A federation report over selected `bigville` and `ocelot` members accepts the
+bridge as a separate integration edge:
+
+```json
+"edges": [
+  {"source": "bigville", "target": "ocelot", "relation": "dynamic_import",
+   "kind": "integration", "origin": "adapter_bridge", "explicit": true,
+   "provenance": ["Bigville's ocelot backend dynamically imports Ocelot's Bigville resident adapter"],
+   "evidence": [{"path": "bigville/backends/ocelot.py", "line": 15},
+                {"path": "tests/test_bigville_ocelot_fresh_process.py", "line": 62}],
+   "members": ["bigville"],
+   "symbol": "worlds.bigville_ocelot_adapter"}
+],
+"dependencies": [],
+"cycles": [],
+"bridges": {"state": "ok", "counts": {"nodes": 1, "edges": 1,
+                                      "unpaired": 0, "errors": 0}}
+```
+
+The bridge stays out of `dependencies`, cycles, `order`, `levels` and
+`reverse_dependencies`. If Ocelot is not indexed or not selected, the report
+lists the target under `bridges.unpaired` with
+`reason: "target_not_selected"` and creates no fake member or edge. The bridge
+records evidence for a dynamic import; it does not prove that Ocelot was
+installed, that the import succeeded, or that the runtime contract is
+compatible.
+
+Bigville's browser/API navigation remains bounded route evidence: the adapter
+matches literal client requests and server path checks and labels a client-only
+request `client_only_unverified`. It emits no OpenAPI operation or `ApiMapping`
+nodes, and neither checkout currently supplies an indexed OpenAPI contract or
+explicit mapping. The federation API section (`apis`) therefore stays `absent`
+for this example until such evidence is indexed; route evidence alone does not
+create API producer/consumer/test relationships.

@@ -31,8 +31,8 @@ usage: ozagia-resources status [-h] [--root ROOT] [--path PATH] [--top TOP]
 ```
 usage: ozagia-resources check [-h] [--for {job,task,worktree}]
                               [--memory-mb MEMORY_MB] [--disk-mb DISK_MB]
-                              [--path PATH] [--key KEY]
-                              [--freeing MEM_MB:ETA_S] [--root ROOT] [--json]
+                              [--path PATH] [--key KEY] [--freeing MEM_MB:ETA_S]
+                              [--root ROOT] [--json]
 ```
 
 | option | type | values | default | help |
@@ -65,8 +65,7 @@ usage: ozagia-resources history [-h] [--key KEY] [--limit LIMIT] [--root ROOT]
 ```
 usage: ozagia-resources explain [-h] [--for {job,task,worktree}]
                                 [--memory-mb MEMORY_MB] [--disk-mb DISK_MB]
-                                [--path PATH] [--key KEY] [--root ROOT]
-                                [--json]
+                                [--path PATH] [--key KEY] [--root ROOT] [--json]
 ```
 
 | option | type | values | default | help |
@@ -192,8 +191,7 @@ usage: ozagia-resources grants release [-h] [--apply]
 ```
 usage: ozagia-resources grants status [-h]
                                       [--status {active,released,expired,orphaned}]
-                                      [--grant GRANT_ID] [--root ROOT]
-                                      [--json]
+                                      [--grant GRANT_ID] [--root ROOT] [--json]
 ```
 
 | option | type | values | default | help |

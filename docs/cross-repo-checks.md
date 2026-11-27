@@ -2,7 +2,8 @@
 
 `ozagia.core.cross_repo.check(root, roots=None)` returns a JSON-serializable
 report over the selected existing federation snapshots. It uses only
-explicit links in the anchor's `.ozagia/federation.json`; it does not match
+explicit links and family/relationship declarations in the anchor's
+`.ozagia/federation.json` plus declared package manifests; it does not match
 names or invent relationships. `roots` follows federation selection rules.
 Each result includes qualified endpoints, relation, source manifest and
 provenance. Endpoints use a member's declared stable id when the anchor
@@ -68,3 +69,31 @@ separate from the API/configuration checks: a dependency result does not make
 the API `overall` verdict pass or fail, and snapshot freshness is reported per
 member without changing a manifest-derived version verdict. No lockfile
 resolution, package manager, network call or member write occurs.
+
+## Repository relationships
+
+`cross_repo.check` also includes `repository_relations`, a repository-level
+view built from optional `relationships`/`families` declarations in the anchor
+manifest, resolved package rows above, and explicit `ApiMapping` nodes in the
+member snapshots. It reports declared family/lineage/integration edges,
+package-derived consumer → provider edges, contract-first API references,
+producer/consumer/test API edges, dependency cycles, a topological order,
+levels and reverse dependencies.
+`ozagia federation relations` and
+`ozagia.core.repo_relations.check(root, roots=None)` expose the relationship
+report without the API/configuration checks. `cross_repo.check` embeds the
+same relationship sections as `repository_relations`, but its
+`repository_relations.members[].state` values can be reference sync states
+(`sync_error`, `sync_pending`, `index_stale`, `sync_unknown`) in addition to
+freshness states; the standalone report uses federation freshness states only.
+Only declared `depends_on` /
+`dev_depends_on` and package-manifest edges feed `dependencies`, `cycles`,
+`order`, `levels` and `reverse_dependencies`. Integration declarations such as
+`uses` and `plugin_for`, and every `produces_api` / `consumes_api` / `tests_api`
+mapping edge, remain descriptive evidence and never create a build cycle or
+reorder members. Like `dependency_links`, this section is
+static evidence: it does not change the API `overall` verdict and does not
+infer edges from names, dynamic imports, Git remotes, search results or
+transitive package resolution. See
+[repository relationships](federation.md#repository-relationships) for the
+manifest shape and limits.

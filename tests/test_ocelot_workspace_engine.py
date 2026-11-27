@@ -153,6 +153,17 @@ def test_substrate_tick():
 def test_substrate_version():
     assert substrate_rs.substrate_version() == "fixture"
 """)
+    _write(root / "domains" / "conway.py", "def step(cell):\n    return cell\n")
+    _write(root / "domains_rs" / "conway.py",
+           "def step(cell):\n    return cell\n")
+    _write(root / "tests" / "test_conway_parity.py", """\
+from domains.conway import step as py_step
+from domains_rs.conway import step as rs_step
+
+
+def test_conway_parity():
+    assert py_step(1) == rs_step(1)
+""")
     return root
 
 
@@ -332,6 +343,19 @@ def test_rust_impact_for_path_and_primitive(
     assert {"ShapeDecode", "Count", "Latent", "alias_wire"} <= set(
         terms["terms"])
     assert "demo" in terms["seeds"]
+
+
+def test_rs_parity_pairs_domains_rs_with_domains(
+        engine_repo: tuple[Path, DevMemory]) -> None:
+    _root, mem = engine_repo
+    result = workspace_engine.engine_summary(mem, op="rs_parity")
+    assert result["ok"] is True
+    assert result["count"] == 1
+    pair = result["pairs"][0]
+    assert pair["module"] == "conway"
+    assert pair["status"] == "paired"
+    assert pair["domains_path"] == "domains/conway.py"
+    assert "tests/test_conway_parity.py" in pair["tests"]
 
 
 def test_term_census(engine_repo: tuple[Path, DevMemory]) -> None:

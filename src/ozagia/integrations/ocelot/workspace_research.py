@@ -50,6 +50,10 @@ MAX_LINKS_PER_DOC = 100
 MAX_TOTAL_LINKS = 5_000
 MAX_INDEX_ERRORS = 20
 MAX_SUMMARY_NODES = 200
+LEDGER_FILE = "VISION_PROTOCOL.md"
+LEDGER_HEADING_RE = re.compile(r"^##\s+Burned-seed ledger\b.*$", re.I | re.M)
+LEDGER_RANGE_RE = re.compile(r"(\d+)\s*[-\u2013\u2014]\s*(\d+)\b")
+LEDGER_NUMBER_RE = re.compile(r"(?<!\d)(\d+)(?!\d)")
 
 KIND_BY_SUFFIX = (
     ("_PREREG.MD", "prereg"),
@@ -559,6 +563,83 @@ def research_summary(memory: Any, target: str) -> dict[str, Any]:
     return result
 
 
+def _ledger_ranges(root: Path) -> tuple[list[dict[str, Any]], str | None]:
+    path = root / LEDGER_FILE
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [], f"{LEDGER_FILE}: {exc}"
+    heading = LEDGER_HEADING_RE.search(text)
+    if heading is None:
+        return [], f"{LEDGER_FILE}: burned-seed ledger heading not found"
+    rest = text[heading.end():]
+    end = re.search(r"^##\s+", rest, re.M)
+    section = rest[:end.start()] if end else rest
+    rows: list[dict[str, Any]] = []
+    for number, line in enumerate(section.splitlines(), start=1):
+        if not line.lstrip().startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 2 or cells[0].lower() == "range":
+            continue
+        spans: list[tuple[int, int]] = []
+        for match in LEDGER_RANGE_RE.finditer(cells[0]):
+            lo, hi = int(match.group(1)), int(match.group(2))
+            if lo <= hi:
+                spans.append((lo, hi))
+        remainder = LEDGER_RANGE_RE.sub(" ", cells[0])
+        for match in LEDGER_NUMBER_RE.finditer(remainder):
+            value = int(match.group(1))
+            spans.append((value, value))
+        if spans:
+            rows.append({"ranges": spans, "used_for": cells[1],
+                         "line": number + text[:heading.end()].count("\n")})
+    return rows, None
+
+
+def claim_check(memory: Any, lo: int, hi: int) -> dict[str, Any]:
+    """Advisory overlap check against VISION_PROTOCOL's burned-seed table.
+
+    This reads the declared ledger only. The measured-draw scanner and the
+    RNG-stream caveats remain Ocelot's `scripts/seed_claim.py`.
+    """
+    try:
+        lo, hi = int(lo), int(hi)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "lo and hi must be integers",
+                "available": True, "conflicts": []}
+    if lo > hi:
+        return {"ok": False, "error": "lo must not exceed hi",
+                "available": True, "conflicts": []}
+    rows, error = _ledger_ranges(_root(memory))
+    if error:
+        return {"ok": True, "available": False, "state": "unknown",
+                "requested": {"lo": lo, "hi": hi}, "conflicts": [],
+                "rows_scanned": 0, "error": error,
+                "note": "the declared ledger could not be read; no collision "
+                        "was detected, which is not proof the range is free"}
+    conflicts = []
+    for row in rows:
+        for start, end in row["ranges"]:
+            if max(lo, start) <= min(hi, end):
+                conflicts.append({
+                    "range": [start, end],
+                    "used_for": row["used_for"],
+                    "line": row["line"],
+                })
+                break
+    return {
+        "ok": not conflicts,
+        "available": True,
+        "state": "conflict" if conflicts else "clean",
+        "requested": {"lo": lo, "hi": hi},
+        "conflicts": conflicts[:50],
+        "rows_scanned": len(rows),
+        "note": ("declared ledger only; Ocelot's seed_claim.py measures actual "
+                 "draws and reports its own blind spots"),
+    }
+
+
 def research_census(memory: Any) -> dict[str, Any]:
     """Counts and missing links across every indexed research document."""
     root = _root(memory)
@@ -632,6 +713,28 @@ RESEARCH_TOOL = {
 }
 
 
+CLAIM_TOOL = {
+    "name": "ocelot_claim_check",
+    "description": (
+        "Advisory overlap check against VISION_PROTOCOL.md's declared "
+        "burned-seed ranges. Reads the ledger only; Ocelot's seed_claim.py "
+        "remains the measured-draw authority."),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "lo": {"type": "integer"},
+            "hi": {"type": "integer"},
+        },
+        "required": ["lo", "hi"],
+        "additionalProperties": False,
+    },
+}
+
+
+def _tool_claim(memory: Any, args: Mapping[str, Any]) -> Any:
+    return claim_check(memory, args.get("lo"), args.get("hi"))
+
+
 def register_research(registry: Any) -> None:
     """Register the research indexer, graph queries and MCP tool."""
     if getattr(registry, "_ocelot_research_registered", False):
@@ -641,14 +744,20 @@ def register_research(registry: Any) -> None:
     registry.add_graph_query("ocelot_research", _query_research)
     registry.add_graph_query(
         "ocelot_research_census", lambda memory, **kw: research_census(memory))
+    registry.add_graph_query(
+        "ocelot_claim_check", lambda memory, **kw: claim_check(
+            memory, kw.get("lo"), kw.get("hi")))
     registry.add_mcp_tool(RESEARCH_TOOL, _tool_research)
+    registry.add_mcp_tool(CLAIM_TOOL, _tool_claim)
 
 
 __all__ = [
+    "CLAIM_TOOL",
     "MAX_RESEARCH_BYTES",
     "MAX_RESEARCH_FILES",
     "RESEARCH_GLOBS",
     "RESEARCH_TOOL",
+    "claim_check",
     "index_research",
     "register_research",
     "research_census",

@@ -149,6 +149,18 @@ Engine deadbeefcafe has no matching results.
 
 Block 999999 has no preregistration and no gate.
 """)
+    _write(root / "VISION_PROTOCOL.md", """\
+# Protocol
+
+## Burned-seed ledger (append; never reuse)
+
+| range | used for |
+|---|---|
+| 0–13 | calibration |
+| **123450–123499** | **consumed demo block** |
+
+## Next section
+""")
     return root, current
 
 
@@ -334,6 +346,7 @@ def test_register_research_indexer_queries_and_mcp_tool(
     assert inputs.texts is False
     assert "ocelot_research" in reg.graph_queries
     assert "ocelot_research_census" in reg.graph_queries
+    assert "ocelot_claim_check" in reg.graph_queries
 
     summary = mem.adapter_query("ocelot_research", target="123000")
     assert summary["ok"] is True
@@ -367,3 +380,29 @@ def test_register_research_indexer_queries_and_mcp_tool(
     payload = json.loads(response["result"]["content"][0]["text"])
     assert payload["docs"] == 6
     assert payload["missing_gates"] == [GAP_PREREG, ORPHAN_RESULTS]
+
+    claim_spec = next(tool for tool in tools
+                      if tool["name"] == "ocelot_claim_check")
+    assert set(claim_spec["inputSchema"]["required"]) == {"lo", "hi"}
+
+    response = server.handle({
+        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+        "params": {"name": "ocelot_claim_check",
+                   "arguments": {"lo": 123450, "hi": 123450}},
+    })
+    assert "error" not in response, response
+    payload = json.loads(response["result"]["content"][0]["text"])
+    assert payload["state"] == "conflict"
+    assert payload["conflicts"][0]["used_for"] == "**consumed demo block**"
+
+
+def test_claim_check_reads_declared_ledger_ranges(workspace) -> None:
+    _root, mem, _current = workspace
+    clean = WR.claim_check(mem, 7000, 7999)
+    assert clean["ok"] is True
+    assert clean["state"] == "clean"
+    conflict = WR.claim_check(mem, 123400, 123460)
+    assert conflict["ok"] is False
+    assert conflict["state"] == "conflict"
+    assert conflict["conflicts"][0]["range"] == [123450, 123499]
+    assert "calibration" not in conflict["conflicts"][0]["used_for"]

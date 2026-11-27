@@ -1,0 +1,806 @@
+{
+  "actual_affected_cases": 4,
+  "actual_full_cases": 2,
+  "actual_none_cases": 2,
+  "affected_cases": 4,
+  "budget_tests": 20,
+  "case_details": [
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "runners/dsl/python/substrate_rs/_native.abi3.so",
+        "runners/dsl/python/substrate_rs/_native.build.json",
+        "runners/dsl/src/jsonio.rs",
+        "runners/dsl/src/reflect.rs",
+        "runners/dsl/src/rewrite.rs",
+        "runners/dsl/src/shape.rs",
+        "runners/dsl/src/shape_decode.rs",
+        "runners/dsl/src/term.rs",
+        "runners/dsl/src/term_variants.rs",
+        "scripts/gen_sd_rearm_and_closest_shape.py",
+        "seeds/shape_decode_loop.json",
+        "tests/test_affect_frame_v02.py",
+        "tests/test_agnosia_migrated.py",
+        "tests/test_det1_migrated.py",
+        "tests/test_sd_rearm_closest_shape_migrated.py"
+      ],
+      "commands": [
+        "bash scripts/engine_cargo_test.sh --lib -- --test-threads=1",
+        "python3 -m pytest tests -k migrated -q"
+      ],
+      "covered": true,
+      "engine_rebuild": true,
+      "expected_count": 4,
+      "expected_mode": "full",
+      "expected_tests": [
+        "tests/test_affect_frame_v02.py",
+        "tests/test_agnosia_migrated.py",
+        "tests/test_det1_migrated.py",
+        "tests/test_sd_rearm_closest_shape_migrated.py"
+      ],
+      "full_gate": true,
+      "full_reasons": [
+        "runners/dsl/python/substrate_rs/_native.abi3.so: unclassified path",
+        "runners/dsl/python/substrate_rs/_native.build.json: unclassified path",
+        "seed shape_decode_loop is core (fan-out 22)",
+        "selected 1118 test files (cap 250)"
+      ],
+      "missed": [],
+      "mode": "full",
+      "name": "a6eb3a60 sd re-arm + ClosestShape (engine, block 371000)",
+      "plan_ok": true,
+      "plan_warnings": [
+        "scripts/gen_sd_rearm_and_closest_shape.py: no test link in the graph"
+      ],
+      "recall": null,
+      "selected": [
+        "runners/dsl/src/full_stack_integration.rs",
+        "runners/dsl/src/l1_hot_paths.rs",
+        "runners/dsl/src/py.rs",
+        "tests/capability/minting/test_recurrence_control.py",
+        "tests/evaluation/test_native_graph_capture.py",
+        "tests/evaluation/test_os_isolation_integration.py",
+        "tests/test_2d_motion_salience_migrated.py",
+        "tests/test_2d_retina_migrated.py",
+        "tests/test_abusive_r1_migrated.py",
+        "tests/test_achromatopsia_migrated.py",
+        "tests/test_acronym_context_migrated.py",
+        "tests/test_acronym_grounding_migrated.py",
+        "tests/test_acting_variant.py",
+        "tests/test_action_affinities_migrated.py",
+        "tests/test_action_evidence_and_defer.py",
+        "tests/test_action_object_exploration_migrated.py",
+        "tests/test_active_aero_motor_program_migrated.py",
+        "tests/test_active_exploration_migrated.py",
+        "tests/test_active_frame_production.py",
+        "tests/test_actor_goals_migrated.py"
+      ],
+      "selected_count": 20,
+      "selected_tests": [
+        "runners/dsl/src/full_stack_integration.rs",
+        "runners/dsl/src/l1_hot_paths.rs",
+        "runners/dsl/src/py.rs",
+        "tests/capability/minting/test_recurrence_control.py",
+        "tests/evaluation/test_native_graph_capture.py",
+        "tests/evaluation/test_os_isolation_integration.py",
+        "tests/test_2d_motion_salience_migrated.py",
+        "tests/test_2d_retina_migrated.py",
+        "tests/test_abusive_r1_migrated.py",
+        "tests/test_achromatopsia_migrated.py",
+        "tests/test_acronym_context_migrated.py",
+        "tests/test_acronym_grounding_migrated.py",
+        "tests/test_acting_variant.py",
+        "tests/test_action_affinities_migrated.py",
+        "tests/test_action_evidence_and_defer.py",
+        "tests/test_action_object_exploration_migrated.py",
+        "tests/test_active_aero_motor_program_migrated.py",
+        "tests/test_active_exploration_migrated.py",
+        "tests/test_active_frame_production.py",
+        "tests/test_actor_goals_migrated.py"
+      ],
+      "selected_total": 1118,
+      "selected_truncated": true
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "runners/dsl/python/substrate_rs/_native.abi3.so",
+        "runners/dsl/python/substrate_rs/_native.build.json",
+        "runners/dsl/src/shape_decode.rs",
+        "tests/test_similarity_migrated.py"
+      ],
+      "commands": [
+        "bash scripts/engine_cargo_test.sh --lib -- --test-threads=1",
+        "python3 -m pytest tests -k migrated -q"
+      ],
+      "covered": true,
+      "engine_rebuild": true,
+      "expected_count": 1,
+      "expected_mode": "full",
+      "expected_tests": [
+        "tests/test_similarity_migrated.py"
+      ],
+      "full_gate": true,
+      "full_reasons": [
+        "runners/dsl/python/substrate_rs/_native.abi3.so: unclassified path",
+        "runners/dsl/python/substrate_rs/_native.build.json: unclassified path",
+        "selected 1113 test files (cap 250)"
+      ],
+      "missed": [],
+      "mode": "full",
+      "name": "64ce1af6 selector audit + similarity alias (engine, block 371000)",
+      "plan_ok": true,
+      "plan_warnings": [],
+      "recall": null,
+      "selected": [
+        "runners/dsl/src/full_stack_integration.rs",
+        "runners/dsl/src/l1_hot_paths.rs",
+        "runners/dsl/src/py.rs",
+        "tests/capability/minting/test_recurrence_control.py",
+        "tests/evaluation/test_native_graph_capture.py",
+        "tests/evaluation/test_os_isolation_integration.py",
+        "tests/test_2d_motion_salience_migrated.py",
+        "tests/test_2d_retina_migrated.py",
+        "tests/test_abusive_r1_migrated.py",
+        "tests/test_achromatopsia_migrated.py",
+        "tests/test_acronym_context_migrated.py",
+        "tests/test_acronym_grounding_migrated.py",
+        "tests/test_acting_variant.py",
+        "tests/test_action_affinities_migrated.py",
+        "tests/test_action_evidence_and_defer.py",
+        "tests/test_action_object_exploration_migrated.py",
+        "tests/test_active_aero_motor_program_migrated.py",
+        "tests/test_active_exploration_migrated.py",
+        "tests/test_active_frame_production.py",
+        "tests/test_actor_goals_migrated.py"
+      ],
+      "selected_count": 20,
+      "selected_tests": [
+        "runners/dsl/src/full_stack_integration.rs",
+        "runners/dsl/src/l1_hot_paths.rs",
+        "runners/dsl/src/py.rs",
+        "tests/capability/minting/test_recurrence_control.py",
+        "tests/evaluation/test_native_graph_capture.py",
+        "tests/evaluation/test_os_isolation_integration.py",
+        "tests/test_2d_motion_salience_migrated.py",
+        "tests/test_2d_retina_migrated.py",
+        "tests/test_abusive_r1_migrated.py",
+        "tests/test_achromatopsia_migrated.py",
+        "tests/test_acronym_context_migrated.py",
+        "tests/test_acronym_grounding_migrated.py",
+        "tests/test_acting_variant.py",
+        "tests/test_action_affinities_migrated.py",
+        "tests/test_action_evidence_and_defer.py",
+        "tests/test_action_object_exploration_migrated.py",
+        "tests/test_active_aero_motor_program_migrated.py",
+        "tests/test_active_exploration_migrated.py",
+        "tests/test_active_frame_production.py",
+        "tests/test_actor_goals_migrated.py"
+      ],
+      "selected_total": 1113,
+      "selected_truncated": true
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "docs/research/psychology_affect/AFFECT_FRAME_V02_RESULTS.md",
+        "docs/research/psychology_affect/INDEX.md",
+        "scripts/build_affect_frame_seed.py",
+        "seeds/affect_frame.json",
+        "seeds/affect_frame_canonical.json",
+        "tests/test_affect_frame_codebook.py",
+        "tests/test_affect_frame_v02.py"
+      ],
+      "commands": [
+        "python3 -m pytest tests/test_affect_frame_codebook.py tests/test_affect_frame_v02.py tests/test_affect_map_reuse_gridcode.py -q"
+      ],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 2,
+      "expected_mode": "affected",
+      "expected_tests": [
+        "tests/test_affect_frame_codebook.py",
+        "tests/test_affect_frame_v02.py"
+      ],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "affected",
+      "name": "d3000ad5 Affect frame v0.2 (seed + script, block 370000)",
+      "plan_ok": true,
+      "plan_warnings": [
+        "scripts/build_affect_frame_seed.py: no test link in the graph"
+      ],
+      "recall": 1.0,
+      "selected": [
+        "tests/test_affect_frame_codebook.py",
+        "tests/test_affect_frame_v02.py",
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "selected_count": 3,
+      "selected_tests": [
+        "tests/test_affect_frame_codebook.py",
+        "tests/test_affect_frame_v02.py",
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "selected_total": 3,
+      "selected_truncated": false
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "docs/research/psychology_affect/AFFECT_DIRECTION_JUDGEMENT_RESULTS.md",
+        "docs/research/psychology_affect/INDEX.md",
+        "tests/test_affect_direction_judgement.py"
+      ],
+      "commands": [
+        "python3 -m pytest tests/test_affect_direction_judgement.py -q"
+      ],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 1,
+      "expected_mode": "affected",
+      "expected_tests": [
+        "tests/test_affect_direction_judgement.py"
+      ],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "affected",
+      "name": "77ba15a7 affect direction judgement (block 368000)",
+      "plan_ok": true,
+      "plan_warnings": [],
+      "recall": 1.0,
+      "selected": [
+        "tests/test_affect_direction_judgement.py"
+      ],
+      "selected_count": 1,
+      "selected_tests": [
+        "tests/test_affect_direction_judgement.py"
+      ],
+      "selected_total": 1,
+      "selected_truncated": false
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "docs/research/psychology_affect/AFFECT_MAP_REUSE_GRID_CODE_RESULTS.md",
+        "docs/research/psychology_affect/INDEX.md",
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "commands": [
+        "python3 -m pytest tests/test_affect_map_reuse_gridcode.py -q"
+      ],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 1,
+      "expected_mode": "affected",
+      "expected_tests": [
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "affected",
+      "name": "6ed6d3c5 affect map reuse + grid code (block 367000)",
+      "plan_ok": true,
+      "plan_warnings": [],
+      "recall": 1.0,
+      "selected": [
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "selected_count": 1,
+      "selected_tests": [
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "selected_total": 1,
+      "selected_truncated": false
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "tests/test_affect_frame_v02.py"
+      ],
+      "commands": [
+        "python3 -m pytest tests/test_affect_frame_v02.py -q"
+      ],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 1,
+      "expected_mode": "affected",
+      "expected_tests": [
+        "tests/test_affect_frame_v02.py"
+      ],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "affected",
+      "name": "c7fcde64 pin affect-frame G-0 range",
+      "plan_ok": true,
+      "plan_warnings": [],
+      "recall": 1.0,
+      "selected": [
+        "tests/test_affect_frame_v02.py"
+      ],
+      "selected_count": 1,
+      "selected_tests": [
+        "tests/test_affect_frame_v02.py"
+      ],
+      "selected_total": 1,
+      "selected_truncated": false
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "docs/research/engine_substrate/INDEX.md",
+        "docs/research/engine_substrate/SD_LOOP_REARM_AND_JSON_SIGNATURE_RESULTS.md"
+      ],
+      "commands": [],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 0,
+      "expected_mode": "none",
+      "expected_tests": [],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "none",
+      "name": "e67d7b73 block 371000 results only",
+      "plan_ok": true,
+      "plan_warnings": [
+        "documentation-only change: no pytest selected"
+      ],
+      "recall": null,
+      "selected": [],
+      "selected_count": 0,
+      "selected_tests": [],
+      "selected_total": 0,
+      "selected_truncated": false
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "docs/research/engine_substrate/INDEX.md",
+        "docs/research/engine_substrate/SD_LOOP_REARM_AND_JSON_SIGNATURE_PREREG.md",
+        "docs/research/engine_substrate/SD_LOOP_REARM_SCOPE.txt"
+      ],
+      "commands": [],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 0,
+      "expected_mode": "none",
+      "expected_tests": [],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "none",
+      "name": "1281a482 block 371000 preregistration only",
+      "plan_ok": true,
+      "plan_warnings": [
+        "documentation-only change: no pytest selected"
+      ],
+      "recall": null,
+      "selected": [],
+      "selected_count": 0,
+      "selected_tests": [],
+      "selected_total": 0,
+      "selected_truncated": false
+    }
+  ],
+  "cases": 8,
+  "covered_cases": 8,
+  "details": [
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "runners/dsl/python/substrate_rs/_native.abi3.so",
+        "runners/dsl/python/substrate_rs/_native.build.json",
+        "runners/dsl/src/jsonio.rs",
+        "runners/dsl/src/reflect.rs",
+        "runners/dsl/src/rewrite.rs",
+        "runners/dsl/src/shape.rs",
+        "runners/dsl/src/shape_decode.rs",
+        "runners/dsl/src/term.rs",
+        "runners/dsl/src/term_variants.rs",
+        "scripts/gen_sd_rearm_and_closest_shape.py",
+        "seeds/shape_decode_loop.json",
+        "tests/test_affect_frame_v02.py",
+        "tests/test_agnosia_migrated.py",
+        "tests/test_det1_migrated.py",
+        "tests/test_sd_rearm_closest_shape_migrated.py"
+      ],
+      "commands": [
+        "bash scripts/engine_cargo_test.sh --lib -- --test-threads=1",
+        "python3 -m pytest tests -k migrated -q"
+      ],
+      "covered": true,
+      "engine_rebuild": true,
+      "expected_count": 4,
+      "expected_mode": "full",
+      "expected_tests": [
+        "tests/test_affect_frame_v02.py",
+        "tests/test_agnosia_migrated.py",
+        "tests/test_det1_migrated.py",
+        "tests/test_sd_rearm_closest_shape_migrated.py"
+      ],
+      "full_gate": true,
+      "full_reasons": [
+        "runners/dsl/python/substrate_rs/_native.abi3.so: unclassified path",
+        "runners/dsl/python/substrate_rs/_native.build.json: unclassified path",
+        "seed shape_decode_loop is core (fan-out 22)",
+        "selected 1118 test files (cap 250)"
+      ],
+      "missed": [],
+      "mode": "full",
+      "name": "a6eb3a60 sd re-arm + ClosestShape (engine, block 371000)",
+      "plan_ok": true,
+      "plan_warnings": [
+        "scripts/gen_sd_rearm_and_closest_shape.py: no test link in the graph"
+      ],
+      "recall": null,
+      "selected": [
+        "runners/dsl/src/full_stack_integration.rs",
+        "runners/dsl/src/l1_hot_paths.rs",
+        "runners/dsl/src/py.rs",
+        "tests/capability/minting/test_recurrence_control.py",
+        "tests/evaluation/test_native_graph_capture.py",
+        "tests/evaluation/test_os_isolation_integration.py",
+        "tests/test_2d_motion_salience_migrated.py",
+        "tests/test_2d_retina_migrated.py",
+        "tests/test_abusive_r1_migrated.py",
+        "tests/test_achromatopsia_migrated.py",
+        "tests/test_acronym_context_migrated.py",
+        "tests/test_acronym_grounding_migrated.py",
+        "tests/test_acting_variant.py",
+        "tests/test_action_affinities_migrated.py",
+        "tests/test_action_evidence_and_defer.py",
+        "tests/test_action_object_exploration_migrated.py",
+        "tests/test_active_aero_motor_program_migrated.py",
+        "tests/test_active_exploration_migrated.py",
+        "tests/test_active_frame_production.py",
+        "tests/test_actor_goals_migrated.py"
+      ],
+      "selected_count": 20,
+      "selected_tests": [
+        "runners/dsl/src/full_stack_integration.rs",
+        "runners/dsl/src/l1_hot_paths.rs",
+        "runners/dsl/src/py.rs",
+        "tests/capability/minting/test_recurrence_control.py",
+        "tests/evaluation/test_native_graph_capture.py",
+        "tests/evaluation/test_os_isolation_integration.py",
+        "tests/test_2d_motion_salience_migrated.py",
+        "tests/test_2d_retina_migrated.py",
+        "tests/test_abusive_r1_migrated.py",
+        "tests/test_achromatopsia_migrated.py",
+        "tests/test_acronym_context_migrated.py",
+        "tests/test_acronym_grounding_migrated.py",
+        "tests/test_acting_variant.py",
+        "tests/test_action_affinities_migrated.py",
+        "tests/test_action_evidence_and_defer.py",
+        "tests/test_action_object_exploration_migrated.py",
+        "tests/test_active_aero_motor_program_migrated.py",
+        "tests/test_active_exploration_migrated.py",
+        "tests/test_active_frame_production.py",
+        "tests/test_actor_goals_migrated.py"
+      ],
+      "selected_total": 1118,
+      "selected_truncated": true
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "runners/dsl/python/substrate_rs/_native.abi3.so",
+        "runners/dsl/python/substrate_rs/_native.build.json",
+        "runners/dsl/src/shape_decode.rs",
+        "tests/test_similarity_migrated.py"
+      ],
+      "commands": [
+        "bash scripts/engine_cargo_test.sh --lib -- --test-threads=1",
+        "python3 -m pytest tests -k migrated -q"
+      ],
+      "covered": true,
+      "engine_rebuild": true,
+      "expected_count": 1,
+      "expected_mode": "full",
+      "expected_tests": [
+        "tests/test_similarity_migrated.py"
+      ],
+      "full_gate": true,
+      "full_reasons": [
+        "runners/dsl/python/substrate_rs/_native.abi3.so: unclassified path",
+        "runners/dsl/python/substrate_rs/_native.build.json: unclassified path",
+        "selected 1113 test files (cap 250)"
+      ],
+      "missed": [],
+      "mode": "full",
+      "name": "64ce1af6 selector audit + similarity alias (engine, block 371000)",
+      "plan_ok": true,
+      "plan_warnings": [],
+      "recall": null,
+      "selected": [
+        "runners/dsl/src/full_stack_integration.rs",
+        "runners/dsl/src/l1_hot_paths.rs",
+        "runners/dsl/src/py.rs",
+        "tests/capability/minting/test_recurrence_control.py",
+        "tests/evaluation/test_native_graph_capture.py",
+        "tests/evaluation/test_os_isolation_integration.py",
+        "tests/test_2d_motion_salience_migrated.py",
+        "tests/test_2d_retina_migrated.py",
+        "tests/test_abusive_r1_migrated.py",
+        "tests/test_achromatopsia_migrated.py",
+        "tests/test_acronym_context_migrated.py",
+        "tests/test_acronym_grounding_migrated.py",
+        "tests/test_acting_variant.py",
+        "tests/test_action_affinities_migrated.py",
+        "tests/test_action_evidence_and_defer.py",
+        "tests/test_action_object_exploration_migrated.py",
+        "tests/test_active_aero_motor_program_migrated.py",
+        "tests/test_active_exploration_migrated.py",
+        "tests/test_active_frame_production.py",
+        "tests/test_actor_goals_migrated.py"
+      ],
+      "selected_count": 20,
+      "selected_tests": [
+        "runners/dsl/src/full_stack_integration.rs",
+        "runners/dsl/src/l1_hot_paths.rs",
+        "runners/dsl/src/py.rs",
+        "tests/capability/minting/test_recurrence_control.py",
+        "tests/evaluation/test_native_graph_capture.py",
+        "tests/evaluation/test_os_isolation_integration.py",
+        "tests/test_2d_motion_salience_migrated.py",
+        "tests/test_2d_retina_migrated.py",
+        "tests/test_abusive_r1_migrated.py",
+        "tests/test_achromatopsia_migrated.py",
+        "tests/test_acronym_context_migrated.py",
+        "tests/test_acronym_grounding_migrated.py",
+        "tests/test_acting_variant.py",
+        "tests/test_action_affinities_migrated.py",
+        "tests/test_action_evidence_and_defer.py",
+        "tests/test_action_object_exploration_migrated.py",
+        "tests/test_active_aero_motor_program_migrated.py",
+        "tests/test_active_exploration_migrated.py",
+        "tests/test_active_frame_production.py",
+        "tests/test_actor_goals_migrated.py"
+      ],
+      "selected_total": 1113,
+      "selected_truncated": true
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "docs/research/psychology_affect/AFFECT_FRAME_V02_RESULTS.md",
+        "docs/research/psychology_affect/INDEX.md",
+        "scripts/build_affect_frame_seed.py",
+        "seeds/affect_frame.json",
+        "seeds/affect_frame_canonical.json",
+        "tests/test_affect_frame_codebook.py",
+        "tests/test_affect_frame_v02.py"
+      ],
+      "commands": [
+        "python3 -m pytest tests/test_affect_frame_codebook.py tests/test_affect_frame_v02.py tests/test_affect_map_reuse_gridcode.py -q"
+      ],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 2,
+      "expected_mode": "affected",
+      "expected_tests": [
+        "tests/test_affect_frame_codebook.py",
+        "tests/test_affect_frame_v02.py"
+      ],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "affected",
+      "name": "d3000ad5 Affect frame v0.2 (seed + script, block 370000)",
+      "plan_ok": true,
+      "plan_warnings": [
+        "scripts/build_affect_frame_seed.py: no test link in the graph"
+      ],
+      "recall": 1.0,
+      "selected": [
+        "tests/test_affect_frame_codebook.py",
+        "tests/test_affect_frame_v02.py",
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "selected_count": 3,
+      "selected_tests": [
+        "tests/test_affect_frame_codebook.py",
+        "tests/test_affect_frame_v02.py",
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "selected_total": 3,
+      "selected_truncated": false
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "docs/research/psychology_affect/AFFECT_DIRECTION_JUDGEMENT_RESULTS.md",
+        "docs/research/psychology_affect/INDEX.md",
+        "tests/test_affect_direction_judgement.py"
+      ],
+      "commands": [
+        "python3 -m pytest tests/test_affect_direction_judgement.py -q"
+      ],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 1,
+      "expected_mode": "affected",
+      "expected_tests": [
+        "tests/test_affect_direction_judgement.py"
+      ],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "affected",
+      "name": "77ba15a7 affect direction judgement (block 368000)",
+      "plan_ok": true,
+      "plan_warnings": [],
+      "recall": 1.0,
+      "selected": [
+        "tests/test_affect_direction_judgement.py"
+      ],
+      "selected_count": 1,
+      "selected_tests": [
+        "tests/test_affect_direction_judgement.py"
+      ],
+      "selected_total": 1,
+      "selected_truncated": false
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "docs/research/psychology_affect/AFFECT_MAP_REUSE_GRID_CODE_RESULTS.md",
+        "docs/research/psychology_affect/INDEX.md",
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "commands": [
+        "python3 -m pytest tests/test_affect_map_reuse_gridcode.py -q"
+      ],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 1,
+      "expected_mode": "affected",
+      "expected_tests": [
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "affected",
+      "name": "6ed6d3c5 affect map reuse + grid code (block 367000)",
+      "plan_ok": true,
+      "plan_warnings": [],
+      "recall": 1.0,
+      "selected": [
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "selected_count": 1,
+      "selected_tests": [
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "selected_total": 1,
+      "selected_truncated": false
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "tests/test_affect_frame_v02.py"
+      ],
+      "commands": [
+        "python3 -m pytest tests/test_affect_frame_v02.py -q"
+      ],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 1,
+      "expected_mode": "affected",
+      "expected_tests": [
+        "tests/test_affect_frame_v02.py"
+      ],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "affected",
+      "name": "c7fcde64 pin affect-frame G-0 range",
+      "plan_ok": true,
+      "plan_warnings": [],
+      "recall": 1.0,
+      "selected": [
+        "tests/test_affect_frame_v02.py"
+      ],
+      "selected_count": 1,
+      "selected_tests": [
+        "tests/test_affect_frame_v02.py"
+      ],
+      "selected_total": 1,
+      "selected_truncated": false
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "docs/research/engine_substrate/INDEX.md",
+        "docs/research/engine_substrate/SD_LOOP_REARM_AND_JSON_SIGNATURE_RESULTS.md"
+      ],
+      "commands": [],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 0,
+      "expected_mode": "none",
+      "expected_tests": [],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "none",
+      "name": "e67d7b73 block 371000 results only",
+      "plan_ok": true,
+      "plan_warnings": [
+        "documentation-only change: no pytest selected"
+      ],
+      "recall": null,
+      "selected": [],
+      "selected_count": 0,
+      "selected_tests": [],
+      "selected_total": 0,
+      "selected_truncated": false
+    },
+    {
+      "budget_exceeded": false,
+      "changed": [
+        "docs/research/engine_substrate/INDEX.md",
+        "docs/research/engine_substrate/SD_LOOP_REARM_AND_JSON_SIGNATURE_PREREG.md",
+        "docs/research/engine_substrate/SD_LOOP_REARM_SCOPE.txt"
+      ],
+      "commands": [],
+      "covered": true,
+      "engine_rebuild": false,
+      "expected_count": 0,
+      "expected_mode": "none",
+      "expected_tests": [],
+      "full_gate": false,
+      "full_reasons": [],
+      "missed": [],
+      "mode": "none",
+      "name": "1281a482 block 371000 preregistration only",
+      "plan_ok": true,
+      "plan_warnings": [
+        "documentation-only change: no pytest selected"
+      ],
+      "recall": null,
+      "selected": [],
+      "selected_count": 0,
+      "selected_tests": [],
+      "selected_total": 0,
+      "selected_truncated": false
+    }
+  ],
+  "engine_rebuild": 2,
+  "engine_rebuild_cases": [
+    "a6eb3a60 sd re-arm + ClosestShape (engine, block 371000)",
+    "64ce1af6 selector audit + similarity alias (engine, block 371000)"
+  ],
+  "date": "2026-11-26",
+  "expected_miss": 0,
+  "expected_total": 5,
+  "full_cases": 2,
+  "full_gate_required_but_expected_affected": 0,
+  "full_gate_required_but_expected_affected_cases": [],
+  "matched_expected": 5,
+  "metric_caveat": "Recall counts commit-touched tests plus full-gate routing for engine/shared cases; it is not independent recall or evidence of a general benefit.",
+  "missed_cases": [],
+  "missed_expected_tests": [],
+  "missed_tests": [],
+  "mode_mismatches": [],
+  "none_cases": 2,
+  "note": "Offline planner replay only; not a live agent-workflow/model-task evaluation.",
+  "ok": true,
+  "recall": 1.0,
+  "root": "/home/matt/ozma/ocelot",
+  "schema": "ozagia.ocelot.workspace_eval.v1",
+  "warnings": [
+    "a6eb3a60 sd re-arm + ClosestShape (engine, block 371000): Rust engine rebuild required before measuring",
+    "a6eb3a60 sd re-arm + ClosestShape (engine, block 371000): scripts/gen_sd_rearm_and_closest_shape.py: no test link in the graph",
+    "64ce1af6 selector audit + similarity alias (engine, block 371000): Rust engine rebuild required before measuring",
+    "d3000ad5 Affect frame v0.2 (seed + script, block 370000): scripts/build_affect_frame_seed.py: no test link in the graph",
+    "e67d7b73 block 371000 results only: documentation-only change: no pytest selected",
+    "1281a482 block 371000 preregistration only: documentation-only change: no pytest selected"
+  ]
+}

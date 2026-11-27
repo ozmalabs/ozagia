@@ -249,8 +249,8 @@ usage: ozagia job wait [-h] --provider {ssm,codebuild,codepipeline,kubectl}
                        --job-id JOB_ID [--resource RESOURCE]
                        [--instance-id INSTANCE_ID] [--region REGION]
                        [--namespace NAMESPACE] [--executable EXECUTABLE]
-                       [--allow-live] [--timeout-s TIMEOUT_S]
-                       [--poll-s POLL_S] [--max-lines MAX_LINES] [--json]
+                       [--allow-live] [--timeout-s TIMEOUT_S] [--poll-s POLL_S]
+                       [--max-lines MAX_LINES] [--json]
 ```
 
 | option | type | values | default | help |
@@ -793,8 +793,8 @@ usage: ozagia goal [-h] {add,list,show,check,claim,drop,block,from-review} ...
 
 ```
 usage: ozagia goal add [-h] [--root ROOT] [--json] [--title TITLE] [--why WHY]
-                       [--target TARGET] [--scope SCOPE]
-                       [--criterion CRITERION] [--file FILE]
+                       [--target TARGET] [--scope SCOPE] [--criterion CRITERION]
+                       [--file FILE]
 ```
 
 | option | type | values | default | help |
@@ -891,8 +891,7 @@ usage: ozagia goal drop [-h] [--root ROOT] [--json] [--reason REASON] id
 ### `ozagia goal block`
 
 ```
-usage: ozagia goal block [-h] [--root ROOT] [--json] [--reason REASON]
-                         [--clear]
+usage: ozagia goal block [-h] [--root ROOT] [--json] [--reason REASON] [--clear]
                          id
 ```
 
@@ -943,10 +942,9 @@ usage: ozagia who [-h] [--root ROOT] [--json] path
 ```
 usage: ozagia replace [-h] [--glob GLOB] [--key KEY] [--regex] [--flags FLAGS]
                       [--expect EXPECT] [--max-files MAX_FILES]
-                      [--max-matches MAX_MATCHES] [--apply]
-                      [--plan-id PLAN_ID] [--any-suffix]
-                      [--allow-parse-errors] [--no-gitignore] [--task TASK]
-                      [--root ROOT] [--json]
+                      [--max-matches MAX_MATCHES] [--apply] [--plan-id PLAN_ID]
+                      [--any-suffix] [--allow-parse-errors] [--no-gitignore]
+                      [--task TASK] [--root ROOT] [--json]
                       pattern replacement
 ```
 
@@ -978,10 +976,9 @@ usage: ozagia replace [-h] [--glob GLOB] [--key KEY] [--regex] [--flags FLAGS]
 ```
 usage: ozagia review-repo [-h] [--root ROOT] [--json] [--out OUT]
                           [--section {architecture,tests,health,churn,docs,security,ops,dependencies}]
-                          [--compare PACKET]
-                          [--fail-on {blocking,major,never}] [--index]
-                          [--graph GRAPH] [--budget-s BUDGET_S] [--save]
-                          [--model-pass]
+                          [--compare PACKET] [--fail-on {blocking,major,never}]
+                          [--index] [--graph GRAPH] [--budget-s BUDGET_S]
+                          [--save] [--model-pass]
 ```
 
 | option | type | values | default | help |
@@ -1003,11 +1000,10 @@ usage: ozagia review-repo [-h] [--root ROOT] [--json] [--out OUT]
 ```
 usage: ozagia deep-review [-h] [--root ROOT] [--out OUT]
                           [--profile {full,security,performance,failure-modes,data-structures,scalability,architecture,tests,dependencies,operations,docs,change,review-change}]
-                          [--index] [--security-tool NAME]
-                          [--security-network] [--local-advisories PATH]
-                          [--license-policy PATH] [--supply-chain-policy PATH]
-                          [--range BASE..HEAD] [--profile-report PATH]
-                          [--run-bench JSON_ARGV]
+                          [--index] [--security-tool NAME] [--security-network]
+                          [--local-advisories PATH] [--license-policy PATH]
+                          [--supply-chain-policy PATH] [--range BASE..HEAD]
+                          [--profile-report PATH] [--run-bench JSON_ARGV]
                           [--bench-timeout-s BENCH_TIMEOUT_S]
                           [--baseline BASELINE]
                           [--fail-on {blocking,major,never}]
@@ -1087,8 +1083,7 @@ usage: ozagia capabilities [-h] {list,show,audit} ...
 ### `ozagia capabilities list`
 
 ```
-usage: ozagia capabilities list [-h] [--json] [--limit LIMIT]
-                                [--cursor CURSOR]
+usage: ozagia capabilities list [-h] [--json] [--limit LIMIT] [--cursor CURSOR]
 ```
 
 | option | type | values | default | help |
@@ -1100,8 +1095,7 @@ usage: ozagia capabilities list [-h] [--json] [--limit LIMIT]
 ### `ozagia capabilities show`
 
 ```
-usage: ozagia capabilities show [-h] [--json] [--limit LIMIT]
-                                [--cursor CURSOR]
+usage: ozagia capabilities show [-h] [--json] [--limit LIMIT] [--cursor CURSOR]
                                 id
 ```
 
@@ -1118,8 +1112,7 @@ usage: ozagia capabilities show [-h] [--json] [--limit LIMIT]
 ### `ozagia capabilities audit`
 
 ```
-usage: ozagia capabilities audit [-h] [--json] [--limit LIMIT]
-                                 [--cursor CURSOR]
+usage: ozagia capabilities audit [-h] [--json] [--limit LIMIT] [--cursor CURSOR]
 ```
 
 | option | type | values | default | help |
@@ -1148,8 +1141,8 @@ usage: ozagia engine serve [-h] [--root ROOT] [--host HOST] [--port PORT]
 | `--port` | int |  | 8765 | bind port (default: 8765; 0 chooses one) |
 | `--allow-remote` |  |  |  | allow a non-loopback bind; HTTP has no TLS and the caller owns the network/auth perimeter |
 | `--no-auto-known` |  |  |  | return full find/outline/context rows when a request omits known (default: remember hashes in the session and return u handles) |
-
 | `--ready-json` |  |  |  | print one versioned JSON readiness record after binding; omit human startup lines |
+
 ### `ozagia engine token`
 
 ```
@@ -1582,10 +1575,9 @@ usage: ozagia tmp clean [-h] [--root ROOT] [--json] [--apply] [--expired]
 ### `ozagia tmp gc`
 
 ```
-usage: ozagia tmp gc [-h] [--root ROOT] [--json] [--apply]
-                     [--max-total-bytes B] [--max-inodes N]
-                     [--max-session-bytes B] [--max-session-inodes N]
-                     [--min-free B] [--older-than D]
+usage: ozagia tmp gc [-h] [--root ROOT] [--json] [--apply] [--max-total-bytes B]
+                     [--max-inodes N] [--max-session-bytes B]
+                     [--max-session-inodes N] [--min-free B] [--older-than D]
 ```
 
 | option | type | values | default | help |
@@ -1945,8 +1937,7 @@ usage: ozagia mesh send [-h] [--root ROOT] [--json] [--harness HARNESS]
                         [--session SESSION] (--to H:S | --broadcast)
                         --kind {hello,request,offer,accept,reject,status,release,note,block,unblock,handoff}
                         --subject SUBJECT [--body BODY | --body-file F]
-                        [--in-reply-to IN_REPLY_TO] [--lease LEASE]
-                        [--ttl TTL]
+                        [--in-reply-to IN_REPLY_TO] [--lease LEASE] [--ttl TTL]
 ```
 
 | option | type | values | default | help |
@@ -2057,8 +2048,8 @@ usage: ozagia mesh lease status [-h] [--root ROOT] [--json] [lease_id]
 #### `ozagia mesh lease acquire`
 
 ```
-usage: ozagia mesh lease acquire [-h] [--root ROOT] [--json]
-                                 [--harness HARNESS] [--session SESSION]
+usage: ozagia mesh lease acquire [-h] [--root ROOT] [--json] [--harness HARNESS]
+                                 [--session SESSION]
                                  --kind {worktree,branch,merge,path,grant,other}
                                  --id RESOURCE --mode {read,write,merge}
                                  [--ttl TTL] [--reason REASON]
@@ -2099,9 +2090,8 @@ usage: ozagia mesh lease renew [-h] [--root ROOT] [--json] [--harness HARNESS]
 #### `ozagia mesh lease release`
 
 ```
-usage: ozagia mesh lease release [-h] [--root ROOT] [--json]
-                                 [--harness HARNESS] [--session SESSION]
-                                 [--delegation ID]
+usage: ozagia mesh lease release [-h] [--root ROOT] [--json] [--harness HARNESS]
+                                 [--session SESSION] [--delegation ID]
                                  lease_id
 ```
 
@@ -2195,10 +2185,9 @@ usage: ozagia mesh merge [-h] {request} ...
 #### `ozagia mesh merge request`
 
 ```
-usage: ozagia mesh merge request [-h] [--root ROOT] [--json]
-                                 [--harness HARNESS] [--session SESSION]
-                                 --target BRANCH|PATH [--ttl TTL]
-                                 [--reason REASON]
+usage: ozagia mesh merge request [-h] [--root ROOT] [--json] [--harness HARNESS]
+                                 [--session SESSION] --target BRANCH|PATH
+                                 [--ttl TTL] [--reason REASON]
 ```
 
 | option | type | values | default | help |
@@ -2220,11 +2209,10 @@ usage: ozagia mesh link [-h] {request,accept,decline,revoke,list,show} ...
 #### `ozagia mesh link request`
 
 ```
-usage: ozagia mesh link request [-h] [--root ROOT] [--json]
-                                [--harness HARNESS] [--session SESSION]
-                                --to H:S --relation {peer,sub,super}
-                                [--ttl TTL] [--reason REASON]
-                                [--idempotency-key K]
+usage: ozagia mesh link request [-h] [--root ROOT] [--json] [--harness HARNESS]
+                                [--session SESSION] --to H:S
+                                --relation {peer,sub,super} [--ttl TTL]
+                                [--reason REASON] [--idempotency-key K]
 ```
 
 | option | type | values | default | help |
@@ -2261,9 +2249,8 @@ usage: ozagia mesh link accept [-h] [--root ROOT] [--json] [--harness HARNESS]
 #### `ozagia mesh link decline`
 
 ```
-usage: ozagia mesh link decline [-h] [--root ROOT] [--json]
-                                [--harness HARNESS] [--session SESSION]
-                                [--reason REASON]
+usage: ozagia mesh link decline [-h] [--root ROOT] [--json] [--harness HARNESS]
+                                [--session SESSION] [--reason REASON]
                                 link_id
 ```
 
@@ -2613,8 +2600,8 @@ usage: ozagia mesh ozma handoff reject [-h] [--root ROOT] [--json]
 
 ```
 usage: ozagia mesh ozma handoff complete [-h] [--root ROOT] [--json]
-                                         [--harness HARNESS]
-                                         [--session SESSION] [--reason REASON]
+                                         [--harness HARNESS] [--session SESSION]
+                                         [--reason REASON]
                                          handoff_id
 ```
 
@@ -2755,9 +2742,8 @@ usage: ozagia mesh ozma claims [-h] [--root ROOT] [--json]
 #### `ozagia mesh ozma enqueue`
 
 ```
-usage: ozagia mesh ozma enqueue [-h] [--root ROOT] [--json]
-                                [--harness HARNESS] [--session SESSION]
-                                --message ID [--channel C]
+usage: ozagia mesh ozma enqueue [-h] [--root ROOT] [--json] [--harness HARNESS]
+                                [--session SESSION] --message ID [--channel C]
                                 [--offer-as {response,handoff}]
 ```
 
@@ -2802,8 +2788,8 @@ usage: ozagia mesh ozma sync [-h] [--root ROOT] [--json]
 
 ```
 usage: ozagia mesh prune [-h] [--root ROOT] [--json] [--harness HARNESS]
-                         [--session SESSION] (--expired |
-                         --delivered-before S) [--apply]
+                         [--session SESSION] (--expired | --delivered-before S)
+                         [--apply]
 ```
 
 | option | type | values | default | help |

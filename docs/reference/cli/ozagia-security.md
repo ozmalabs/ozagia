@@ -59,10 +59,9 @@ usage: python -m ozagia.security_cli secrets [-h] [--root ROOT] (--staged |
 ## `ozagia-security explain`
 
 ```
-usage: python -m ozagia.security_cli explain [-h] [--root ROOT]
-                                             [--graph GRAPH] [--report REPORT]
-                                             [--tool NAME] [--allow-network]
-                                             [--json]
+usage: python -m ozagia.security_cli explain [-h] [--root ROOT] [--graph GRAPH]
+                                             [--report REPORT] [--tool NAME]
+                                             [--allow-network] [--json]
                                              FINDING_ID
 ```
 

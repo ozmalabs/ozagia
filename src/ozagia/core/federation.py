@@ -46,6 +46,11 @@ _REFERENCE_SYNC_CURSOR: dict[Path, int] = {}
 _MEMBER_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 _RESERVED_MEMBER_IDS = frozenset({"anchor", "self"})
 
+# Additive, bounded family preference used only by ``search(family_boost=True)``.
+# A hit whose member shares a declared family with the anchor gains this much
+# rank score, capped at 1.0. Lexical ``score`` is retained unchanged.
+FAMILY_RANK_BOOST = 0.15
+
 
 @contextmanager
 def without_reference_sync():
@@ -626,16 +631,40 @@ def _searchable(node: dict[str, Any]) -> str:
 
 
 def search(root: str | Path | None, query: str,
-           roots: Iterable[str | Path] | None = None, limit: int = 20) -> dict[str, Any]:
-    """Simple deterministic lexical search over member snapshot labels/attrs."""
+           roots: Iterable[str | Path] | None = None, limit: int = 20,
+           family_boost: bool = False) -> dict[str, Any]:
+    """Simple deterministic lexical search over member snapshot labels/attrs.
+
+    ``family_boost`` is opt-in and defaults to off. When enabled, the anchor is
+    the first selected member, and a hit whose member shares a declared family
+    with the anchor receives :data:`FAMILY_RANK_BOOST` added to its rank score
+    (capped at 1.0). Non-family hits remain in the results and are only
+    re-ranked. The lexical ``score`` is unchanged; ``rank_score`` carries the
+    preference. Family declarations come from the anchor's manifest, and a
+    missing or invalid declaration is reported in ``families`` without failing
+    the search. With the default off, ordering is exactly the lexical baseline.
+    """
     if roots is not None:
         roots = tuple(roots)
     terms = list(dict.fromkeys(re.findall(r"[a-z0-9_]+", str(query).casefold())))
     if not terms:
+        family_state: dict[str, Any] = {
+            "state": "disabled", "by_member": {}, "families": [], "errors": [],
+            "truncated": False}
+        if family_boost:
+            from ozagia.core import repo_relations
+
+            empty_members = _members(root, roots)
+            family_state = repo_relations.family_index(_root(root), empty_members)
+            public_members = [_public_member(item) for item in empty_members]
+        else:
+            public_members = discover(root, roots)["members"]
         return {"ok": True, "query": query, "results": [],
-                "members": discover(root, roots)["members"]}
+                "family_boost": bool(family_boost),
+                "families": family_state, "members": public_members}
+    items = _members(root, roots)
     hits: list[dict[str, Any]] = []
-    for item in _members(root, roots):
+    for item in items:
         if item["error"]:
             continue
         for node in item["snapshot"]["nodes"]:
@@ -647,15 +676,44 @@ def search(root: str | Path | None, query: str,
             if not matched:
                 continue
             attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+            score = len(matched) / len(terms)
             hits.append({"qualified_key": _qualified(item["alias"], key),
                          "key": key, "kind": node.get("type"),
                          "name": attrs.get("name") or attrs.get("title") or key,
                          "file": attrs.get("file") or attrs.get("path"),
-                         "matched_terms": matched, "score": len(matched) / len(terms),
+                         "matched_terms": matched, "score": score,
+                         "rank_score": score, "family_match": False,
+                         "families": [],
                          "source": {"id": item["alias"], "root": str(item["root"])}})
-    hits.sort(key=lambda h: (-h["score"], str(h["source"]["id"]).casefold(), h["key"]))
+    family_state: dict[str, Any] = {
+        "state": "disabled", "by_member": {}, "families": [], "errors": [],
+        "truncated": False}
+    if family_boost:
+        from ozagia.core import repo_relations
+
+        family_state = repo_relations.family_index(_root(root), items)
+        anchor_alias = items[0]["alias"] if items else None
+        anchor_families = set(
+            family_state["by_member"].get(anchor_alias, [])) if anchor_alias else set()
+        for hit in hits:
+            member_families = family_state["by_member"].get(
+                hit["source"]["id"], [])
+            hit["families"] = list(member_families)
+            hit["family_match"] = any(
+                family_id in anchor_families for family_id in member_families)
+            if hit["family_match"]:
+                hit["rank_score"] = min(1.0, hit["score"] + FAMILY_RANK_BOOST)
+        # Family matches win exact rank-score ties; remaining ties keep the
+        # baseline alias/key order so repeated searches are deterministic.
+        hits.sort(key=lambda h: (-h["rank_score"], not h["family_match"],
+                                 str(h["source"]["id"]).casefold(), h["key"]))
+    else:
+        hits.sort(key=lambda h: (-h["score"], str(h["source"]["id"]).casefold(),
+                                 h["key"]))
     return {"ok": True, "query": query, "results": hits[:max(0, int(limit))],
-            "n": len(hits), "members": [_public_member(item) for item in _members(root, roots)]}
+            "n": len(hits), "family_boost": bool(family_boost),
+            "families": family_state,
+            "members": [_public_member(item) for item in _members(root, roots)]}
 
 
 def node(root: str | Path | None, qualified_key: str,

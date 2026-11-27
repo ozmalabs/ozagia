@@ -633,12 +633,19 @@ _TOOLS.extend([
             "Read-only lexical search over discovered or explicitly selected "
             "repository snapshots. Designated references may be fetched and "
             "fast-forwarded over Git; set no_sync to opt out. Results retain "
-            "provenance; no index is refreshed."),
+            "provenance; no index is refreshed. Set family_boost true to "
+            "prefer hits from members sharing a declared anchor family; it is "
+            "opt-in and defaults to false."),
         "inputSchema": _schema({
             "query": {"type": "string"},
             "roots": {"type": "array", "items": {"type": "string"},
                       "description": "Optional explicit member roots."},
             "limit": {"type": "integer", "default": 20},
+            "family_boost": {
+                "type": "boolean", "default": False,
+                "description": ("Prefer hits from members sharing a declared "
+                                "anchor family (opt-in; default off)."),
+            },
             "no_sync": {"type": "boolean", "default": False},
         }, ["query"]),
     },
@@ -660,10 +667,12 @@ _TOOLS.extend([
         "name": "federation_check",
         "description": (
             "Read-only static checks for declared cross-repository API and "
-            "code-to-infrastructure relationships, plus declared package "
-            "dependency links between members. Designated references may "
-            "be fetched and fast-forwarded over Git; set no_sync to opt out. "
-            "Indexes are not refreshed; missing evidence remains unknown."),
+            "code-to-infrastructure relationships, explicit API mappings with "
+            "contract-first references, declared package dependency links, and "
+            "declared or package-derived repository relationships. "
+            "Designated references may be fetched and "
+            "fast-forwarded over Git; set no_sync to opt out. Indexes are not "
+            "refreshed; missing evidence remains unknown."),
         "inputSchema": _schema({
             "roots": {"type": "array", "items": {"type": "string"},
                       "description": "Optional explicit member roots; an empty array selects only the anchor."},
@@ -1715,7 +1724,8 @@ class DevMemoryServer:
         with context:
             return self._federation_call("search", str(a["query"]),
                                          roots=a.get("roots"),
-                                         limit=a.get("limit", 20))
+                                         limit=a.get("limit", 20),
+                                         family_boost=a.get("family_boost", False))
 
     def _federation_node(self, a: dict[str, Any]) -> Any:
         from ozagia.core import federation as F

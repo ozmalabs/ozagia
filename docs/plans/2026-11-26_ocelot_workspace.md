@@ -1,12 +1,16 @@
 # Working on Ocelot: an Ocelot-specific Ozagia profile
 
-Status: implemented 2026-11-26 except agent workflow evaluation. The
-implemented profile is a reusable optional integration
+Status: implemented 2026-11-26, except the live agent-workflow/model-task
+evaluation. The implemented profile is a reusable optional integration
 (`ozagia.integrations.ocelot.workspace`) plus the seed graph/impact, test
-planner, engine doctor, Rust/Python/seed bridge, seed validation and research
-map. It is not in Ozagia's core and does nothing unless an Ocelot project
-config enables it. Seed editing and the agent-workflow evaluation remain
-proposed.
+planner, engine doctor, Rust/Python/seed bridge, seed validation, preview-first
+seed editing, boot/registry editing, session context and OpenCode hint,
+offline planner evaluation, burned-seed claim check and Rust/Python parity. It
+is not in Ozagia's core and does nothing unless an Ocelot project config
+enables it. The offline planner replay ran; the live agent-workflow/model-task
+evaluation did not and remains approval-gated by `--live` /
+`OZAGIA_EVAL_LIVE=1` and a person's approval. The Ocelot UI status panel
+remains a named follow-on.
 
 This plan is for features that make Ozagia useful **while working on
 Ocelot**, not for Ocelot's runtime. Ocelot remains a separate MIT-licensed
@@ -15,7 +19,8 @@ in the Ocelot tree; Ozagia's core stays generic and never imports Ocelot.
 
 ## Audit source
 
-- Ocelot checkout: `matt@192.168.40.19:~/ozma/ocelot`
+- Ocelot checkout: `matt@192.168.40.19:~/ozma/ocelot`; the canonical local
+  path recorded by the evaluation is `/home/matt/ozma/ocelot`
 - `main` at `24c56891`, clean working tree
 - Current canonical checkout and several old worktrees on the same host
 - No current `.ozagia.toml` and no current `tools/ozagia_ocelot_adapter.py`.
@@ -324,12 +329,18 @@ Evaluate on real work before broadening:
 Start with 0–3. Do not start with a UI, a seed authoring wizard or a research
 dashboard: those are downstream of the graph and test plan being correct.
 
+Status: phases 0–6 are implemented. Phase 7 is split: the session context,
+OpenCode hint, `ocelot_workspace` task class and offline planner replay are
+implemented; the live agent-workflow/model-task evaluation was not run and
+remains approval-gated. The UI status panel is not built.
+
 ## First slice — implemented 2026-11-26
 
 Implemented:
 
 - `src/ozagia/integrations/ocelot/workspace.py` — seed indexer, impact/census,
-  conservative test planner, four MCP tools and graph queries.
+  conservative test planner, the base status/seed/seeds/plan MCP tools and
+  graph queries.
 - `src/ozagia/integrations/ocelot/workspace_doctor.py` — read-only engine,
   worktree, `.pth`, dataset and baseline doctor.
 - `src/ozagia/integrations/ocelot/workspace_cli.py` — `status`, `seed`,
@@ -346,8 +357,8 @@ Implemented:
   cases.
 
 Measured on the canonical Ocelot checkout (`24c56891`) with a limited source
-set (`domains`, `worlds`, `substrate`, `tests`, `runners/dsl/src`); the full
-record is in
+set (`domains`, `worlds`, `substrate`, `tests`, `runners/dsl/src`) plus the
+targeted research overlay; the full record is in
 [`docs/results/ocelot_workspace_2026-11-26.md`](../results/ocelot_workspace_2026-11-26.md).
 
 | Measurement | Result |
@@ -363,10 +374,75 @@ record is in
 | Plans | `shape_decode_loop` → full gate; `embodied_motor_program` → 20 affected test files; shared `substrate/world_adapter.py` → full gate; docs → no tests |
 | Doctor | engine source/hash matched; warned that the user-level `.pth` points at a different tree |
 
-The remaining phases are the Rust/Python/seed bridge, seed editing and
-validation, the research/evidence map, and agent integration/evaluation.
+## Second slice — implemented 2026-11-26
+
+The remaining feature phases landed in the same checkout:
+
+- `src/ozagia/integrations/ocelot/workspace_seed_edit.py` — preview-first
+  semantic seed editing through the span-preserving JSON adapter, free
+  `local_id` allocation, atomic apply with backup and rollback on validation
+  errors, preview-only `tests/test_<id>_migrated.py` skeletons, and refusal of
+  generated/acquired caches;
+- `workspace_validate.py` — additive `validate_seed_data` for prospective
+  manifests, including prospective dependency-cycle detection;
+- `workspace_context.py` — compact session context: doctor, test plan, seed
+  blast radius, research chain, next commands and an agent note;
+- `workspace_hook.py` — appends that context once per OpenCode session to the
+  daemon `hint`, bounded and read-only, without changing other harnesses;
+- `workspace_eval.py` — offline replay of historical changes with recall,
+  misses, mode mismatches, engine rebuilds and bounded per-case details;
+- `workspace_boot.py` — explicit, preview-first boot-list and
+  `domains/seed_registry.py` editing with AST span edits and rollback;
+- `workspace_engine.py` — `rs_parity` for `domains_rs` ↔ `domains` pairs;
+- `workspace_research.py` — `ocelot_claim_check` over the declared
+  `VISION_PROTOCOL.md` burned-seed ledger;
+- `workspace.py` — lazy registration of the optional engine bridge, research,
+  validation, seed-editor, boot-editor and context surfaces;
+- `workspace_cli.py` — `doctor` alias, `context`, `edit`, `boot-edit`, `claim`
+  and the expanded `engine` command;
+- `src/ozagia/task_specs/coding/ocelot_workspace.toml` — the
+  `ocelot_workspace` task class with affected tests, full-gate evidence and
+  engine-rebuild steps.
+
+Real-checkout validation:
+
+| Measurement | Result |
+| --- | --- |
+| Planner replay | 8 historical commits, 8/8 covered, commit-touched recall 1.0, 0 misses, 0 mode mismatches |
+| Engine commits | `a6eb3a60`, `64ce1af6` both full gate with engine rebuild; 1,118 and 1,113 selected test files in total |
+| Seed/script commit | `d3000ad5` affected, 3 selected, both expected tests included |
+| Docs-only commits | `e67d7b73`, `1281a482` no tests |
+| Seed edit | `affect_frame_canonical` preview `ok`, free `local_id`, file unchanged |
+| Boot edit | boot-list add/remove and registry add/remove previews `ok`, files unchanged |
+| OpenCode hint | 837-character marked block, once per session, Codex unchanged |
+| Ledger | `7000–7999` and `9000–9005` conflicts reported |
+| Parity | `domains_rs/conway.py` paired with `domains/conway.py` and its two tests |
+
+The replay metric is commit-touched test coverage plus full-gate routing, not
+independent recall: the expected tests are the test files each commit touched,
+and full-gate rows are counted covered by routing. It does not establish a
+general recall benefit.
+
+The results and case file are in
+[`docs/results/ocelot_workspace_2026-11-26.md`](../results/ocelot_workspace_2026-11-26.md),
+[`docs/results/ocelot_workspace_eval_2026-11-26.md`](../results/ocelot_workspace_eval_2026-11-26.md)
+and
+[`docs/results/ocelot_workspace_eval_cases_2026-11-26.json`](../results/ocelot_workspace_eval_cases_2026-11-26.json).
+
+The live agent-workflow/model-task evaluation was not run. These measurements
+are offline planner, read-only checkout and preview-only edit probes; they are
+not a live model-task gain. The profile remains deterministic and read-only
+outside the explicit `ocelot_seed_edit` and `ocelot_boot_edit` write paths.
+Ocelot's loader, `VISION_PROTOCOL.md`, `CLAUDE.md`, engine and test gates remain
+authoritative.
 
 ## Data and tool surface
+
+This section is the original design sketch, not the final interface. The
+implemented node types, queries and eleven MCP tools are documented in
+[`docs/ocelot_workspace.md`](../ocelot_workspace.md); the proposed
+`ocelot_edit` became the separate `ocelot_seed_edit` and `ocelot_boot_edit`
+tools.
 
 Adapter node types (proposal):
 
@@ -429,6 +505,13 @@ Ocelot checkout:
 - **Adapter drift.** Ocelot's schema, boot lists and provenance code move
   quickly. The adapter must report its own version and refuse stale
   assumptions; the fixture tests pin the shapes.
+- **Real-checkout edits need a person's approval.** `ocelot_seed_edit` and
+  `ocelot_boot_edit` preview by default. `write: true` is a caller request,
+  not standing approval; applying either tool to a real checkout is an
+  explicit person-approved action. There is no separate runtime approval
+  token, so the caller must obtain approval before applying. Tests exercise
+  preview and apply/rollback paths only on synthetic fixtures, and the
+  recorded real-checkout probes were preview-only.
 - **Index size.** The full 186 MB seed tree and 50 MB docs are not indexed
   eagerly. Large manifests are bounded; full seed details are read on demand.
 - **Not a general Ocelot agent.** This profile does not run Ocelot's engine
@@ -442,6 +525,10 @@ Ocelot checkout:
   installer stays separate.
 
 ## Open questions
+
+These are the questions the plan started with; the implemented choices and
+their limits are recorded in the slice sections above and in
+[`docs/ocelot_workspace.md`](../ocelot_workspace.md).
 
 1. Should the Ocelot adapter call `domains.engine_provenance.py` in the
    Ocelot venv, or reimplement the build-record check in the adapter to avoid

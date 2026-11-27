@@ -4,8 +4,8 @@ workspace fixture.
 The fixture tree is written by
 ``tests/fixtures/ocelot_workspace_repo.py`` and indexed with the adapter from
 ``.ozagia.toml``.  These tests pin the public adapter contract: seed nodes and
-edges, seed summaries/census, the Ocelot-aware test plan, and the four MCP
-tools.  They never import or execute the synthetic target project.
+edges, seed summaries/census, the Ocelot-aware test plan, and the MCP tool
+surface.  They never import or execute the synthetic target project.
 """
 from __future__ import annotations
 
@@ -499,7 +499,9 @@ def test_mcp_registers_ocelot_tools_and_dispatches_seed(
     tools = _mcp_tools(server)
     names = {tool["name"] for tool in tools}
     expected = {"ocelot_status", "ocelot_seed", "ocelot_seeds", "ocelot_plan",
-                "ocelot_engine", "ocelot_research", "ocelot_seed_validate"}
+                "ocelot_engine", "ocelot_research", "ocelot_seed_validate",
+                "ocelot_seed_edit", "ocelot_context", "ocelot_claim_check",
+                "ocelot_boot_edit"}
     assert expected <= names, sorted(names)
 
     spec = next(tool for tool in tools if tool["name"] == "ocelot_seed")

@@ -34,9 +34,9 @@ usage: python -m ozagia.module_build_cli preview [-h] [--root ROOT]
 ```
 usage: python -m ozagia.module_build_cli apply [-h] [--root ROOT]
                                                [--report REPORT]
-                                               [--opportunity ID]
-                                               [--dest DEST] [--json]
-                                               --confirm TOKEN [--force]
+                                               [--opportunity ID] [--dest DEST]
+                                               [--json] --confirm TOKEN
+                                               [--force]
 ```
 
 | option | type | values | default | help |

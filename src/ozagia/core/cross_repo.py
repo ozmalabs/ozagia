@@ -1,15 +1,17 @@
 """Conservative static checks over explicitly linked repository snapshots.
 
-This module reports evidence present in snapshots; it does not infer links or
-verify runtime contracts and deployments.
+This module reports evidence present in snapshots and in declared manifests;
+it does not infer links or verify runtime contracts and deployments.
 """
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Iterable
 
+from ozagia.core import api_relationships
 from ozagia.core import dependency_links
 from ozagia.core import federation
+from ozagia.core import repo_relations
 
 
 _CODE_TYPES = {"Symbol", "File", "ApiCodeReference"}
@@ -40,8 +42,10 @@ def check(root: str | Path | None = None,
     unsupported endpoint types are reported as unknown.
 
     The report also includes ``dependency_links``, a read-only comparison of
-    declared package dependencies between members; it is built from current
-    member manifests and does not affect the API ``overall`` verdict.
+    declared package dependencies between members, and
+    ``repository_relations``, declared family/lineage/integration links plus
+    package-derived repository edges. Both are built from current member
+    manifests and do not affect the API ``overall`` verdict.
     """
     selected = federation._root(root)
     if roots is not None:
@@ -119,6 +123,9 @@ def check(root: str | Path | None = None,
                               "detail": "reference manifest has invalid entries"})
 
     dependency_report = dependency_links.analyze(members, member_states)
+    api_report = api_relationships.analyze(members)
+    repository_relations = repo_relations.analyze(
+        selected, members, dependency_report, member_states, api_report)
 
     checks: list[dict[str, Any]] = []
     for link in link_report["links"]:
@@ -217,7 +224,24 @@ def check(root: str | Path | None = None,
             "reference_errors": len(reference_errors),
             "configuration": configuration,
             "dependency_links": dependency_report,
-            "note": "Static evidence only; API compatibility, test execution, and deployment state are not verified."}
+            "repository_relations": repository_relations,
+            "note": ("Static evidence only; API compatibility, test execution, "
+                     "deployment state, and dynamic repository coupling are not "
+                     "verified.")}
 
 
-__all__ = ["check"]
+def relations(root: str | Path | None = None,
+              roots: Iterable[str | Path] | None = None) -> dict[str, Any]:
+    """Repository-level relationship report without API/configuration checks.
+
+    This is the relationship graph embedded as ``repository_relations`` by
+    :func:`check`, but member ``state`` values are federation freshness states
+    only. ``check`` may replace them with reference sync states such as
+    ``sync_error``, ``sync_pending``, ``index_stale`` or ``sync_unknown`` in
+    its embedded copy; the standalone report is not byte-identical in that
+    case.
+    """
+    return repo_relations.check(root, roots)
+
+
+__all__ = ["check", "relations"]

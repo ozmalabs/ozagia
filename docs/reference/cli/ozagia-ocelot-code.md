@@ -36,8 +36,8 @@ usage: python -m ozagia.ocelot_code_cli cluster [-h] --root ROOT
 ```
 usage: python -m ozagia.ocelot_code_cli impact [-h] --root ROOT
                                                [--diff BASE..HEAD]
-                                               [--changed PATH]
-                                               [--graph GRAPH] [--test-plan]
+                                               [--changed PATH] [--graph GRAPH]
+                                               [--test-plan]
                                                [--ocelot-root OCELOT_ROOT]
                                                [--mode {auto,inprocess,subprocess}]
                                                [--timeout TIMEOUT] [--json]
@@ -78,8 +78,8 @@ usage: python -m ozagia.ocelot_code_cli patterns [-h] (--report REPORT |
 ## `ozagia-ocelot-code status`
 
 ```
-usage: python -m ozagia.ocelot_code_cli status [-h] [--root ROOT]
-                                               [--dest DEST] [--json]
+usage: python -m ozagia.ocelot_code_cli status [-h] [--root ROOT] [--dest DEST]
+                                               [--json]
 ```
 
 | option | type | values | default | help |

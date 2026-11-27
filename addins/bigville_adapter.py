@@ -11,6 +11,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from ozagia.core.repo_bridges import add_repo_bridge
+
 
 _SCENARIO_REF = re.compile(r"(scenarios/[A-Za-z0-9_./-]+\.json)")
 _ADAPTER_TEXT_REF = re.compile(
@@ -34,6 +36,11 @@ _ROUTE_SOURCES = (
     "bigville/management/static/management.js",
     "bigville/management/static/readonly-renderer.js",
 )
+_OCELOT_BACKEND = "bigville/backends/ocelot.py"
+_OCELOT_TEST = "tests/test_bigville_ocelot_fresh_process.py"
+_OCELOT_ADAPTER_IMPORT = re.compile(
+    r"import_module\s*\(\s*['\"]worlds\.bigville_ocelot_adapter['\"]")
+_OCELOT_ADAPTER_REFERENCE = re.compile(r"worlds\.bigville_ocelot_adapter")
 
 
 def register(registry: Any) -> None:
@@ -54,6 +61,11 @@ def register(registry: Any) -> None:
     registry.add_graph_query("bigville_routes", list_routes)
     registry.add_graph_query("bigville_seed_manifests", list_seed_manifests)
     registry.add_graph_query("bigville_data_test_evidence", list_data_test_evidence)
+    try:
+        registry.add_indexer(index_repo_bridges,
+                             watch=(_OCELOT_BACKEND, _OCELOT_TEST))
+    except TypeError:
+        registry.add_indexer(index_repo_bridges)
 
 
 def index_scenarios(ctx: Any) -> None:
@@ -139,6 +151,55 @@ def _load_object(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _source_location(root: Path, rel: str,
+                     pattern: re.Pattern[str]) -> dict[str, Any] | None:
+    """Return a contained repository-relative path/line matching ``pattern``."""
+    path = root / rel
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root)
+        text = resolved.read_text(encoding="utf-8", errors="replace")
+    except (OSError, UnicodeError, ValueError):
+        return None
+    for number, line in enumerate(text.splitlines(), 1):
+        if pattern.search(line):
+            return {"path": rel, "line": number}
+    return None
+
+
+def index_repo_bridges(ctx: Any) -> None:
+    """Declare Bigville's dynamic Ocelot adapter bridge with source evidence.
+
+    The adapter recognizes the exact runtime import of
+    ``worlds.bigville_ocelot_adapter`` in Bigville's ocelot backend. It reads
+    only Bigville source, never imports Ocelot, and does not read the Ocelot
+    checkout. If the declaration is absent, no bridge node is emitted.
+    """
+    b = ctx.builder
+    root = Path(ctx.root).resolve()
+    backend = _source_location(root, _OCELOT_BACKEND, _OCELOT_ADAPTER_IMPORT)
+    if backend is None:
+        return
+    evidence: list[dict[str, Any]] = [backend]
+    test = _source_location(root, _OCELOT_TEST, _OCELOT_ADAPTER_REFERENCE)
+    if test is not None:
+        evidence.append(test)
+    repo_attrs = b.attrs(ctx.repo)
+    source_repo = str(repo_attrs.get("name") or root.name)
+    node = add_repo_bridge(
+        b,
+        source_repo=source_repo,
+        target_repo="ocelot",
+        relation="dynamic_import",
+        provenance=("Bigville's ocelot backend dynamically imports Ocelot's "
+                    "Bigville resident adapter"),
+        evidence=evidence,
+        symbol="worlds.bigville_ocelot_adapter",
+    )
+    b.edge(ctx.repo, "declares_repo_bridge", node)
+    repo_attrs["repo_bridges"] = b.count("RepoBridge")
 
 
 def index_navigation(ctx: Any) -> None:

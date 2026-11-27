@@ -62,7 +62,9 @@ identity limits. Explicit roots ignore manifest ids.
 When roots are discovered automatically, indexed immediate siblings and these
 declared members are combined. Declared paths remain visible in status when a
 directory or snapshot is missing or invalid. A malformed `members` value or
-entry is reported under `links.member_errors`. Passing explicit CLI `--repo`
+entry is reported under `links.member_errors`. The anchor is always included;
+naming the anchor itself in `members` is reported as a member error rather
+than creating a second member. Passing explicit CLI `--repo`
 options or MCP `roots` selects only those roots plus the anchor, overriding
 both discovery sources. A member declaration only selects an existing
 snapshot; it never builds or refreshes one. Declaring a path can disclose its
@@ -160,8 +162,8 @@ adapters. Automatic updates may access the network and change the clean,
 explicitly designated Git checkouts as described above.
 
 `federation check` and `federation_check` run offline static checks for
-declared API relationships, code-to-infrastructure links, and declared
-package dependency links. API identity checks use existing snapshots; the
+declared API relationships, code-to-infrastructure links, declared package
+dependency links, and repository-level relationships. API identity checks use existing snapshots; the
 configuration check below also reads the linked current source files. The
 report preserves the source repository, relationship
 provenance, and missing or ambiguous evidence. A declaration alone does not
@@ -295,6 +297,422 @@ checkout update is allowed.
              "ambiguous": 0, "unresolved": 0}
 }
 ```
+
+## Repository relationships
+
+Federation membership is a flat set of checkouts. Repository relationships
+add a read-only, repository-level graph on top of it, without changing any
+member snapshot. `ozagia federation relations` returns the relationship report
+directly. `ozagia federation check` and the `federation_check` MCP tool include
+the same relationship sections as `repository_relations`, with one difference:
+in that embedded copy, member `state` values may be reference sync states
+(`sync_error`, `sync_pending`, `index_stale`, `sync_unknown`) rather than
+freshness-only states. `federation relations`,
+`ozagia.core.cross_repo.relations()` and
+`ozagia.core.repo_relations.check()` report federation freshness states only.
+It combines four kinds of evidence:
+
+- optional `relationships` and `families` declarations in the anchor's
+  `.ozagia/federation.json`;
+- directed dependency edges rolled up from the declared package links
+  described above;
+- explicit `ApiMapping` nodes already in member snapshots (see
+  [API relationships and references](#api-relationships-and-references));
+- explicit `RepoBridge` nodes emitted by adapters for a dynamic integration
+  they can cite in their own source (see
+  [adapter-declared dynamic bridges](#adapter-declared-dynamic-bridges)).
+
+```json
+{
+  "version": 1,
+  "members": [
+    {"path": "../ocelot", "id": "ocelot"}
+  ],
+  "relationships": [
+    {
+      "source": "bigville",
+      "target": "ocelot",
+      "relation": "uses",
+      "provenance": "Bigville's ocelot backend loads Ocelot's Bigville resident provider",
+      "evidence": ["bigville/backends/ocelot.py",
+                   "tests/test_bigville_ocelot_fresh_process.py"]
+    },
+    {
+      "source": "ocelot",
+      "target": "bigville",
+      "relation": "plugin_for",
+      "provenance": "Ocelot supplies the Bigville world adapter that backend loads",
+      "evidence": ["worlds/bigville_ocelot_adapter.py",
+                   "docs/features/bigville.md"]
+    }
+  ],
+  "families": [
+    {
+      "id": "simulation-stack",
+      "label": "Bigville/Ocelot simulation stack",
+      "members": ["bigville", "ocelot"],
+      "provenance": "reviewed integration map; declared bridge, not a build dependency"
+    }
+  ],
+  "links": []
+}
+```
+
+This is a worked Bigville ↔ Ocelot example, not an inference. The anchor
+`bigville` is included automatically under its derived alias; the manifest
+declares only `ocelot` with an explicit id. Naming the anchor in `members`
+would be a member error. With that manifest,
+`ozagia federation relations --root ~/work/bigville --no-sync`
+reports two declared `integration` edges and a family, while the dependency
+view stays neutral:
+
+```json
+{
+  "edges": [
+    {"source": "bigville", "target": "ocelot", "relation": "uses",
+     "kind": "integration", "origin": "declared",
+     "provenance": "Bigville's ocelot backend loads Ocelot's Bigville resident provider"},
+    {"source": "ocelot", "target": "bigville", "relation": "plugin_for",
+     "kind": "integration", "origin": "declared",
+     "provenance": "Ocelot supplies the Bigville world adapter that backend loads"}
+  ],
+  "dependencies": [],
+  "cycles": [],
+  "order": ["bigville", "ocelot"],
+  "levels": {"bigville": 0, "ocelot": 0},
+  "reverse_dependencies": {"bigville": [], "ocelot": []},
+  "families": [{"id": "simulation-stack",
+                "members": ["bigville", "ocelot"]}]
+}
+```
+
+(The excerpt omits unchanged report fields; real edges also carry `evidence`.)
+Both directions are separate maintainer assertions with provenance; neither
+direction creates the other. They are not inferred from Bigville's dynamic
+import of Ocelot, from module or repository names, from Git remotes, or from
+running either project. Evidence strings are repository-relative to their
+source member, recorded and never fetched.
+`uses` and `plugin_for` are integration kinds, so the reverse edge does not
+become a dependency cycle and neither edge affects `order`, `levels` or
+`reverse_dependencies`; only `depends_on`, `dev_depends_on` and
+package-manifest edges do. The family entry groups the members without adding
+an edge.
+
+Relationship endpoints are selected member ids, not qualified node keys: use
+the declared `id` when the member has one, otherwise its derived alias. Both
+endpoints must resolve among the selected members; an explicit `--repo`
+selection that omits one endpoint is reported as an error rather than a
+guessed edge. Explicit `--repo` selection also ignores manifest ids, so use
+normal manifest membership when a declaration names a declared id; otherwise
+the name must match the derived alias. `source` and `target` must differ,
+duplicate `(source, target, relation)` entries are rejected, and unknown
+fields are errors. `provenance` is required and `evidence` is an optional
+bounded list of strings that is never fetched or read.
+
+`relation` is a bounded string. The report classifies known values
+as `dependency` (`depends_on`, `dev_depends_on`), `lineage` (`forked_from`,
+`upstream_of`, `sibling_of`), `integration` (`uses`, `integrates_with`,
+`plugin_for`), `grouping` (`part_of`) or `documentation` (`documents`,
+`documented_by`). Other values are preserved as `opaque`. Only dependency
+edges participate in cycle, topological-order and reverse-dependency
+analysis; lineage and descriptive edges remain visible but do not imply a
+build order.
+
+`families` are named groups, not edges. A family has a bounded `id` in the
+same lowercase `[a-z0-9._-]` form as member ids, an optional `label`, one or
+more selected member ids, and a required `provenance`. A member may appear in more than one family. Family membership
+is reported on each member and as a top-level `families` list. Invalid family
+entries are reported and omitted; valid entries are kept.
+
+### Family-aware retrieval
+
+Federated search can prefer hits from members that share a declared family
+with the anchor, but only when the caller opts in:
+
+```python
+result = federation.search(root, "shared cache", family_boost=True)
+```
+
+`family_boost` defaults to `False`, and the default ordering is exactly the
+lexical baseline. The flag is exposed on the library search API, the federation
+CLI (`ozagia federation search QUERY --family-boost`) and the `federation_search`
+MCP tool; every surface keeps it off unless the caller sets it. When enabled,
+the anchor is the first selected member; hits from a member in one of the
+anchor's families gain an additive `0.15` rank boost, capped at `1.0`. The
+original lexical `score` is retained and `rank_score` carries the boosted value.
+Non-family hits remain visible and are only re-ranked, never filtered.
+Rank-score ties prefer family matches, then the baseline member-id/key order, so
+repeated searches are deterministic.
+
+Each hit reports `family_match` and its declared `families`. The result carries
+`family_boost` and a `families` section with `state` (`disabled`, `absent`,
+`ok`, `partial` or `invalid`), `by_member`, the declared records and normalized
+`errors`. Missing or invalid declarations do not fail the search; they leave
+the ranking unchanged and are reported.
+
+The paired fixture evaluation in `evaluation/family_retrieval/` moves four
+constructed family answers from rank 2 to rank 1 while a control query is
+unchanged (`docs/results/family_retrieval_2026-11-27.md`). That is a
+fixture-level mechanism check, not evidence of general retrieval benefit. The
+default therefore stays off. Changing the default is gated by a paired
+evaluation on real repositories and queries with no regression and a
+meaningful gain; that evaluation has not been run.
+
+### API relationships and references
+
+When member snapshots contain OpenAPI operations or explicit `ApiMapping`
+nodes, the report adds an `apis` section with canonical API references and
+repository-level API edges. A reference is built from the best available
+source in each snapshot, in this order:
+
+1. `openapi_operation`: `repo:file#operationId`, plus the OpenAPI
+   `source_pointer` when the indexer recorded one. This is the strongest
+   identity because it is the contract's own operation identifier.
+2. `openapi_path`: `repo:file#METHOD path` when `operationId` is absent.
+3. `code_reference`: an explicit `ApiCodeReference` (`repo:path#symbol`) when
+   the member has no OpenAPI operation to use as a better source.
+4. `operation_identity`: `member::METHOD path` as a display-only fallback when
+   no file or operation identifier is available.
+
+Each reference reports its `kind`, `authority` (`contract`, `contract_path`,
+`code_mapping` or `operation_identity`), `source_rank`, optional
+`source_pointer`, `alternates`, and the selected members that reported it.
+References are ordered by source rank and never fetched, resolved over the
+network or read from a working tree.
+
+Repository API edges come only from explicit `ApiMapping` nodes already in the
+snapshots (normally produced by the explicit registry described in
+[API mappings](api-mappings.md)):
+
+- `produces_api` marks a repository as a producer of that reference;
+- `consumes_api` creates `consumer → producer` edges when a producer mapping
+  exists for the same reference;
+- `tests_api` creates `tester → producer` edges;
+- a producer also gets `producer → contract` `implements_api` when the
+  reference is an OpenAPI operation in another selected member.
+
+API edges are emitted only between selected member identities. A mapping whose
+explicit code `repo` namespace is not a selected alias remains visible in
+`apis.mappings` but creates no repository edge; it is never retargeted by a
+name match.
+
+A consumer or test mapping with no producer mapping is listed under
+`unpaired`; no edge is invented. Matching `operationId`, method or path across
+snapshots without an explicit mapping never creates a repository edge.
+Mappings must be explicitly `inference: false`; inferred or unmarked mappings,
+mappings with an unresolved operation reference and mappings without a code
+location are rejected and reported. Repeated operation evidence from several
+snapshots merges into one reference: missing method/path/pointer fields are
+filled from another copy, while conflicting populated fields are reported as
+ambiguity. Duplicate mappings for the same reference and code location
+collapse into one repository edge that keeps all provenance entries.
+
+```json
+"apis": {
+  "state": "ok",
+  "source_order": ["openapi_operation", "openapi_path",
+                   "code_reference", "operation_identity"],
+  "references": [
+    {"id": "contracts:openapi.json#listPets", "kind": "openapi_operation",
+     "authority": "contract", "repo": "contracts", "file": "openapi.json",
+     "operation_id": "listPets", "method": "GET", "path": "/pets",
+     "source_pointer": "#/paths/~1pets/get",
+     "members": ["contracts", "service", "client"]}
+  ],
+  "edges": [
+    {"source": "client", "target": "service", "relation": "consumes_api",
+     "kind": "integration", "origin": "api_mapping",
+     "reference": "contracts:openapi.json#listPets",
+     "reference_kind": "openapi_operation", "authority": "contract",
+     "provenance": [{"source": "registry.json", "pointer": "#/mappings/1"}]}
+  ],
+  "unpaired": [],
+  "counts": {"references": 1, "mappings": 3, "edges": 3,
+             "unpaired": 0, "errors": 0}
+}
+```
+
+The API section is bounded to 2,000 references, 1,000 mappings, 1,000
+repository edges, 200 unpaired mappings and 100 errors. API edges are
+integration evidence and are not added to the package dependency view used for
+cycles, levels or reverse build dependencies. The `federation check` API
+`overall` verdict is unchanged; `repository_relations.state` becomes
+`partial` when the API report has errors or truncation. API identity is
+evidence from the snapshot, not proof that a consumer calls a producer at
+runtime or that the contract is compatible.
+
+### Adapter-declared dynamic bridges
+
+Some integrations are visible only as a dynamic import, protocol lookup,
+plugin entry or subprocess call in one member's source. Ozagia does not infer a
+repository relationship from that code. Instead, an adapter that already reads
+its own checkout may declare the bridge explicitly through
+`ozagia.core.repo_bridges.add_repo_bridge`, which validates and emits one
+snapshot node. The helper performs no filesystem read, module resolution,
+target import, execution or network access; the adapter owns discovery and
+cites repository-relative evidence.
+
+A bridge node has this shape:
+
+```json
+{
+  "type": "RepoBridge",
+  "key": "repo_bridge:bigville::ocelot::dynamic_import::worlds.bigville_ocelot_adapter",
+  "attrs": {
+    "source_repo": "bigville",
+    "target_repo": "ocelot",
+    "relation": "dynamic_import",
+    "provenance": "Bigville's ocelot backend dynamically imports Ocelot's Bigville resident adapter",
+    "evidence": [
+      {"path": "bigville/backends/ocelot.py", "line": 15},
+      {"path": "tests/test_bigville_ocelot_fresh_process.py", "line": 62}
+    ],
+    "symbol": "worlds.bigville_ocelot_adapter",
+    "explicit": true
+  }
+}
+```
+
+`source_repo`, `target_repo`, `relation` and `provenance` are required.
+`relation` is normalized to lowercase and must start with a letter, using only
+`[a-z0-9_]`; it is typically
+`dynamic_import`, `protocol`, `plugin` or `subprocess`; it is a bounded
+description, not a closed build-relationship enum. `evidence` is optional and
+may contain strings or `{path, line}` objects. `symbol` is optional. The
+helper always writes `explicit: true`; a node with `explicit: false`, missing
+provenance, unknown attributes or out-of-bounds text is rejected and reported,
+never converted into an edge.
+
+`repo_relations` scans member snapshots and adds accepted bridges to the
+top-level `edges` list with `origin: "adapter_bridge"` and
+`kind: "integration"`. Both aliases must resolve among the selected members.
+A bridge to an external, unindexed or explicitly unselected repository is
+listed under `bridges.unpaired` with `reason: "target_not_selected"` (or the
+source equivalent); it creates no edge and no placeholder member. Duplicate
+nodes for the same `(source, target, relation, symbol)` collapse into one edge
+with merged provenance, evidence and declaring members. The section is
+bounded and reports its own state:
+
+```json
+"bridges": {
+  "state": "ok",
+  "edges": [
+    {"source": "bigville", "target": "ocelot",
+     "relation": "dynamic_import", "kind": "integration",
+     "origin": "adapter_bridge", "explicit": true,
+     "provenance": ["Bigville's ocelot backend dynamically imports Ocelot's Bigville resident adapter"],
+     "evidence": [{"path": "bigville/backends/ocelot.py", "line": 15},
+                  {"path": "tests/test_bigville_ocelot_fresh_process.py", "line": 62}],
+     "members": ["bigville"],
+     "symbol": "worlds.bigville_ocelot_adapter"}
+  ],
+  "unpaired": [],
+  "errors": [],
+  "truncated": false,
+  "counts": {"nodes": 1, "edges": 1, "unpaired": 0, "errors": 0}
+}
+```
+
+A bridge is integration evidence only. It stays out of `dependencies`, cycle
+detection, `order`, `levels` and `reverse_dependencies`, so a mutual dynamic
+bridge cannot create a build-order cycle. It does not prove that the target
+was installed, that the import succeeded, or that the two repositories are
+compatible. The Bigville adapter demonstrates the pattern by declaring
+`bigville -> ocelot dynamic_import` for
+`worlds.bigville_ocelot_adapter`, citing its own
+`bigville/backends/ocelot.py`; it never imports Ocelot or reads the Ocelot
+checkout. The separately declared `relationships` example above remains a
+maintainer assertion about the integration, not a second copy inferred from
+this bridge.
+
+The bridge section is limited to 100 edges, 100 unpaired entries and 100
+errors. Each bridge node has at most 10 evidence entries, 500 characters of
+provenance/text and an 80-character relation; a deduplicated edge keeps at
+most 10 provenance and 10 evidence entries. Entries are sorted
+lexicographically before truncation, so the retained ten do not depend on
+declaration order; truncation sets `bridges.truncated`, adds a message to
+`bridges.notes`, and mirrors it in the report's top-level `notes` and
+`truncated`. `repository_relations.state`
+becomes `partial` when the bridge section is partial. Use
+`--no-sync` for a cache-only query.
+
+### Package-derived edges
+
+Each resolved row in `dependency_links` is collapsed to one directed edge per
+consumer/provider pair with `origin: "package_manifest"` and
+`provenance: "declared_dependency"`. The edge keeps the package rows,
+requirements, provided versions, source/provider manifests, optional/group
+flags and an aggregate `status` (`mismatch` wins over `unknown`, which wins
+over `satisfied`). Unresolved and ambiguous package rows do not create a
+repository edge; they remain visible in `dependency_links`.
+
+Declared, package-derived, explicit API mapping and accepted adapter bridge
+edges are all kept in `edges`. The `dependencies` list merges only dependency
+edges by source/target pair and records the contributing `origins` and
+`relations`; API mapping and adapter bridge edges are integration evidence and
+stay out of the package dependency view. Only that dependency view is used
+for:
+
+- `cycles`: groups of members in a dependency cycle, reported as strongly
+  connected components rather than enumerating every simple cycle;
+- `order` and `levels`: a deterministic topological order and longest-path
+  levels when there is no cycle;
+- `reverse_dependencies`: direct dependents of each selected member.
+
+The report never infers a relationship from repository names, symbol names,
+federated search hits, dynamic imports, Git remotes or lockfiles. A dynamic
+import becomes an edge only through an explicit adapter `RepoBridge`
+declaration with source evidence, as described above. Package edges come only
+from the current declared manifests described under
+[declared dependency links](#declared-dependency-links); transitive resolution
+and package-manager execution do not occur. Declarations and package edges are
+current-checkout evidence, not proof of a runtime call, deployment or
+compatibility. The report performs no writes and no network access beyond the
+optional reference synchronization described above; use `--no-sync` to keep a
+query cache-only.
+
+```sh
+ozagia federation relations --root ~/work/bigville --no-sync
+ozagia federation check --root ~/work/bigville --no-sync
+```
+
+The section is bounded: at most 100 declared relationships, 32 families, 64
+members per family, 10 evidence strings per relationship, 20 package rows per
+edge, 64 reverse-dependency entries per member and 100 adapter bridge edges.
+Truncation is reported under `truncated`/`notes` or in the corresponding
+subsection.
+
+### Persisted relationship supergraph
+
+`ozagia federation build` writes the relationship report from
+`cross_repo.relations` as a bounded `ozagia.supergraph.v1` JSON artifact. The
+default path is the anchor's `supergraph.json` state path
+(`<anchor>/.ozagia/supergraph.json`, honoring `OZAGIA_STATE_DIR`); `--out`
+overrides it. The artifact stores member metadata, declared/package/API/
+adapter-bridge edges, families, API references and mappings, dependency
+order/cycles/reverse links, counts, notes and bounded errors. It does not store
+a full member node union; each member's `graph.json` remains the source for
+node and edge detail.
+
+`ozagia federation graph` reads an existing artifact without rebuilding.
+`--refresh` rebuilds when the artifact is `absent`, `stale`, `invalid` or for a
+different explicit `--repo` selection. `--no-sync` suppresses reference
+fast-forward for both commands.
+
+Freshness is source-hash based: each selected member's snapshot bytes and the
+anchor's `federation.json` bytes are hashed into the artifact, and `read`
+recomputes them. Results are `fresh`, `stale`, `absent` or `invalid` and
+include a shell-quoted rebuild command; `graph` never repairs an artifact
+implicitly. A changed manifest marks every member contribution stale. Because
+freshness is byte-based, a git HEAD or working-tree change that does not
+rewrite a snapshot or the manifest does not make the artifact stale.
+
+An explicit `--out` is refused inside a selected member checkout outside that
+member's `.ozagia/` directory, and it refuses a member's `graph.json` or
+`federation.json` target. Other `.ozagia` artifact paths are allowed. The
+artifact is bounded to 8 MiB and 128 members. See
+[the supergraph result](results/supergraph_2026-11-27.md) for recorded
+verification and limits.
 
 ## Identity and freshness limits
 

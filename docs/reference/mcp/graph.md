@@ -49,7 +49,7 @@ Breadth-first walk from keys along edge types (default all graph edges, both dir
 | `limit` | integer |  | 50 | — |
 ### `federation_check`
 
-Read-only static checks for declared cross-repository API and code-to-infrastructure relationships, plus declared package dependency links between members. Designated references may be fetched and fast-forwarded over Git; set no_sync to opt out. Indexes are not refreshed; missing evidence remains unknown.
+Read-only static checks for declared cross-repository API and code-to-infrastructure relationships, explicit API mappings with contract-first references, declared package dependency links, and declared or package-derived repository relationships. Designated references may be fetched and fast-forwarded over Git; set no_sync to opt out. Indexes are not refreshed; missing evidence remains unknown.
 
 | parameter | type | required | default | description |
 |---|---|---|---|---|
@@ -66,13 +66,14 @@ Read-only inspection of a qualified federated node and its snapshot-local edges.
 | `no_sync` | boolean |  | false | — |
 ### `federation_search`
 
-Read-only lexical search over discovered or explicitly selected repository snapshots. Designated references may be fetched and fast-forwarded over Git; set no_sync to opt out. Results retain provenance; no index is refreshed.
+Read-only lexical search over discovered or explicitly selected repository snapshots. Designated references may be fetched and fast-forwarded over Git; set no_sync to opt out. Results retain provenance; no index is refreshed. Set family_boost true to prefer hits from members sharing a declared anchor family; it is opt-in and defaults to false.
 
 | parameter | type | required | default | description |
 |---|---|---|---|---|
 | `query` | string | yes |  | — |
 | `roots` | array |  |  | Optional explicit member roots. |
 | `limit` | integer |  | 20 | — |
+| `family_boost` | boolean |  | false | Prefer hits from members sharing a declared anchor family (opt-in; default off). |
 | `no_sync` | boolean |  | false | — |
 ### `federation_status`
 

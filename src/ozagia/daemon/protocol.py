@@ -192,6 +192,13 @@ Requests (`op`):
       or context error is returned as an empty context with
       `meta.intent: "hint_error"`; an expired `deadline_ms` returns an empty
       context with `expired: true`.
+      If the Ocelot workspace adapter registered `ocelot_context`, the first
+      OpenCode `hint` of a session also appends one bounded
+      `[ozagia ocelot]` read-only block (the adapter query runs only local
+      git/file checks; no model or network call) and reports
+      `meta.ocelot` with `available`, `state`, `mode`, `test_count` and
+      `truncated`. The block and metadata are absent when the adapter is not
+      registered; a failed query leaves the context untouched.
 
     {"id": 15, "op": "secrets", "action": "providers"}
       -> {"id": 15, "ok": true, "providers": [...],

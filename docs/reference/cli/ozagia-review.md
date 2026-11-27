@@ -16,8 +16,7 @@ usage: ozagia-review [-h] [--root ROOT] --range BASE..HEAD [--graph GRAPH]
                      [--ocelot] [--ocelot-root OCELOT_ROOT]
                      [--ocelot-mode {auto,inprocess,subprocess}]
                      [--ocelot-timeout OCELOT_TIMEOUT] [--ocelot-impact]
-                     [--ocelot-patterns] [--library-hints |
-                     --no-library-hints]
+                     [--ocelot-patterns] [--library-hints | --no-library-hints]
 ```
 
 | option | type | values | default | help |

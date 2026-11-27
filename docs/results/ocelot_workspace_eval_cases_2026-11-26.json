@@ -1,0 +1,119 @@
+{
+  "schema": "ozagia.ocelot.eval_cases.v1",
+  "date": "2026-11-26",
+  "root": "/home/matt/ozma/ocelot",
+  "checkout": "24c56891efa4994b87b357f8df8918559caf816c",
+  "note": "Historical Ocelot commits replayed offline against the planner snapshot. changed is the commit's file list; expected_tests are the test files the commit itself touched. expected_mode=full for engine changes and none for documentation-only changes. The recall metric is commit-touched test coverage plus full-gate routing, not independent recall. This is a planner replay, not a live model-task gain.",
+  "cases": [
+    {
+      "name": "a6eb3a60 sd re-arm + ClosestShape (engine, block 371000)",
+      "changed": [
+        "runners/dsl/python/substrate_rs/_native.abi3.so",
+        "runners/dsl/python/substrate_rs/_native.build.json",
+        "runners/dsl/src/jsonio.rs",
+        "runners/dsl/src/reflect.rs",
+        "runners/dsl/src/rewrite.rs",
+        "runners/dsl/src/shape.rs",
+        "runners/dsl/src/shape_decode.rs",
+        "runners/dsl/src/term.rs",
+        "runners/dsl/src/term_variants.rs",
+        "scripts/gen_sd_rearm_and_closest_shape.py",
+        "seeds/shape_decode_loop.json",
+        "tests/test_affect_frame_v02.py",
+        "tests/test_agnosia_migrated.py",
+        "tests/test_det1_migrated.py",
+        "tests/test_sd_rearm_closest_shape_migrated.py"
+      ],
+      "expected_tests": [
+        "tests/test_affect_frame_v02.py",
+        "tests/test_agnosia_migrated.py",
+        "tests/test_det1_migrated.py",
+        "tests/test_sd_rearm_closest_shape_migrated.py"
+      ],
+      "expected_mode": "full"
+    },
+    {
+      "name": "64ce1af6 selector audit + similarity alias (engine, block 371000)",
+      "changed": [
+        "runners/dsl/python/substrate_rs/_native.abi3.so",
+        "runners/dsl/python/substrate_rs/_native.build.json",
+        "runners/dsl/src/shape_decode.rs",
+        "tests/test_similarity_migrated.py"
+      ],
+      "expected_tests": [
+        "tests/test_similarity_migrated.py"
+      ],
+      "expected_mode": "full"
+    },
+    {
+      "name": "d3000ad5 Affect frame v0.2 (seed + script, block 370000)",
+      "changed": [
+        "docs/research/psychology_affect/AFFECT_FRAME_V02_RESULTS.md",
+        "docs/research/psychology_affect/INDEX.md",
+        "scripts/build_affect_frame_seed.py",
+        "seeds/affect_frame.json",
+        "seeds/affect_frame_canonical.json",
+        "tests/test_affect_frame_codebook.py",
+        "tests/test_affect_frame_v02.py"
+      ],
+      "expected_tests": [
+        "tests/test_affect_frame_codebook.py",
+        "tests/test_affect_frame_v02.py"
+      ],
+      "expected_mode": "affected"
+    },
+    {
+      "name": "77ba15a7 affect direction judgement (block 368000)",
+      "changed": [
+        "docs/research/psychology_affect/AFFECT_DIRECTION_JUDGEMENT_RESULTS.md",
+        "docs/research/psychology_affect/INDEX.md",
+        "tests/test_affect_direction_judgement.py"
+      ],
+      "expected_tests": [
+        "tests/test_affect_direction_judgement.py"
+      ],
+      "expected_mode": "affected"
+    },
+    {
+      "name": "6ed6d3c5 affect map reuse + grid code (block 367000)",
+      "changed": [
+        "docs/research/psychology_affect/AFFECT_MAP_REUSE_GRID_CODE_RESULTS.md",
+        "docs/research/psychology_affect/INDEX.md",
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "expected_tests": [
+        "tests/test_affect_map_reuse_gridcode.py"
+      ],
+      "expected_mode": "affected"
+    },
+    {
+      "name": "c7fcde64 pin affect-frame G-0 range",
+      "changed": [
+        "tests/test_affect_frame_v02.py"
+      ],
+      "expected_tests": [
+        "tests/test_affect_frame_v02.py"
+      ],
+      "expected_mode": "affected"
+    },
+    {
+      "name": "e67d7b73 block 371000 results only",
+      "changed": [
+        "docs/research/engine_substrate/INDEX.md",
+        "docs/research/engine_substrate/SD_LOOP_REARM_AND_JSON_SIGNATURE_RESULTS.md"
+      ],
+      "expected_tests": [],
+      "expected_mode": "none"
+    },
+    {
+      "name": "1281a482 block 371000 preregistration only",
+      "changed": [
+        "docs/research/engine_substrate/INDEX.md",
+        "docs/research/engine_substrate/SD_LOOP_REARM_AND_JSON_SIGNATURE_PREREG.md",
+        "docs/research/engine_substrate/SD_LOOP_REARM_SCOPE.txt"
+      ],
+      "expected_tests": [],
+      "expected_mode": "none"
+    }
+  ]
+}

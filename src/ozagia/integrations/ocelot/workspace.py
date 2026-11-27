@@ -11,7 +11,9 @@ The adapter is enabled by a project config in the Ocelot checkout::
     modules = ["ozagia.integrations.ocelot.workspace:register"]
 
 It registers the indexer, graph queries and MCP tools ``ocelot_status``,
-``ocelot_seed``, ``ocelot_seeds`` and ``ocelot_plan``.
+``ocelot_context``, ``ocelot_seed``, ``ocelot_seeds``, ``ocelot_plan``,
+``ocelot_engine``, ``ocelot_research``, ``ocelot_claim_check``,
+``ocelot_seed_validate``, ``ocelot_seed_edit`` and ``ocelot_boot_edit``.
 
 Generated caches (``seeds/acquired``, ``seeds/generated``, ``data``,
 ``results`` and evaluation reports) are deliberately not indexed. The
@@ -1055,6 +1057,21 @@ def register(registry: Any) -> None:
     try:
         from .workspace_validate import register_validate
         register_validate(registry)
+    except ImportError:  # pragma: no cover - partial source tree
+        pass
+    try:
+        from .workspace_seed_edit import register_seed_edit
+        register_seed_edit(registry)
+    except ImportError:  # pragma: no cover - partial source tree
+        pass
+    try:
+        from .workspace_context import register_context
+        register_context(registry)
+    except ImportError:  # pragma: no cover - partial source tree
+        pass
+    try:
+        from .workspace_boot import register_boot_edit
+        register_boot_edit(registry)
     except ImportError:  # pragma: no cover - partial source tree
         pass
 

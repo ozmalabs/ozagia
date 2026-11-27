@@ -33,8 +33,7 @@ usage: ozagia-files list [-h] [--classification CLASSIFICATION]
 
 ```
 usage: ozagia-files scan [-h] [--session SESSION] [--task TASK]
-                         [--reason REASON] [--tool TOOL] [--root ROOT]
-                         [--json]
+                         [--reason REASON] [--tool TOOL] [--root ROOT] [--json]
 ```
 
 | option | type | values | default | help |
@@ -77,8 +76,8 @@ usage: ozagia-files orphans [-h] [--root ROOT] [--json]
 ```
 usage: ozagia-files cleanup [-h] [--older-than-days OLDER_THAN_DAYS]
                             [--classification CLASSIFICATION] [--apply]
-                            [--confirm CONFIRM] [--force]
-                            [--include-referenced] [--root ROOT] [--json]
+                            [--confirm CONFIRM] [--force] [--include-referenced]
+                            [--root ROOT] [--json]
 ```
 
 | option | type | values | default | help |
@@ -143,8 +142,8 @@ usage: ozagia-files restore [-h] [--root ROOT] [--json] trash_id [paths ...]
 ## `ozagia-files route`
 
 ```
-usage: ozagia-files route [-h] [--content-file CONTENT_FILE]
-                          [--session SESSION] [--root ROOT] [--json]
+usage: ozagia-files route [-h] [--content-file CONTENT_FILE] [--session SESSION]
+                          [--root ROOT] [--json]
                           path
 ```
 
