@@ -452,11 +452,14 @@ the ranking unchanged and are reported.
 
 The paired fixture evaluation in `evaluation/family_retrieval/` moves four
 constructed family answers from rank 2 to rank 1 while a control query is
-unchanged (`docs/results/family_retrieval_2026-11-27.md`). That is a
-fixture-level mechanism check, not evidence of general retrieval benefit. The
-default therefore stays off. Changing the default is gated by a paired
-evaluation on real repositories and queries with no regression and a
-meaningful gain; that evaluation has not been run.
+unchanged (`docs/results/family_retrieval_2026-11-27.md`). A follow-up check
+uses real Bigville, Ocelot and Ozagia snapshots but still constructs near-tie
+queries; it also moves all four family answers to rank 1 with an unchanged
+control (`docs/results/family_retrieval_real_2026-11-27.md`). Both are
+mechanism checks, not evidence of general retrieval benefit or the rate at
+which real queries are near-ties. The default therefore stays off. Changing it
+is gated by a representative paired evaluation on real queries with no
+regression and a meaningful gain; that evaluation has not been run.
 
 ### API relationships and references
 

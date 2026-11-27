@@ -223,10 +223,12 @@ hits remain in the results, and ties are deterministic. The default is
 
 The paired fixture evaluation in `evaluation/family_retrieval/` moved four
 constructed family answers from rank 2 to rank 1 while its control query was
-unchanged (`docs/results/family_retrieval_2026-11-27.md`). This is a
-fixture-level mechanism check, not evidence of general retrieval benefit. No
-real-repository evaluation has been run, so the default stays off; changing it
-is gated by a paired evaluation on real repositories and queries with no
+unchanged (`docs/results/family_retrieval_2026-11-27.md`). A follow-up on real
+Bigville, Ocelot and Ozagia snapshots moved four constructed near-tie family
+answers from ranks 2, 2, 3 and 12 to rank 1, with the Ozagia control unchanged
+(`docs/results/family_retrieval_real_2026-11-27.md`). Both are mechanism checks,
+not evidence of general retrieval benefit. The default stays off; changing it
+is gated by a representative paired evaluation on real queries with no
 regression and a meaningful gain.
 
 ## Limits
@@ -249,8 +251,9 @@ regression and a meaningful gain.
   supergraph, incremental member cache or organization access-control model.
 - Supergraph freshness is byte-based, and a stale artifact rebuilds the whole
   relationship report rather than applying per-member increments.
-- Family ranking is opt-in and has only a fixture-level paired evaluation. The
-  default remains off pending a real-repository paired evaluation.
+- Family ranking is opt-in and has fixture-level and real-snapshot
+  constructed-query mechanism checks. The default remains off pending a
+  representative paired evaluation on real queries.
 
 ## Verification
 
@@ -335,9 +338,10 @@ None of the following is implemented by this batch.
 - A full node-union supergraph with cross-repository symbol search. The W6
   artifact caches relationship metadata and edges only; member nodes remain in
   each `graph.json`.
-- A real-repository paired evaluation of family-aware ranking. The fixture
-  check verifies the mechanism only; the default stays off until a
-  real-repository evaluation shows no regression and a meaningful gain.
+- A representative paired evaluation of family-aware ranking on real queries.
+  The fixture and real-snapshot constructed-query checks verify the mechanism
+  only; the default stays off until a representative evaluation shows no
+  regression and a meaningful gain.
 - Organization-wide manifests and an access-control model for federation
   membership. Current manifests are per anchor and do not carry organization
   policy.

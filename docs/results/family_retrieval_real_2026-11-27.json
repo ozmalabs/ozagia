@@ -1,0 +1,1526 @@
+{
+  "evaluation": "family-aware federation search on real repository snapshots",
+  "date": "2026-11-27",
+  "kind": "real repository snapshots with constructed frozen queries",
+  "default_behavior": "family_boost=False; lexical ranking unchanged",
+  "boost": 0.15,
+  "rank_limit": 20,
+  "sample_size": {
+    "queries": 5,
+    "family_queries": 4,
+    "control_queries": 1
+  },
+  "arms": {
+    "baseline": {
+      "family_boost": false
+    },
+    "family_boost": {
+      "family_boost": true
+    }
+  },
+  "family_state": {
+    "state": "ok",
+    "by_member": {
+      "bigville": [
+        "simulation-stack"
+      ],
+      "ocelot": [
+        "simulation-stack"
+      ],
+      "ozagia": []
+    },
+    "families": [
+      {
+        "id": "simulation-stack",
+        "label": "Bigville/Ocelot simulation stack",
+        "provenance": "evaluation fixture declaration; real checkouts, no runtime dependency inferred",
+        "members": [
+          "bigville",
+          "ocelot"
+        ],
+        "unresolved": []
+      }
+    ],
+    "errors": [],
+    "truncated": false
+  },
+  "members": [
+    {
+      "id": "bigville",
+      "name": "bigville",
+      "root": "/tmp/opencode/family-real/bigville",
+      "snapshot": "/tmp/opencode/family-real/bigville/.ozagia/graph.json",
+      "state": "stale",
+      "detail": "snapshot root differs from checkout path",
+      "identity_source": "derived",
+      "head": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+      "generated_at": "2026-11-27T14:26:43",
+      "nodes": 9385,
+      "edges": 37302
+    },
+    {
+      "id": "ocelot",
+      "name": "ocelot",
+      "root": "/tmp/opencode/family-real/ocelot",
+      "snapshot": "/tmp/opencode/family-real/ocelot/.ozagia/graph.json",
+      "state": "stale",
+      "detail": "snapshot root differs from checkout path",
+      "identity_source": "declared",
+      "head": "b7fda1c9dcc7a0c86f259f4083f66f65260605aa",
+      "generated_at": "2026-11-27T14:26:47",
+      "nodes": 87857,
+      "edges": 253080
+    },
+    {
+      "id": "ozagia",
+      "name": "ozagia",
+      "root": "/tmp/opencode/family-real/ozagia",
+      "snapshot": "/tmp/opencode/family-real/ozagia/.ozagia/graph.json",
+      "state": "stale",
+      "detail": "snapshot root differs from checkout path",
+      "identity_source": "declared",
+      "head": "dc3bc2367dcc88039f43a6b9fd844a304ea21a74",
+      "generated_at": "2026-11-27T14:28:25",
+      "nodes": 20470,
+      "edges": 66657
+    }
+  ],
+  "aggregate": {
+    "all": {
+      "baseline": {
+        "queries": 5,
+        "hit@1": 0.2,
+        "hit@3": 0.8,
+        "hit@5": 0.8,
+        "mrr": 0.4833
+      },
+      "family_boost": {
+        "queries": 5,
+        "hit@1": 1.0,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 1.0
+      },
+      "delta": {
+        "hit@1": 0.8,
+        "hit@3": 0.2,
+        "hit@5": 0.2,
+        "mrr": 0.5167
+      }
+    },
+    "family": {
+      "baseline": {
+        "queries": 4,
+        "hit@1": 0.0,
+        "hit@3": 0.75,
+        "hit@5": 0.75,
+        "mrr": 0.3542
+      },
+      "family_boost": {
+        "queries": 4,
+        "hit@1": 1.0,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 1.0
+      },
+      "delta": {
+        "hit@1": 1.0,
+        "hit@3": 0.25,
+        "hit@5": 0.25,
+        "mrr": 0.6458
+      }
+    },
+    "control": {
+      "baseline": {
+        "queries": 1,
+        "hit@1": 1.0,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 1.0
+      },
+      "family_boost": {
+        "queries": 1,
+        "hit@1": 1.0,
+        "hit@3": 1.0,
+        "hit@5": 1.0,
+        "mrr": 1.0
+      },
+      "delta": {
+        "hit@1": 0.0,
+        "hit@3": 0.0,
+        "hit@5": 0.0,
+        "mrr": 0.0
+      }
+    }
+  },
+  "queries": [
+    {
+      "id": "bigville-scenario-coverage-near-tie",
+      "kind": "family",
+      "query": "bigville test coverage evidence audit simple scenario",
+      "rationale": "Bigville's independent scenario coverage audit is the expected answer; Ozagia's Bigville test-coverage audit is a cross-repo lexical competitor one term ahead.",
+      "answer": "bigville::doc:docs/SIMPLE_SCENARIO_COVERAGE_AUDIT.md",
+      "answer_path": "docs/SIMPLE_SCENARIO_COVERAGE_AUDIT.md",
+      "distractor": "ozagia::doc:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+      "distractor_path": "docs/results/bigville_test_coverage_audit_2026-11-27.md",
+      "baseline": {
+        "rank": 2,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 0.5
+      },
+      "family_boost": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "baseline_distractor_rank": 1,
+      "family_boost_distractor_rank": 3,
+      "answer_family_match": true,
+      "top_baseline": [
+        {
+          "qualified_key": "ozagia::doc:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+          "score": 0.7143,
+          "rank_score": 0.7143,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_SCENARIO_COVERAGE_AUDIT.md",
+          "score": 0.5714,
+          "rank_score": 0.5714,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::file:docs/SIMPLE_SCENARIO_COVERAGE_AUDIT.md",
+          "score": 0.5714,
+          "rank_score": 0.5714,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::file:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+          "score": 0.5714,
+          "rank_score": 0.5714,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::file:bigville/llm_scenario.py",
+          "score": 0.4286,
+          "rank_score": 0.4286,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::file:tests/test_bigville_scenarios.py",
+          "score": 0.4286,
+          "rank_score": 0.4286,
+          "family_match": false
+        }
+      ],
+      "top_family_boost": [
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_SCENARIO_COVERAGE_AUDIT.md",
+          "score": 0.5714,
+          "rank_score": 0.7214,
+          "family_match": true
+        },
+        {
+          "qualified_key": "bigville::file:docs/SIMPLE_SCENARIO_COVERAGE_AUDIT.md",
+          "score": 0.5714,
+          "rank_score": 0.7214,
+          "family_match": true
+        },
+        {
+          "qualified_key": "ozagia::doc:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+          "score": 0.7143,
+          "rank_score": 0.7143,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::file:bigville/llm_scenario.py",
+          "score": 0.4286,
+          "rank_score": 0.5786,
+          "family_match": true
+        },
+        {
+          "qualified_key": "bigville::file:tests/test_bigville_scenarios.py",
+          "score": 0.4286,
+          "rank_score": 0.5786,
+          "family_match": true
+        },
+        {
+          "qualified_key": "bigville::file:tests/test_body_mass_report_adapter.py",
+          "score": 0.4286,
+          "rank_score": 0.5786,
+          "family_match": true
+        }
+      ],
+      "delta_rank": -1,
+      "delta_reciprocal_rank": 0.5,
+      "first_family_hit_rank_family_boost": 1
+    },
+    {
+      "id": "bigville-boundary-audit-near-tie",
+      "kind": "family",
+      "query": "bigville simple village boundary audit coverage evidence test",
+      "rationale": "Bigville's legacy world-side boundary audit is the expected answer; Ozagia's Bigville coverage audit matches more query terms and leads by one term in the lexical baseline.",
+      "answer": "bigville::doc:docs/SIMPLE_BOUNDARY_AUDIT.md",
+      "answer_path": "docs/SIMPLE_BOUNDARY_AUDIT.md",
+      "distractor": "ozagia::doc:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+      "distractor_path": "docs/results/bigville_test_coverage_audit_2026-11-27.md",
+      "baseline": {
+        "rank": 2,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 0.5
+      },
+      "family_boost": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "baseline_distractor_rank": 1,
+      "family_boost_distractor_rank": 4,
+      "answer_family_match": true,
+      "top_baseline": [
+        {
+          "qualified_key": "ozagia::doc:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+          "score": 0.625,
+          "rank_score": 0.625,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_BOUNDARY_AUDIT.md",
+          "score": 0.5,
+          "rank_score": 0.5,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::test:tests/test_bigville_scenarios.py::test_compact_scenarios_share_the_world_boundary_without_village_defaults",
+          "score": 0.5,
+          "rank_score": 0.5,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ocelot::file:tests/test_phase4_decision_option_boundary.py",
+          "score": 0.5,
+          "rank_score": 0.5,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::file:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+          "score": 0.5,
+          "rank_score": 0.5,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_AFFORDANCE_BOUNDARY.md",
+          "score": 0.375,
+          "rank_score": 0.375,
+          "family_match": false
+        }
+      ],
+      "top_family_boost": [
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_BOUNDARY_AUDIT.md",
+          "score": 0.5,
+          "rank_score": 0.65,
+          "family_match": true
+        },
+        {
+          "qualified_key": "bigville::test:tests/test_bigville_scenarios.py::test_compact_scenarios_share_the_world_boundary_without_village_defaults",
+          "score": 0.5,
+          "rank_score": 0.65,
+          "family_match": true
+        },
+        {
+          "qualified_key": "ocelot::file:tests/test_phase4_decision_option_boundary.py",
+          "score": 0.5,
+          "rank_score": 0.65,
+          "family_match": true
+        },
+        {
+          "qualified_key": "ozagia::doc:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+          "score": 0.625,
+          "rank_score": 0.625,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_AFFORDANCE_BOUNDARY.md",
+          "score": 0.375,
+          "rank_score": 0.525,
+          "family_match": true
+        },
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_BOUNDARY_FINAL_REVIEW.md",
+          "score": 0.375,
+          "rank_score": 0.525,
+          "family_match": true
+        }
+      ],
+      "delta_rank": -1,
+      "delta_reciprocal_rank": 0.5,
+      "first_family_hit_rank_family_boost": 1
+    },
+    {
+      "id": "bigville-test-plan-near-tie",
+      "kind": "family",
+      "query": "bigville simple village test plan coverage audit results",
+      "rationale": "Bigville's staged village verification plan is the expected answer; Ozagia's Bigville coverage audit is a competitive cross-repo summary of the same evidence area.",
+      "answer": "bigville::doc:docs/SIMPLE_VILLAGE_TEST_PLAN.md",
+      "answer_path": "docs/SIMPLE_VILLAGE_TEST_PLAN.md",
+      "distractor": "ozagia::doc:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+      "distractor_path": "docs/results/bigville_test_coverage_audit_2026-11-27.md",
+      "baseline": {
+        "rank": 3,
+        "hit@1": false,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 0.3333333333333333
+      },
+      "family_boost": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "baseline_distractor_rank": 1,
+      "family_boost_distractor_rank": 4,
+      "answer_family_match": true,
+      "top_baseline": [
+        {
+          "qualified_key": "ozagia::doc:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+          "score": 0.625,
+          "rank_score": 0.625,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::file:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+          "score": 0.625,
+          "rank_score": 0.625,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_VILLAGE_TEST_PLAN.md",
+          "score": 0.5,
+          "rank_score": 0.5,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::file:docs/SIMPLE_VILLAGE_TEST_PLAN.md",
+          "score": 0.5,
+          "rank_score": 0.5,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::test:tests/test_fix_simple_village.py::test_an_exhausted_walk_is_still_refused_for_a_backend_plan",
+          "score": 0.5,
+          "rank_score": 0.5,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_BOUNDARY_AUDIT.md",
+          "score": 0.375,
+          "rank_score": 0.375,
+          "family_match": false
+        }
+      ],
+      "top_family_boost": [
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_VILLAGE_TEST_PLAN.md",
+          "score": 0.5,
+          "rank_score": 0.65,
+          "family_match": true
+        },
+        {
+          "qualified_key": "bigville::file:docs/SIMPLE_VILLAGE_TEST_PLAN.md",
+          "score": 0.5,
+          "rank_score": 0.65,
+          "family_match": true
+        },
+        {
+          "qualified_key": "bigville::test:tests/test_fix_simple_village.py::test_an_exhausted_walk_is_still_refused_for_a_backend_plan",
+          "score": 0.5,
+          "rank_score": 0.65,
+          "family_match": true
+        },
+        {
+          "qualified_key": "ozagia::doc:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+          "score": 0.625,
+          "rank_score": 0.625,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::file:docs/results/bigville_test_coverage_audit_2026-11-27.md",
+          "score": 0.625,
+          "rank_score": 0.625,
+          "family_match": false
+        },
+        {
+          "qualified_key": "bigville::doc:docs/SIMPLE_BOUNDARY_AUDIT.md",
+          "score": 0.375,
+          "rank_score": 0.525,
+          "family_match": true
+        }
+      ],
+      "delta_rank": -2,
+      "delta_reciprocal_rank": 0.6667,
+      "first_family_hit_rank_family_boost": 1
+    },
+    {
+      "id": "bigville-ocelot-integration-near-tie",
+      "kind": "family",
+      "query": "ocelot integration baseline workspace profile plan resident",
+      "rationale": "Bigville's supported Ocelot integration guide is the expected answer; Ozagia's Ocelot workspace plan is the stronger lexical match and an out-of-family competitor.",
+      "answer": "bigville::doc:docs/ocelot-integration-baseline.md",
+      "answer_path": "docs/ocelot-integration-baseline.md",
+      "distractor": "ozagia::doc:docs/plans/2026-11-26_ocelot_workspace.md",
+      "distractor_path": "docs/plans/2026-11-26_ocelot_workspace.md",
+      "baseline": {
+        "rank": 12,
+        "hit@1": false,
+        "hit@3": false,
+        "hit@5": false,
+        "reciprocal_rank": 0.08333333333333333
+      },
+      "family_boost": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "baseline_distractor_rank": 1,
+      "family_boost_distractor_rank": 11,
+      "answer_family_match": true,
+      "top_baseline": [
+        {
+          "qualified_key": "ozagia::doc:docs/plans/2026-11-26_ocelot_workspace.md",
+          "score": 0.5714,
+          "rank_score": 0.5714,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::file:src/ozagia/integrations/ocelot/workspace.py",
+          "score": 0.5714,
+          "rank_score": 0.5714,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::file:src/ozagia/integrations/ocelot/workspace_eval.py",
+          "score": 0.5714,
+          "rank_score": 0.5714,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::sym:src/ozagia/integrations/ocelot/workspace.py::_tool_plan",
+          "score": 0.5714,
+          "rank_score": 0.5714,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::sym:src/ozagia/integrations/ocelot/workspace.py::test_plan",
+          "score": 0.5714,
+          "rank_score": 0.5714,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::sym:src/ozagia/integrations/ocelot/workspace_cli.py::_format_plan",
+          "score": 0.5714,
+          "rank_score": 0.5714,
+          "family_match": false
+        }
+      ],
+      "top_family_boost": [
+        {
+          "qualified_key": "bigville::doc:docs/ocelot-integration-baseline.md",
+          "score": 0.4286,
+          "rank_score": 0.5786,
+          "family_match": true
+        },
+        {
+          "qualified_key": "bigville::file:docs/ocelot-integration-baseline.md",
+          "score": 0.4286,
+          "rank_score": 0.5786,
+          "family_match": true
+        },
+        {
+          "qualified_key": "bigville::sym:bigville/held_board_games.py::_HeldMonopolyWorldAdapter.resident_plan_from_context",
+          "score": 0.4286,
+          "rank_score": 0.5786,
+          "family_match": true
+        },
+        {
+          "qualified_key": "bigville::sym:worlds/bigville_world.py::BigvilleWorld.perform_plan",
+          "score": 0.4286,
+          "rank_score": 0.5786,
+          "family_match": true
+        },
+        {
+          "qualified_key": "ocelot::sym:scripts/ocelot_api.py::build_default_baseline",
+          "score": 0.4286,
+          "rank_score": 0.5786,
+          "family_match": true
+        },
+        {
+          "qualified_key": "ocelot::sym:tests/test_ocelot_api.py::test_cli_baseline_uses_validated_conversation_seed_profile.load_profile",
+          "score": 0.4286,
+          "rank_score": 0.5786,
+          "family_match": true
+        }
+      ],
+      "delta_rank": -11,
+      "delta_reciprocal_rank": 0.9167,
+      "first_family_hit_rank_family_boost": 1
+    },
+    {
+      "id": "ozagia-federation-control",
+      "kind": "control",
+      "query": "federated repository graphs discovery membership",
+      "rationale": "The answer is an Ozagia document outside the declared family. A family hit is visible in the result list, so this checks that the arm does not disturb an out-of-family leading answer.",
+      "answer": "ozagia::doc:docs/federation.md",
+      "answer_path": "docs/federation.md",
+      "distractor": null,
+      "distractor_path": null,
+      "baseline": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "family_boost": {
+        "rank": 1,
+        "hit@1": true,
+        "hit@3": true,
+        "hit@5": true,
+        "reciprocal_rank": 1.0
+      },
+      "baseline_distractor_rank": null,
+      "family_boost_distractor_rank": null,
+      "answer_family_match": false,
+      "top_baseline": [
+        {
+          "qualified_key": "ozagia::doc:docs/federation.md",
+          "score": 0.6,
+          "rank_score": 0.6,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::doc:docs/plans/2026-11-17_federated_graphs.md",
+          "score": 0.6,
+          "rank_score": 0.6,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ocelot::test:tests/test_autonomous_discovery_migrated.py::test_complete_opaque_bijection_has_structurally_invariant_graphs",
+          "score": 0.4,
+          "rank_score": 0.4,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::file:docs/plans/2026-11-17_federated_graphs.md",
+          "score": 0.4,
+          "rank_score": 0.4,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::file:src/ozagia/federation_cli.py",
+          "score": 0.4,
+          "rank_score": 0.4,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::sym:src/ozagia/core/infra_discovery.py::is_skipped_path",
+          "score": 0.4,
+          "rank_score": 0.4,
+          "family_match": false
+        }
+      ],
+      "top_family_boost": [
+        {
+          "qualified_key": "ozagia::doc:docs/federation.md",
+          "score": 0.6,
+          "rank_score": 0.6,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::doc:docs/plans/2026-11-17_federated_graphs.md",
+          "score": 0.6,
+          "rank_score": 0.6,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ocelot::test:tests/test_autonomous_discovery_migrated.py::test_complete_opaque_bijection_has_structurally_invariant_graphs",
+          "score": 0.4,
+          "rank_score": 0.55,
+          "family_match": true
+        },
+        {
+          "qualified_key": "ozagia::file:docs/plans/2026-11-17_federated_graphs.md",
+          "score": 0.4,
+          "rank_score": 0.4,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::file:src/ozagia/federation_cli.py",
+          "score": 0.4,
+          "rank_score": 0.4,
+          "family_match": false
+        },
+        {
+          "qualified_key": "ozagia::sym:src/ozagia/core/infra_discovery.py::is_skipped_path",
+          "score": 0.4,
+          "rank_score": 0.4,
+          "family_match": false
+        }
+      ],
+      "delta_rank": 0,
+      "delta_reciprocal_rank": 0.0,
+      "first_family_hit_rank_family_boost": 3
+    }
+  ],
+  "checks": {
+    "passed": true,
+    "checks": [
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "expected answer is present in the boosted results",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "baseline distractor leads the expected answer",
+        "passed": true,
+        "observed": {
+          "answer_rank": 2,
+          "distractor_rank": 1
+        }
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "family boost ranks the expected answer first",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "expected answer is a family match in the boosted arm",
+        "passed": true
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "out-of-family distractor remains visible after re-rank",
+        "passed": true,
+        "observed_rank": 3
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "expected answer is present in the boosted results",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "baseline distractor leads the expected answer",
+        "passed": true,
+        "observed": {
+          "answer_rank": 2,
+          "distractor_rank": 1
+        }
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "family boost ranks the expected answer first",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "expected answer is a family match in the boosted arm",
+        "passed": true
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "out-of-family distractor remains visible after re-rank",
+        "passed": true,
+        "observed_rank": 4
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "expected answer is present in the boosted results",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "baseline distractor leads the expected answer",
+        "passed": true,
+        "observed": {
+          "answer_rank": 3,
+          "distractor_rank": 1
+        }
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "family boost ranks the expected answer first",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "expected answer is a family match in the boosted arm",
+        "passed": true
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "out-of-family distractor remains visible after re-rank",
+        "passed": true,
+        "observed_rank": 4
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "expected answer is present in the boosted results",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "baseline distractor leads the expected answer",
+        "passed": true,
+        "observed": {
+          "answer_rank": 12,
+          "distractor_rank": 1
+        }
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "family boost ranks the expected answer first",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "expected answer is a family match in the boosted arm",
+        "passed": true
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "out-of-family distractor remains visible after re-rank",
+        "passed": true,
+        "observed_rank": 11
+      },
+      {
+        "id": "ozagia-federation-control",
+        "check": "expected answer is present in the boosted results",
+        "passed": true,
+        "observed_rank": 1
+      },
+      {
+        "id": "ozagia-federation-control",
+        "check": "control answer is first in both arms",
+        "passed": true,
+        "observed_rank": [
+          1,
+          1
+        ]
+      },
+      {
+        "id": "ozagia-federation-control",
+        "check": "control metrics are unchanged by the family arm",
+        "passed": true
+      },
+      {
+        "id": "ozagia-federation-control",
+        "check": "control answer is not a family match",
+        "passed": true
+      },
+      {
+        "id": "family-declaration",
+        "check": "the declared family resolves without errors",
+        "passed": true,
+        "observed": "ok"
+      },
+      {
+        "id": "family-declaration",
+        "check": "family membership maps to the anchor and declared member only",
+        "passed": true,
+        "observed": {
+          "bigville": [
+            "simulation-stack"
+          ],
+          "ocelot": [
+            "simulation-stack"
+          ],
+          "ozagia": []
+        }
+      },
+      {
+        "id": "family-declaration",
+        "check": "the anchor is derived and is not repeated in members",
+        "passed": true
+      },
+      {
+        "id": "family-declaration",
+        "check": "the temporary manifest does not list the anchor in members",
+        "passed": true,
+        "observed": [
+          "/tmp/opencode/family-real/ocelot",
+          "/tmp/opencode/family-real/ozagia"
+        ]
+      },
+      {
+        "id": "target-writes",
+        "check": "no target checkout state file changed",
+        "passed": true,
+        "observed": {
+          "bigville": false,
+          "ocelot": false,
+          "ozagia": false
+        }
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "answer file exists in the bigville checkout",
+        "passed": true,
+        "path": "/applications/data/projects/bigville/docs/SIMPLE_SCENARIO_COVERAGE_AUDIT.md"
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "answer Doc key exists in the bigville snapshot",
+        "passed": true,
+        "key": "doc:docs/SIMPLE_SCENARIO_COVERAGE_AUDIT.md"
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "distractor file exists in the ozagia checkout",
+        "passed": true,
+        "path": "/home/matt/ozmadev/ozagia/docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "distractor Doc key exists in the ozagia snapshot",
+        "passed": true,
+        "key": "doc:docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "answer file exists in the bigville checkout",
+        "passed": true,
+        "path": "/applications/data/projects/bigville/docs/SIMPLE_BOUNDARY_AUDIT.md"
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "answer Doc key exists in the bigville snapshot",
+        "passed": true,
+        "key": "doc:docs/SIMPLE_BOUNDARY_AUDIT.md"
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "distractor file exists in the ozagia checkout",
+        "passed": true,
+        "path": "/home/matt/ozmadev/ozagia/docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "distractor Doc key exists in the ozagia snapshot",
+        "passed": true,
+        "key": "doc:docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "answer file exists in the bigville checkout",
+        "passed": true,
+        "path": "/applications/data/projects/bigville/docs/SIMPLE_VILLAGE_TEST_PLAN.md"
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "answer Doc key exists in the bigville snapshot",
+        "passed": true,
+        "key": "doc:docs/SIMPLE_VILLAGE_TEST_PLAN.md"
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "distractor file exists in the ozagia checkout",
+        "passed": true,
+        "path": "/home/matt/ozmadev/ozagia/docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "distractor Doc key exists in the ozagia snapshot",
+        "passed": true,
+        "key": "doc:docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "answer file exists in the bigville checkout",
+        "passed": true,
+        "path": "/applications/data/projects/bigville/docs/ocelot-integration-baseline.md"
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "answer Doc key exists in the bigville snapshot",
+        "passed": true,
+        "key": "doc:docs/ocelot-integration-baseline.md"
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "distractor file exists in the ozagia checkout",
+        "passed": true,
+        "path": "/home/matt/ozmadev/ozagia/docs/plans/2026-11-26_ocelot_workspace.md"
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "distractor Doc key exists in the ozagia snapshot",
+        "passed": true,
+        "key": "doc:docs/plans/2026-11-26_ocelot_workspace.md"
+      },
+      {
+        "id": "ozagia-federation-control",
+        "check": "answer file exists in the ozagia checkout",
+        "passed": true,
+        "path": "/home/matt/ozmadev/ozagia/docs/federation.md"
+      },
+      {
+        "id": "ozagia-federation-control",
+        "check": "answer Doc key exists in the ozagia snapshot",
+        "passed": true,
+        "key": "doc:docs/federation.md"
+      }
+    ]
+  },
+  "decision": {
+    "default": "off",
+    "default_change_authorized": false,
+    "reason": "The mechanism changed the ranking on this sample, but all family queries are constructed near-ties and the sample is not a representative real-query benchmark. The default stays family_boost=False; changing it requires a representative paired evaluation with no regression and a meaningful gain."
+  },
+  "limits": [
+    "One anchor, one declared family member and one unrelated distractor; four constructed family queries plus one control.",
+    "The family queries were selected after reading real document titles and paths as near-ties inside the fixed +0.15 boost. They measure the mechanism in this regime, not the rate at which real queries are near-ties.",
+    "Lexical search only: it matches node type, key and string attrs such as name/path/title. It does not read document bodies, use embeddings, call a model or fetch the network.",
+    "Snapshots are built with --docs features --no-git. Adapter indexers are not loaded, so adapter-produced nodes are absent. The Ocelot and Bigville story is still real source/document data.",
+    "Snapshots live in temporary member roots while their Repo attrs record the real checkouts. Federation therefore reports the snapshots as stale with 'snapshot root differs from checkout path'; search still loads and ranks them.",
+    "Expected answers are Doc nodes. The matching File node can also appear separately and is not counted as the answer.",
+    "The temporary build configurations are evaluation choices (for example, skipped generated run trees); they are recorded for reproduction but are not target-project configuration changes.",
+    "The script's own JSON/Markdown reports are excluded from the temporary Ozagia snapshot when they lie under that checkout, so a repeated run does not index its previous report as corpus.",
+    "No target checkout is imported or written; no graph file is committed; no commit, network or model call is made."
+  ],
+  "workdir": "/tmp/opencode/family-real",
+  "root": "/tmp/opencode/family-real/bigville",
+  "manifest": {
+    "version": 1,
+    "members": [
+      {
+        "path": "/tmp/opencode/family-real/ocelot",
+        "id": "ocelot"
+      },
+      {
+        "path": "/tmp/opencode/family-real/ozagia",
+        "id": "ozagia"
+      }
+    ],
+    "families": [
+      {
+        "id": "simulation-stack",
+        "label": "Bigville/Ocelot simulation stack",
+        "members": [
+          "bigville",
+          "ocelot"
+        ],
+        "provenance": "evaluation fixture declaration; real checkouts, no runtime dependency inferred"
+      }
+    ],
+    "links": []
+  },
+  "builds": {
+    "bigville": {
+      "root": "/applications/data/projects/bigville",
+      "snapshot": "/tmp/opencode/family-real/bigville/.ozagia/graph.json",
+      "config_path": "/tmp/opencode/family-real/configs/bigville.toml",
+      "command": [
+        "/home/matt/ozmadev/ozagia/.venv/bin/python",
+        "-m",
+        "ozagia.core.memory",
+        "build",
+        "--root",
+        "/applications/data/projects/bigville",
+        "--out",
+        "/tmp/opencode/family-real/bigville/.ozagia/graph.json",
+        "--docs",
+        "features",
+        "--no-git",
+        "--no-language-install"
+      ],
+      "seconds": 3.94,
+      "build_report": {
+        "out": "/tmp/opencode/family-real/bigville/.ozagia/graph.json",
+        "nodes": 9385,
+        "edges": 37302,
+        "types": {
+          "Doc": 230,
+          "File": 845,
+          "Repo": 1,
+          "Symbol": 5347,
+          "Test": 2962
+        },
+        "edge_types": {
+          "tests_module": 13320,
+          "defines": 5577,
+          "defined_in": 5577,
+          "has_test": 2962,
+          "tested_by_file": 2962,
+          "contains_symbol": 2099,
+          "documents": 1862,
+          "imports": 1443,
+          "contains": 845,
+          "mentions_file": 425,
+          "has_doc": 230
+        },
+        "seconds": 3.84,
+        "root": "/applications/data/projects/bigville"
+      },
+      "excluded_paths": [],
+      "stderr_tail": "",
+      "raw_build_report": {
+        "out": "/tmp/opencode/family-real/bigville/.ozagia/graph.json",
+        "nodes": 9385,
+        "edges": 37302,
+        "types": {
+          "Symbol": 5347,
+          "Test": 2962,
+          "File": 845,
+          "Doc": 230,
+          "Repo": 1
+        },
+        "edge_types": {
+          "tests_module": 13320,
+          "defines": 5577,
+          "defined_in": 5577,
+          "has_test": 2962,
+          "tested_by_file": 2962,
+          "contains_symbol": 2099,
+          "documents": 1862,
+          "imports": 1443,
+          "contains": 845,
+          "mentions_file": 425,
+          "has_doc": 230
+        },
+        "seconds": 3.84,
+        "root": "/applications/data/projects/bigville"
+      },
+      "snapshot_sha256": "39544d83e697127e1c95295df26e1475a4f660c9af0a19fcef0b25f927a8cd34",
+      "nodes": 9385,
+      "edges": 37302,
+      "types": {
+        "Doc": 230,
+        "File": 845,
+        "Repo": 1,
+        "Symbol": 5347,
+        "Test": 2962
+      }
+    },
+    "ocelot": {
+      "root": "/applications/data/projects/ocelot",
+      "snapshot": "/tmp/opencode/family-real/ocelot/.ozagia/graph.json",
+      "config_path": "/tmp/opencode/family-real/configs/ocelot.toml",
+      "command": [
+        "/home/matt/ozmadev/ozagia/.venv/bin/python",
+        "-m",
+        "ozagia.core.memory",
+        "build",
+        "--root",
+        "/applications/data/projects/ocelot",
+        "--out",
+        "/tmp/opencode/family-real/ocelot/.ozagia/graph.json",
+        "--docs",
+        "features",
+        "--no-git",
+        "--no-language-install"
+      ],
+      "seconds": 97.68,
+      "build_report": {
+        "out": "/tmp/opencode/family-real/ocelot/.ozagia/graph.json",
+        "nodes": 87857,
+        "edges": 253080,
+        "types": {
+          "Doc": 4710,
+          "Failure": 216,
+          "File": 11703,
+          "Repo": 1,
+          "Symbol": 56086,
+          "Test": 15141
+        },
+        "edge_types": {
+          "defines": 60796,
+          "defined_in": 60796,
+          "tests_module": 34984,
+          "mentions_file": 18079,
+          "has_test": 15141,
+          "tested_by_file": 15141,
+          "imports": 11843,
+          "contains": 11703,
+          "documents": 9598,
+          "contains_symbol": 9464,
+          "has_doc": 4710,
+          "has_failure": 432,
+          "in_file": 216,
+          "refers_to": 177
+        },
+        "seconds": 97.41,
+        "root": "/applications/data/projects/ocelot"
+      },
+      "excluded_paths": [],
+      "stderr_tail": "",
+      "raw_build_report": {
+        "out": "/tmp/opencode/family-real/ocelot/.ozagia/graph.json",
+        "nodes": 87857,
+        "edges": 253080,
+        "types": {
+          "Symbol": 56086,
+          "Test": 15141,
+          "File": 11703,
+          "Doc": 4710,
+          "Failure": 216,
+          "Repo": 1
+        },
+        "edge_types": {
+          "defines": 60796,
+          "defined_in": 60796,
+          "tests_module": 34984,
+          "mentions_file": 18079,
+          "has_test": 15141,
+          "tested_by_file": 15141,
+          "imports": 11843,
+          "contains": 11703,
+          "documents": 9598,
+          "contains_symbol": 9464,
+          "has_doc": 4710,
+          "has_failure": 432,
+          "in_file": 216,
+          "refers_to": 177
+        },
+        "seconds": 97.41,
+        "root": "/applications/data/projects/ocelot"
+      },
+      "snapshot_sha256": "5cc6708d874a8cbb0c5a93089da9b548ae9bc54bd1cce8e1f13ca36724cab9e2",
+      "nodes": 87857,
+      "edges": 253080,
+      "types": {
+        "Doc": 4710,
+        "Failure": 216,
+        "File": 11703,
+        "Repo": 1,
+        "Symbol": 56086,
+        "Test": 15141
+      }
+    },
+    "ozagia": {
+      "root": "/home/matt/ozmadev/ozagia",
+      "snapshot": "/tmp/opencode/family-real/ozagia/.ozagia/graph.json",
+      "config_path": "/tmp/opencode/family-real/configs/ozagia.toml",
+      "command": [
+        "/home/matt/ozmadev/ozagia/.venv/bin/python",
+        "-m",
+        "ozagia.core.memory",
+        "build",
+        "--root",
+        "/home/matt/ozmadev/ozagia",
+        "--out",
+        "/tmp/opencode/family-real/ozagia/.ozagia/graph.json",
+        "--docs",
+        "features",
+        "--no-git",
+        "--no-language-install"
+      ],
+      "seconds": 6.94,
+      "build_report": {
+        "out": "/tmp/opencode/family-real/ozagia/.ozagia/graph.json",
+        "nodes": 20470,
+        "edges": 66657,
+        "types": {
+          "Doc": 324,
+          "File": 1136,
+          "Repo": 1,
+          "Symbol": 13558,
+          "Test": 5451
+        },
+        "edge_types": {
+          "tests_module": 20359,
+          "defines": 13883,
+          "defined_in": 13883,
+          "has_test": 5451,
+          "tested_by_file": 5451,
+          "contains_symbol": 2360,
+          "imports": 1930,
+          "contains": 1137,
+          "mentions_file": 964,
+          "documents": 922,
+          "has_doc": 325
+        },
+        "seconds": 6.82,
+        "root": "/home/matt/ozmadev/ozagia"
+      },
+      "excluded_paths": [
+        "docs/results/family_retrieval_real_2026-11-27.json",
+        "docs/results/family_retrieval_real_2026-11-27.md"
+      ],
+      "stderr_tail": "",
+      "raw_build_report": {
+        "out": "/tmp/opencode/family-real/ozagia/.ozagia/graph.json",
+        "nodes": 20472,
+        "edges": 66665,
+        "types": {
+          "Symbol": 13558,
+          "Test": 5451,
+          "File": 1137,
+          "Doc": 325,
+          "Repo": 1
+        },
+        "edge_types": {
+          "tests_module": 20359,
+          "defines": 13883,
+          "defined_in": 13883,
+          "has_test": 5451,
+          "tested_by_file": 5451,
+          "contains_symbol": 2360,
+          "imports": 1930,
+          "contains": 1137,
+          "mentions_file": 964,
+          "documents": 922,
+          "has_doc": 325
+        },
+        "seconds": 6.82,
+        "root": "/home/matt/ozmadev/ozagia"
+      },
+      "snapshot_sha256": "3381b4cb2bc2d3472720a5329a365fa6fd41f9e959b0c9ae86c7f29b35e9ab04",
+      "nodes": 20470,
+      "edges": 66657,
+      "types": {
+        "Doc": 324,
+        "File": 1136,
+        "Repo": 1,
+        "Symbol": 13558,
+        "Test": 5451
+      }
+    }
+  },
+  "configs": {
+    "bigville": "[index]\nsource_dirs = [\".\"]\ntest_dirs = [\"tests\"]\nskip_dirs = [\"runs\", \"artifacts\", \"recordings\", \"scratch_rr\", \"scratchpad3\", \".bigtmp\"]\ndocs = [\"README.md\", \"docs/**/*.md\"]\n\n[memory]\nskip_dirs = []\n",
+    "ocelot": "[index]\nsource_dirs = [\"runners/dsl/src\", \"runners/dsl/tests\", \"domains\", \"domains_rs\", \"worlds\", \"substrate\", \"tools\", \"scripts\"]\ntest_dirs = [\"tests\"]\nskip_dirs = [\"data\", \"var\", \"runs\", \"recordings\", \"scratch_rr\", \"scratchpad3\", \".bigtmp\", \"evaluation\", \"benchmarks\", \"papers\", \"drafts\", \"domain_data\", \"semantic-review\", \"attestation\"]\ndocs = [\"README.md\", \"docs/**/*.md\"]\n\n[memory]\nskip_dirs = [\".venv-jsbsim-f16\", \"vizdoom\"]\n",
+    "ozagia": "[index]\nsource_dirs = [\"src\", \"tests\", \"evaluation\", \"scripts\", \"tools\", \"examples\", \"addins\"]\ntest_dirs = [\"tests\"]\nskip_dirs = [\"runs\", \"artifacts\", \"node_modules\", \"recordings\"]\ndocs = [\"README.md\", \"docs/**/*.md\"]\n\n[memory]\nskip_dirs = []\n"
+  },
+  "target_checkouts": {
+    "bigville": {
+      "root": "/applications/data/projects/bigville",
+      "head_before": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+      "head_after": "e243ea70eee2a9ca5a55dfe62b9e29214f82cc87",
+      "state_before": {
+        "graph.json": null,
+        "federation.json": null,
+        "tags.json": null,
+        "tags.json.search.marshal": null
+      },
+      "state_after": {
+        "graph.json": null,
+        "federation.json": null,
+        "tags.json": null,
+        "tags.json.search.marshal": null
+      },
+      "state_changed": false
+    },
+    "ocelot": {
+      "root": "/applications/data/projects/ocelot",
+      "head_before": "b7fda1c9dcc7a0c86f259f4083f66f65260605aa",
+      "head_after": "b7fda1c9dcc7a0c86f259f4083f66f65260605aa",
+      "state_before": {
+        "graph.json": null,
+        "federation.json": null,
+        "tags.json": {
+          "size": 265440627,
+          "mtime_ns": 1794709438362495669
+        },
+        "tags.json.search.marshal": {
+          "size": 41281530,
+          "mtime_ns": 1794709446566576248
+        }
+      },
+      "state_after": {
+        "graph.json": null,
+        "federation.json": null,
+        "tags.json": {
+          "size": 265440627,
+          "mtime_ns": 1794709438362495669
+        },
+        "tags.json.search.marshal": {
+          "size": 41281530,
+          "mtime_ns": 1794709446566576248
+        }
+      },
+      "state_changed": false
+    },
+    "ozagia": {
+      "root": "/home/matt/ozmadev/ozagia",
+      "head_before": "dc3bc2367dcc88039f43a6b9fd844a304ea21a74",
+      "head_after": "dc3bc2367dcc88039f43a6b9fd844a304ea21a74",
+      "state_before": {
+        "graph.json": {
+          "size": 12464784,
+          "mtime_ns": 1795724611323843896
+        },
+        "federation.json": null,
+        "tags.json": {
+          "size": 71400919,
+          "mtime_ns": 1795724768052398131
+        },
+        "tags.json.search.marshal": {
+          "size": 5363922,
+          "mtime_ns": 1795724769240409909
+        }
+      },
+      "state_after": {
+        "graph.json": {
+          "size": 12464784,
+          "mtime_ns": 1795724611323843896
+        },
+        "federation.json": null,
+        "tags.json": {
+          "size": 71400919,
+          "mtime_ns": 1795724768052398131
+        },
+        "tags.json.search.marshal": {
+          "size": 5363922,
+          "mtime_ns": 1795724769240409909
+        }
+      },
+      "state_changed": false
+    }
+  },
+  "source_checks": {
+    "passed": true,
+    "checks": [
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "answer file exists in the bigville checkout",
+        "passed": true,
+        "path": "/applications/data/projects/bigville/docs/SIMPLE_SCENARIO_COVERAGE_AUDIT.md"
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "answer Doc key exists in the bigville snapshot",
+        "passed": true,
+        "key": "doc:docs/SIMPLE_SCENARIO_COVERAGE_AUDIT.md"
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "distractor file exists in the ozagia checkout",
+        "passed": true,
+        "path": "/home/matt/ozmadev/ozagia/docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-scenario-coverage-near-tie",
+        "check": "distractor Doc key exists in the ozagia snapshot",
+        "passed": true,
+        "key": "doc:docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "answer file exists in the bigville checkout",
+        "passed": true,
+        "path": "/applications/data/projects/bigville/docs/SIMPLE_BOUNDARY_AUDIT.md"
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "answer Doc key exists in the bigville snapshot",
+        "passed": true,
+        "key": "doc:docs/SIMPLE_BOUNDARY_AUDIT.md"
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "distractor file exists in the ozagia checkout",
+        "passed": true,
+        "path": "/home/matt/ozmadev/ozagia/docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-boundary-audit-near-tie",
+        "check": "distractor Doc key exists in the ozagia snapshot",
+        "passed": true,
+        "key": "doc:docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "answer file exists in the bigville checkout",
+        "passed": true,
+        "path": "/applications/data/projects/bigville/docs/SIMPLE_VILLAGE_TEST_PLAN.md"
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "answer Doc key exists in the bigville snapshot",
+        "passed": true,
+        "key": "doc:docs/SIMPLE_VILLAGE_TEST_PLAN.md"
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "distractor file exists in the ozagia checkout",
+        "passed": true,
+        "path": "/home/matt/ozmadev/ozagia/docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-test-plan-near-tie",
+        "check": "distractor Doc key exists in the ozagia snapshot",
+        "passed": true,
+        "key": "doc:docs/results/bigville_test_coverage_audit_2026-11-27.md"
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "answer file exists in the bigville checkout",
+        "passed": true,
+        "path": "/applications/data/projects/bigville/docs/ocelot-integration-baseline.md"
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "answer Doc key exists in the bigville snapshot",
+        "passed": true,
+        "key": "doc:docs/ocelot-integration-baseline.md"
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "distractor file exists in the ozagia checkout",
+        "passed": true,
+        "path": "/home/matt/ozmadev/ozagia/docs/plans/2026-11-26_ocelot_workspace.md"
+      },
+      {
+        "id": "bigville-ocelot-integration-near-tie",
+        "check": "distractor Doc key exists in the ozagia snapshot",
+        "passed": true,
+        "key": "doc:docs/plans/2026-11-26_ocelot_workspace.md"
+      },
+      {
+        "id": "ozagia-federation-control",
+        "check": "answer file exists in the ozagia checkout",
+        "passed": true,
+        "path": "/home/matt/ozmadev/ozagia/docs/federation.md"
+      },
+      {
+        "id": "ozagia-federation-control",
+        "check": "answer Doc key exists in the ozagia snapshot",
+        "passed": true,
+        "key": "doc:docs/federation.md"
+      }
+    ]
+  },
+  "target_writes": {
+    "detected": false,
+    "by_member": {
+      "bigville": false,
+      "ocelot": false,
+      "ozagia": false
+    },
+    "note": "Only the three temporary snapshot directories under the work directory are written. Target checkout state files are probed before and after; none may change."
+  }
+}
