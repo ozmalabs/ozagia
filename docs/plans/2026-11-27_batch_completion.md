@@ -14,7 +14,7 @@ is tracked under "Audit remediation" below.
 | W1 Ocelot workspace | complete | 126 Ocelot/task-library tests, Ruff clean, CLI/MCP surface checked |
 | W2 repo/API relationships | complete | 76 targeted tests, Ruff clean, five new edge-case tests |
 | W3 Bigville integration | complete | Bigville adapter/project-invariant tests 10 passed; docs example validated |
-| W4 combined verification | complete | 7,317 passed, 27 skipped; Ruff clean; 47 reference pages and REPO_SHAPE current |
+| W4 combined verification | complete | 7,318 passed, 27 skipped; Ruff clean; 47 reference pages and REPO_SHAPE current |
 | W5 adapter-declared bridges | complete | 50 focused tests, 106 broader tests, Ruff clean, Bigville evidence spot check |
 | W6 persisted supergraph | complete | 14 new tests, 47 targeted tests, Ruff clean, CLI smoke |
 | W7 family-aware retrieval | complete | 39 core tests + CLI/MCP surface tests (69 in the follow-up), fixture eval recorded, Ruff clean |
@@ -182,17 +182,22 @@ every member node.
   mappings and validation errors, plus a deterministic content hash. It does
   **not** persist every member node; member snapshots remain the source of
   graph detail. Call it the relationship supergraph, not a full node union.
-- Incremental refresh: key each member contribution by member id + snapshot
-  hash + federation-manifest hash; rebuild only changed contributions. A
-  missing, stale or corrupt artifact reports `unknown` with the rebuild
-  command. Writes are atomic (temp + replace) and never touch a member.
+- Freshness/refresh: key each member contribution by member id + snapshot hash
+  + federation-manifest hash. An unchanged artifact is a cache hit; a changed
+  source rebuilds the whole relationship report. Per-member fragment caching
+  remains a follow-on. A missing, stale or corrupt artifact reports
+  `absent`/`invalid`/`stale` with the rebuild command. Writes are atomic
+  (temp + replace) and never touch a member snapshot.
 - Query: `ozagia federation graph --root ...` reads a fresh artifact;
-  `--refresh` rebuilds. `relations`/`check` remain functional without it and
-  include persisted-artifact metadata when present. Avoid a new MCP tool unless
-  the existing `federation_check` section is insufficient.
+  `--refresh` rebuilds. `relations --write` persists and returns the graph with
+  `persisted` metadata; `relations --cached` reads a fresh artifact and fails
+  non-zero when absent/stale/invalid. `relations`/`check` remain functional
+  without it. Avoid a new MCP tool unless the existing `federation_check`
+  section is insufficient.
 - Bounds: member count, edge/reference counts, artifact byte cap, and bounded
   errors. Tests cover deterministic build, fresh/stale/corrupt reads,
-  incremental member updates, atomic failure and no member writes.
+  source-hash freshness, atomic failure, explicit-output safety and no member
+  writes.
 - Acceptance: the on-demand `relations` report and the persisted report agree;
   targeted tests and Ruff pass. A full node-union supergraph is explicitly out
   of scope unless requested separately.
@@ -273,10 +278,10 @@ Final run, 2026-11-27:
 
 | Check | Result |
 | --- | --- |
-| Full suite | 7,317 passed, 27 skipped, 0 failed |
+| Full suite | 7,318 passed, 27 skipped, 0 failed |
 | Ruff | clean across `src`, `tests`, `addins`, evaluation and docs generator |
 | Reference docs | 47 pages, up to date; deterministic at width 80 and 140 |
-| `REPO_SHAPE.md` | current (`sha256:3dbfe0ed...a20308`) |
+| `REPO_SHAPE.md` | current (`sha256:0e30fb9c...c746`) |
 | Task library | 15 built-in classes, valid |
 | Target writes / live calls | none; real Ocelot applies and live evaluation remain approval-gated |
 

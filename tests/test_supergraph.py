@@ -401,6 +401,41 @@ def test_artifact_size_is_bounded(tmp_path, monkeypatch):
     assert not (anchor / ".ozagia" / supergraph.DEFAULT_NAME).exists()
 
 
+def test_cli_relations_write_and_cached(tmp_path, monkeypatch, capsys):
+    anchor, member = _workspace(tmp_path, monkeypatch)
+
+    assert main(["relations", "--root", str(anchor), "--write",
+                 "--no-sync", "--json"]) == 0
+    written = json.loads(capsys.readouterr().out)
+    assert written["persisted"]["state"] == "fresh"
+    assert written["persisted"]["path"].endswith(supergraph.DEFAULT_NAME)
+    assert written["members"]
+    assert Path(written["persisted"]["path"]).is_file()
+
+    assert main(["relations", "--root", str(anchor), "--cached",
+                 "--no-sync", "--json"]) == 0
+    cached = json.loads(capsys.readouterr().out)
+    assert cached["persisted"]["state"] == "fresh"
+    assert cached["edges"] == written["edges"]
+    assert cached["members"] == written["members"]
+
+    _snapshot(member, "member", summary="changed")
+    assert main(["relations", "--root", str(anchor), "--cached",
+                 "--no-sync", "--json"]) == 2
+    stale = json.loads(capsys.readouterr().out)
+    assert stale["state"] == "stale"
+    assert stale["ok"] is False
+    assert stale["changed"] == ["member"]
+    assert "graph" not in stale
+
+    missing = tmp_path / "missing" / "supergraph.json"
+    assert main(["relations", "--root", str(anchor), "--cached",
+                 "--out", str(missing), "--no-sync", "--json"]) == 2
+    absent = json.loads(capsys.readouterr().out)
+    assert absent["state"] == "absent"
+    assert absent["ok"] is False
+
+
 def test_cli_build_and_graph_paths(tmp_path, monkeypatch, capsys):
     anchor, member = _workspace(tmp_path, monkeypatch)
     calls: list[str] = []

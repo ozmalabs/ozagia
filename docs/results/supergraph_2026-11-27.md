@@ -84,6 +84,12 @@ ozagia federation graph --root /path/to/anchor
 # Read, rebuilding only when the artifact is absent, stale, invalid or for a
 # different explicit selection.
 ozagia federation graph --root /path/to/anchor --refresh
+
+# Live relations, persisted atomically, with a `persisted` metadata section.
+ozagia federation relations --root /path/to/anchor --write
+
+# Read the persisted relations; exits non-zero when absent, stale or invalid.
+ozagia federation relations --root /path/to/anchor --cached
 ```
 
 All commands accept `--json`; `--no-sync` suppresses reference fast-forward for
@@ -103,7 +109,7 @@ Python API: `build(root, roots=None)`, `write(root, roots=None, out=None)`,
   src/ozagia/federation_cli.py tests/test_supergraph.py
 ```
 
-Result: 37 targeted tests pass; Ruff reports no findings.
+Result: 38 targeted tests pass; Ruff reports no findings.
 
 ## Limits and follow-ons
 

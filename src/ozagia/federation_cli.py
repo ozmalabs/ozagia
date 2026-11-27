@@ -6,7 +6,7 @@ Usage::
     ozagia federation search QUERY [--root R] [--repo R ...] [--limit N] [--family-boost]
     ozagia federation node QUALIFIED_KEY [--root R] [--repo R ...]
     ozagia federation check [--root R] [--repo R ...]
-    ozagia federation relations [--root R] [--repo R ...]
+    ozagia federation relations [--root R] [--repo R ...] [--write|--cached] [--out PATH]
     ozagia federation build [--root R] [--repo R ...] [--out PATH]
     ozagia federation graph [--root R] [--repo R ...] [--out PATH] [--refresh]
     ozagia federation sync [--root R] [--repo R ...]
@@ -50,12 +50,21 @@ def _parser(prog: str) -> argparse.ArgumentParser:
                      "the anchor (opt-in; default off)")
         elif name == "node":
             item.add_argument("qualified_key")
-        if name in {"build", "graph"}:
+        if name in {"build", "graph", "relations"}:
             item.add_argument("--out", default=None,
                               help="artifact path (default: state dir supergraph.json)")
         if name == "graph":
             item.add_argument("--refresh", action="store_true",
                               help="rebuild the artifact when it is absent, stale or invalid")
+        if name == "relations":
+            artifact = item.add_mutually_exclusive_group()
+            artifact.add_argument(
+                "--write", action="store_true",
+                help="write the persisted relationship supergraph and return it")
+            artifact.add_argument(
+                "--cached", action="store_true",
+                help="read the persisted relationship supergraph instead of "
+                     "querying live members")
         item.add_argument("--root", default=None,
                           help="discovery anchor (default: current repository)")
         item.add_argument("--repo", action="append", default=None, dest="roots",
@@ -104,8 +113,30 @@ def run(argv: list[str] | None = None, *, prog: str = "ozagia federation") -> in
                 result = (supergraph.refresh(root, roots=roots, out=args.out)
                           if args.refresh else supergraph.read(root, out=args.out))
             elif args.command == "relations":
-                from ozagia.core import cross_repo
-                result = cross_repo.relations(root, roots=roots)
+                from ozagia.core import cross_repo, supergraph
+                meta_keys = ("schema", "path", "state", "generated_at",
+                             "content_hash", "source_hashes", "counts",
+                             "artifact", "changed", "changed_sources", "reason",
+                             "rebuild", "bytes")
+                if args.cached:
+                    cached = supergraph.read(root, out=args.out)
+                    if cached.get("state") != "fresh":
+                        result = {key: value for key, value in cached.items()
+                                  if key != "graph"}
+                        result["ok"] = False
+                    else:
+                        result = dict(cached.get("graph") or {})
+                        result["persisted"] = {
+                            key: cached.get(key) for key in meta_keys}
+                        result["ok"] = True
+                elif args.write:
+                    written = supergraph.write(root, roots=roots, out=args.out)
+                    result = dict(written.get("graph") or {})
+                    result["persisted"] = {
+                        key: written.get(key) for key in meta_keys}
+                    result["ok"] = True
+                else:
+                    result = cross_repo.relations(root, roots=roots)
             else:
                 from ozagia.core import cross_repo
                 result = cross_repo.check(root, roots=roots)

@@ -699,6 +699,12 @@ node and edge detail.
 different explicit `--repo` selection. `--no-sync` suppresses reference
 fast-forward for both commands.
 
+`ozagia federation relations --write` builds and writes the artifact, then
+returns the relationship graph with a `persisted` metadata section.
+`relations --cached` reads a fresh artifact instead of querying members live;
+it exits non-zero for an absent, stale or invalid artifact and includes the
+rebuild command. `--out` selects the artifact path for both.
+
 Freshness is source-hash based: each selected member's snapshot bytes and the
 anchor's `federation.json` bytes are hashed into the artifact, and `read`
 recomputes them. Results are `fresh`, `stale`, `absent` or `invalid` and
