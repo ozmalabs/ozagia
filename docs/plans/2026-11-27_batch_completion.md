@@ -281,7 +281,7 @@ Final run, 2026-11-27:
 | Full suite | 7,318 passed, 27 skipped, 0 failed |
 | Ruff | clean across `src`, `tests`, `addins`, evaluation and docs generator |
 | Reference docs | 47 pages, up to date; deterministic at width 80 and 140 |
-| `REPO_SHAPE.md` | current (`sha256:ad4ec0fa...8766`) |
+| `REPO_SHAPE.md` | current (`sha256:e902d97f...bbf`) |
 | Task library | 15 built-in classes, valid |
 | Family ranking | fixture + real-snapshot near-tie + curated-task robustness checks; curated-task replay showed limited lexical recall; default remains off pending a representative real-query evaluation |
 | Target writes / live calls | none; real Ocelot applies and live evaluation remain approval-gated |
